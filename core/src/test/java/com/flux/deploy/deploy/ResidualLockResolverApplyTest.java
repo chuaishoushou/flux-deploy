@@ -69,4 +69,28 @@ class ResidualLockResolverApplyTest {
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("人工");
     }
+
+    @Test
+    void apply_nullDiagnosis_throwsIllegalArgument() {
+        RecordingProbe probe = new RecordingProbe();
+        ResidualLockResolver r = new ResidualLockResolver(probe, "alice");
+        assertThatThrownBy(() -> r.apply(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("缺少必要字段");
+    }
+
+    @Test
+    void apply_diagnosisWithoutRemoteDir_throwsIllegalArgument() {
+        RecordingProbe probe = new RecordingProbe();
+        ResidualLockResolver r = new ResidualLockResolver(probe, "alice");
+        ResidualLockDiagnosis d = ResidualLockDiagnosis.builder()
+                .lockFileName("x")
+                .originalPackageName("a.war")
+                // remoteDir 留空
+                .suggestion(ResidualLockDiagnosis.SuggestedAction.RESTORE_LOCK)
+                .build();
+        assertThatThrownBy(() -> r.apply(d))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("缺少必要字段");
+    }
 }

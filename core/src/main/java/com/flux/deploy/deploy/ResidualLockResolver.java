@@ -129,6 +129,13 @@ public class ResidualLockResolver {
      * @throws IOException FTP 操作失败，或 suggestion=NEEDS_HUMAN 时拒绝执行
      */
     public void apply(ResidualLockDiagnosis d) throws IOException {
+        if (d == null
+                || d.getRemoteDir() == null
+                || d.getOriginalPackageName() == null
+                || d.getLockFileName() == null
+                || d.getSuggestion() == null) {
+            throw new IllegalArgumentException("ResidualLockDiagnosis 缺少必要字段，无法执行 apply: " + d);
+        }
         String dir = ensureSlash(d.getRemoteDir());
         String lockPath = dir + d.getLockFileName();
         switch (d.getSuggestion()) {
@@ -139,9 +146,10 @@ public class ResidualLockResolver {
                 probe.delete(lockPath);
                 return;
             case NEEDS_HUMAN:
-            default:
                 throw new IOException("该残留锁需要人工介入处理: " + d.getLockFileName()
                         + "（" + d.getReason() + "）");
+            default:
+                throw new IllegalStateException("未知的 SuggestedAction: " + d.getSuggestion());
         }
     }
 
