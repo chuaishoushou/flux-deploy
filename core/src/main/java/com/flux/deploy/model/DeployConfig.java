@@ -1,5 +1,7 @@
 package com.flux.deploy.model;
 
+import com.flux.deploy.deploy.CancellationToken;
+
 import java.nio.file.Path;
 import java.util.List;
 
@@ -78,6 +80,24 @@ public class DeployConfig {
 
     /** 变更源文件列表（相对 projectDir），可含 git status 前缀 "M path" / "D path" 等 */
     private List<String> changedFiles;
+
+    /** Stage 0 残留锁处理策略 */
+    private ResidualLockPolicy residualLockPolicy = ResidualLockPolicy.FAIL;
+
+    /** 取消令牌（IDE / CLI 注入，默认永不取消） */
+    private CancellationToken cancellationToken = CancellationToken.NOOP;
+
+    /**
+     * Stage 0 残留锁处理策略
+     */
+    public enum ResidualLockPolicy {
+        /** 默认：发现残留锁就报错退出（让用户介入） */
+        FAIL,
+        /** CLI flag --auto-resolve-own：自己的自动清，别人的报错 */
+        AUTO_RESOLVE_OWN,
+        /** IDE 端：UI 已经把残留锁清完了，Stage 0 应直接通过 */
+        EXTERNAL_RESOLVED
+    }
 
     /**
      * WAR 嵌入目标，描述需要嵌入 JAR 的 WAR 包信息
@@ -172,4 +192,10 @@ public class DeployConfig {
 
     public List<String> getChangedFiles() { return changedFiles; }
     public void setChangedFiles(List<String> changedFiles) { this.changedFiles = changedFiles; }
+
+    public ResidualLockPolicy getResidualLockPolicy() { return residualLockPolicy; }
+    public void setResidualLockPolicy(ResidualLockPolicy v) { this.residualLockPolicy = v; }
+
+    public CancellationToken getCancellationToken() { return cancellationToken; }
+    public void setCancellationToken(CancellationToken v) { this.cancellationToken = v != null ? v : CancellationToken.NOOP; }
 }

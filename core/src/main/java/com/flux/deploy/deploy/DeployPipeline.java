@@ -70,15 +70,20 @@ public class DeployPipeline {
                 return result;
             }
 
+            FtpLock ftpLock = new FtpLock(ops);
+            Rollback rollback = new Rollback(ops, ftpLock);
+
+            // === Stage 0: 残留锁诊断与解析 ===
+            if (!config.isSkipLock() && !runStage0(ops, ftpLock, targets, result)) {
+                return result;
+            }
+
             // 2b. 增量/自动模式：为每个目标构建 staging 包（下载远端 + 打补丁）
             if (!"full".equalsIgnoreCase(config.getMode())) {
                 if (!runStagingForTargets(targets, result)) {
                     return result; // staging 失败，错误已记录
                 }
             }
-
-            FtpLock ftpLock = new FtpLock(ops);
-            Rollback rollback = new Rollback(ops, ftpLock);
 
             // 3. 构建门禁序列（根据配置跳过已在外部处理的步骤）
             List<Gate> gates = new ArrayList<>();
@@ -113,6 +118,73 @@ public class DeployPipeline {
         }
 
         return result;
+    }
+
+    /**
+     * Stage 0：扫描所有目标的 remoteDir 残留锁，按 policy 决定如何处理。
+     *
+     * @return true=可继续；false=已写错误并应中止
+     * @author xumanyi
+     * @date 2026-04-28
+     */
+    private boolean runStage0(FtpOperations ops, FtpLock ftpLock,
+                              List<TargetPackage> targets, DeployResult result) {
+        ResidualLockResolver resolver = new ResidualLockResolver(
+                ResidualLockResolver.wrap(ops, ftpLock), config.getOperator());
+        java.util.List<ResidualLockDiagnosis> all = new java.util.ArrayList<>();
+        try {
+            for (TargetPackage t : targets) {
+                all.addAll(resolver.diagnose(t.getRemoteDir(), t.getPackageName()));
+            }
+        } catch (IOException e) {
+            result.addError("stage0", "", "残留锁扫描失败: " + e.getMessage());
+            return false;
+        }
+
+        if (all.isEmpty()) return true;
+
+        DeployConfig.ResidualLockPolicy policy = config.getResidualLockPolicy();
+
+        if (policy == DeployConfig.ResidualLockPolicy.EXTERNAL_RESOLVED) {
+            // IDE 已处理完毕；如仍有残留视为 bug
+            result.addError("stage0", "",
+                    "EXTERNAL_RESOLVED 模式下仍发现 " + all.size() + " 个残留锁");
+            return false;
+        }
+
+        if (policy == DeployConfig.ResidualLockPolicy.AUTO_RESOLVE_OWN) {
+            java.util.List<ResidualLockDiagnosis> others = new java.util.ArrayList<>();
+            for (ResidualLockDiagnosis d : all) {
+                if (d.isOwnedByCurrentUser()
+                        && d.getSuggestion() != ResidualLockDiagnosis.SuggestedAction.NEEDS_HUMAN) {
+                    try {
+                        resolver.apply(d);
+                        System.out.println("[stage0] 自动清理: " + d.getLockFileName() + " (" + d.getSuggestion() + ")");
+                    } catch (IOException e) {
+                        result.addError("stage0", d.getOriginalPackageName(),
+                                "残留锁自动清理失败: " + e.getMessage());
+                        return false;
+                    }
+                } else {
+                    others.add(d);
+                }
+            }
+            if (!others.isEmpty()) {
+                for (ResidualLockDiagnosis d : others) {
+                    result.addError("stage0", d.getOriginalPackageName(),
+                            "残留锁需人工处理 (owner=" + d.getOperator() + "): " + d.getLockFileName());
+                }
+                return false;
+            }
+            return true;
+        }
+
+        // policy == FAIL
+        for (ResidualLockDiagnosis d : all) {
+            result.addError("stage0", d.getOriginalPackageName(),
+                    "发现残留锁: " + d.getLockFileName() + " (owner=" + d.getOperator() + ", " + d.getReason() + ")");
+        }
+        return false;
     }
 
     /**
