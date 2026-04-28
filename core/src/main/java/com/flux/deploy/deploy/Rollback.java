@@ -2,10 +2,7 @@ package com.flux.deploy.deploy;
 
 import com.flux.deploy.ftp.FtpLock;
 import com.flux.deploy.ftp.FtpOperations;
-import com.flux.deploy.model.DeployResult;
 import com.flux.deploy.model.TargetPackage;
-
-import java.util.List;
 
 /**
  * 回滚策略
@@ -14,7 +11,6 @@ import java.util.List;
  * <ul>
  *   <li>已加锁但未上传 → rename 锁包恢复原名</li>
  *   <li>已上传但校验失败 → 优先 rename 锁包恢复；若锁包已删除则用备份恢复</li>
- *   <li>已完成的目标（批次中后续目标失败时）→ 用备份恢复</li>
  * </ul>
  *
  * @author xumanyi
@@ -39,36 +35,10 @@ public class Rollback {
     }
 
     /**
-     * 对所有已修改的目标包执行回滚
-     *
-     * @param targets 目标包列表
-     * @return 回滚结果
-     * @author xumanyi
-     * @date 2026-03-26
-     */
-    public DeployResult.RollbackResult rollbackAll(List<TargetPackage> targets) {
-        DeployResult.RollbackResult result = new DeployResult.RollbackResult();
-        result.setAttempted(true);
-        boolean allOk = true;
-
-        for (TargetPackage target : targets) {
-            try {
-                if (rollbackTarget(target)) {
-                    result.getRestoredPackages().add(target.getPackageName());
-                    target.setStatus(TargetPackage.Status.ROLLED_BACK);
-                }
-            } catch (Exception e) {
-                allOk = false;
-                System.err.println("[回滚失败] " + target.getPackageName() + ": " + e.getMessage());
-            }
-        }
-
-        result.setSuccess(allOk);
-        return result;
-    }
-
-    /**
      * 根据目标包当前状态决定并执行回滚操作
+     *
+     * <p>仅对 LOCKED/UPLOADED（rename 锁包恢复）和 VERIFIED/NOTE_UPDATED（备份恢复）两组状态生效。
+     * COMPLETED 视为终态不再回滚（解锁阶段已发生不可逆动作如 note 同步、原锁包删除）。</p>
      *
      * @param target 目标包
      * @return true 如果执行了回滚操作，false 表示无需回滚
@@ -76,35 +46,29 @@ public class Rollback {
      * @author xumanyi
      * @date 2026-03-26
      */
-    private boolean rollbackTarget(TargetPackage target) throws Exception {
+    public boolean rollbackTarget(TargetPackage target) throws Exception {
         TargetPackage.Status status = target.getStatus();
-
         switch (status) {
             case LOCKED:
             case UPLOADED:
-                // 锁包还在，rename 回原名
                 if (target.getLockName() != null) {
                     ftpLock.restoreLock(target.getRemoteDir(), target.getLockName());
+                    target.setStatus(TargetPackage.Status.ROLLED_BACK);
                     return true;
                 }
-                break;
-
+                return false;
             case VERIFIED:
             case NOTE_UPDATED:
-            case COMPLETED:
-                // 已经上传并替换了原包，锁包可能已删除
-                // 需要从备份恢复
                 if (target.getBackupRemotePath() != null) {
                     restoreFromBackup(target);
+                    target.setStatus(TargetPackage.Status.ROLLED_BACK);
                     return true;
                 }
-                break;
-
+                return false;
             default:
-                // PENDING / BACKED_UP / FAILED / ROLLED_BACK: 无需回滚
-                break;
+                // PENDING / BACKED_UP / COMPLETED / FAILED / SKIPPED / ROLLED_BACK / FAILED_NEEDS_MANUAL
+                return false;
         }
-        return false;
     }
 
     /**

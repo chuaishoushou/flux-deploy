@@ -13,6 +13,7 @@ dependencies {
     // JUnit 5 + AssertJ：纯单元测试栈（与已有 JavaExec test driver 并存，互不影响）
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.assertj:assertj-core:3.25.3")
+    testImplementation("org.mockito:mockito-core:5.11.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

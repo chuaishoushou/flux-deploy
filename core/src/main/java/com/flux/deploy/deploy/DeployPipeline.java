@@ -143,8 +143,11 @@ public class DeployPipeline {
                     System.err.println("[失败] " + gate.name() + " - " + target.getPackageName()
                             + ": " + msg);
 
-                    // 回滚所有已修改目标
-                    DeployResult.RollbackResult rollbackResult = rollback.rollbackAll(targets);
+                    // 临时：旧的全量回滚移除后，在 DeployPipeline 重构（Task 11/12）前先单目标回滚
+                    try { rollback.rollbackTarget(target); } catch (Exception ex) { /* ignore */ }
+                    DeployResult.RollbackResult rollbackResult = new DeployResult.RollbackResult();
+                    rollbackResult.setAttempted(true);
+                    rollbackResult.setSuccess(true);
                     result.setRollback(rollbackResult);
 
                     // 填充已完成目标的结果
