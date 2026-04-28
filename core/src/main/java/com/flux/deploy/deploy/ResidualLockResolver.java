@@ -82,6 +82,10 @@ public class ResidualLockResolver {
         }
         boolean owned = currentOperator != null && currentOperator.equals(operator);
 
+        // FtpLock.parseLockInfo 可能返回 [operator, ""] —— 当锁文件名 __LOCK__ 后缀只有
+        // 一段字符串、没有时间戳时（例如 "a.war__LOCK__weirdformat"）。这种格式异常
+        // 的锁不能自动 RESTORE_LOCK，因为 operator 字段已是垃圾数据；此时统一路由
+        // 到 NEEDS_HUMAN，要求人工核对原因。
         if (ts == null) {
             return b.operator(operator)
                     .ownedByCurrentUser(owned)

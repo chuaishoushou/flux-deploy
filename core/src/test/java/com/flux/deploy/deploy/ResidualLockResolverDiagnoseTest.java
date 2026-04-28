@@ -73,4 +73,25 @@ class ResidualLockResolverDiagnoseTest {
         List<ResidualLockDiagnosis> result = r.diagnose("/d/", "a.war");
         assertThat(result.get(0).getSuggestion()).isEqualTo(ResidualLockDiagnosis.SuggestedAction.NEEDS_HUMAN);
     }
+
+    @Test
+    void multipleResidualLocks_eachDiagnosedIndependently() throws Exception {
+        FakeProbe probe = new FakeProbe();
+        probe.locksByDir.put("/d/::a.war", List.of(
+                "a.war__LOCK__alice_20260427_153012",
+                "a.war__LOCK__bob_20260428_091500"));
+        // 原包不存在
+        ResidualLockResolver r = new ResidualLockResolver(probe, "alice");
+        List<ResidualLockDiagnosis> result = r.diagnose("/d/", "a.war");
+
+        assertThat(result).hasSize(2);
+        // 每个锁都被独立诊断（owner 不同）
+        assertThat(result.get(0).getLockFileName()).isEqualTo("a.war__LOCK__alice_20260427_153012");
+        assertThat(result.get(0).isOwnedByCurrentUser()).isTrue();
+        assertThat(result.get(0).getOperator()).isEqualTo("alice");
+
+        assertThat(result.get(1).getLockFileName()).isEqualTo("a.war__LOCK__bob_20260428_091500");
+        assertThat(result.get(1).isOwnedByCurrentUser()).isFalse();
+        assertThat(result.get(1).getOperator()).isEqualTo("bob");
+    }
 }
