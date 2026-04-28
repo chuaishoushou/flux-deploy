@@ -9,6 +9,11 @@ plugins {
 dependencies {
     // commons-net 是 FtpSession/FtpOperations 的底层传输依赖，api 暴露给上层模块
     api("commons-net:commons-net:3.11.1")
+
+    // JUnit 5 + AssertJ：纯单元测试栈（与已有 JavaExec test driver 并存，互不影响）
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.assertj:assertj-core:3.25.3")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 // 本地模式端到端测试驱动：跑 3 种模式 × 增/删/改 + 孤儿清理
@@ -47,4 +52,10 @@ tasks.register<JavaExec>("runLogFormatTest") {
     dependsOn("testClasses")
     classpath = sourceSets["test"].runtimeClasspath + sourceSets["main"].runtimeClasspath
     mainClass.set("com.flux.deploy.core.test.LogFormatTest")
+}
+
+// 让 `gradle test` 走 JUnit 5 平台，并在控制台打印每个用例的 passed/failed/skipped
+tasks.named<Test>("test") {
+    useJUnitPlatform()
+    testLogging { events("passed", "failed", "skipped") }
 }
