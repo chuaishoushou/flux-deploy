@@ -24,6 +24,12 @@ public class ResidualLockResolver {
     public interface RemoteProbe {
         List<String> findResidualLocks(String remoteDir, String packageName) throws IOException;
         boolean exists(String path) throws IOException;
+        default void rename(String from, String to) throws IOException {
+            throw new UnsupportedOperationException("rename not supported by this probe");
+        }
+        default void delete(String path) throws IOException {
+            throw new UnsupportedOperationException("delete not supported by this probe");
+        }
     }
 
     private static final DateTimeFormatter LOCK_TIME_FMT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
@@ -45,6 +51,8 @@ public class ResidualLockResolver {
             @Override public boolean exists(String path) throws IOException {
                 return ops.exists(path);
             }
+            @Override public void rename(String from, String to) throws IOException { ops.rename(from, to); }
+            @Override public void delete(String path) throws IOException { ops.delete(path); }
         };
     }
 
@@ -113,6 +121,28 @@ public class ResidualLockResolver {
                 .suggestion(action)
                 .reason(reason)
                 .build();
+    }
+
+    /**
+     * 执行诊断对应的清理动作。
+     *
+     * @throws IOException FTP 操作失败，或 suggestion=NEEDS_HUMAN 时拒绝执行
+     */
+    public void apply(ResidualLockDiagnosis d) throws IOException {
+        String dir = ensureSlash(d.getRemoteDir());
+        String lockPath = dir + d.getLockFileName();
+        switch (d.getSuggestion()) {
+            case RESTORE_LOCK:
+                probe.rename(lockPath, dir + d.getOriginalPackageName());
+                return;
+            case DELETE_LOCK:
+                probe.delete(lockPath);
+                return;
+            case NEEDS_HUMAN:
+            default:
+                throw new IOException("该残留锁需要人工介入处理: " + d.getLockFileName()
+                        + "（" + d.getReason() + "）");
+        }
     }
 
     private static String ensureSlash(String p) { return p.endsWith("/") ? p : p + "/"; }
