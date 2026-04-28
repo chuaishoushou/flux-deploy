@@ -1,0 +1,18 @@
+# Build
+build/
+.gradle/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Distribution
+dist-archive/
+
+# Node deps used by docs/
+docs/node_modules/

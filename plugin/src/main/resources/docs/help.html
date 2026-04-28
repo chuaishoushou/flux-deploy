@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>FLUX 客服更新工具 使用手册</title>
+<style>
+  :root {
+    --bg: #1e1f22;
+    --bg-soft: #2b2d30;
+    --fg: #dcdcdc;
+    --muted: #8a8e93;
+    --accent: #6bb0ff;
+    --accent-soft: #2a3a4e;
+    --border: #3a3d41;
+    --code: #e0b870;
+    --success: #85c88a;
+    --warn: #e0a070;
+    --part: #b98bff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 28px 32px 60px; }
+  h1 {
+    font-size: 24px; font-weight: 600;
+    margin: 0 0 6px;
+    color: #fff;
+  }
+  .lead {
+    color: var(--muted);
+    margin-bottom: 24px;
+    font-size: 13px;
+  }
+  .part {
+    margin: 40px 0 14px;
+    padding: 8px 14px;
+    background: linear-gradient(90deg, #3a2a50 0%, transparent 100%);
+    border-left: 4px solid var(--part);
+    font-size: 19px;
+    font-weight: 700;
+    color: #fff;
+    border-radius: 4px;
+  }
+  h2 {
+    font-size: 17px; font-weight: 600;
+    margin: 28px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    color: var(--accent);
+  }
+  h3 {
+    font-size: 14.5px; font-weight: 600;
+    margin: 20px 0 8px;
+    color: var(--success);
+  }
+  p { margin: 8px 0; }
+  ul, ol { margin: 8px 0 12px; padding-left: 24px; }
+  li { margin: 4px 0; }
+  code {
+    background: var(--bg-soft);
+    color: var(--code);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  pre {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    overflow-x: auto;
+    color: #cfd0d4;
+  }
+  .tip, .warn {
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  .tip {
+    background: var(--accent-soft);
+    border-left: 3px solid var(--accent);
+  }
+  .warn {
+    background: #3a2b22;
+    border-left: 3px solid var(--warn);
+  }
+  kbd {
+    background: #3c3f41;
+    border: 1px solid #55585c;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 12px;
+    font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+  }
+  b, strong { color: #f2f2f2; font-weight: 600; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 28px 0; }
+  table { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 13.5px; }
+  th, td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { background: var(--bg-soft); color: #fff; font-weight: 600; }
+  .toc {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 20px;
+    margin: 0 0 24px;
+    font-size: 13.5px;
+  }
+  .toc ul { margin: 4px 0; padding-left: 20px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc-part { font-weight: 700; color: var(--part); margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>FLUX 客服更新工具 使用手册</h1>
+<div class="lead">版本 V1.2.3 · 把 Maven 模块的变更快速更新到客户环境 FTP，或在本地包上打补丁</div>
+
+<div class="toc">
+  <div class="toc-part">第一部分：IDEA 插件使用</div>
+  <ul>
+    <li><a href="#p1-1">1.1 插件概述与功能特性</a></li>
+    <li><a href="#p1-2">1.2 插件安装与首次使用</a></li>
+    <li><a href="#p1-3">1.3 三种使用入口</a></li>
+    <li><a href="#p1-4">1.4 主面板布局</a></li>
+    <li><a href="#p1-5">1.5 更新模式（整包 / 增量）</a></li>
+    <li><a href="#p1-6">1.6 备份与回滚</a></li>
+    <li><a href="#p1-7">1.7 本地模式</a></li>
+    <li><a href="#p1-8">1.8 前置校验</a></li>
+    <li><a href="#p1-9">1.9 多主目标与备份冲突</a></li>
+    <li><a href="#p1-10">1.10 更新记录格式</a></li>
+    <li><a href="#p1-11">1.11 常见问题</a></li>
+  </ul>
+  <div class="toc-part">第二部分：CLI 命令行使用</div>
+  <ul>
+    <li><a href="#p2-1">2.1 环境准备</a></li>
+    <li><a href="#p2-2">2.2 子命令速查</a></li>
+    <li><a href="#p2-3">2.3 凭据管理（credential）</a></li>
+    <li><a href="#p2-4">2.4 部署（deploy）</a></li>
+    <li><a href="#p2-5">2.5 查看字段定义（schema）</a></li>
+    <li><a href="#p2-6">2.6 清理残留锁（unlock）</a></li>
+    <li><a href="#p2-7">2.7 历史回滚（rollback）</a></li>
+    <li><a href="#p2-8">2.8 本地打补丁（patch-local）</a></li>
+    <li><a href="#p2-9">2.9 浏览 FTP（browse）</a></li>
+  </ul>
+  <div class="toc-part">附录</div>
+  <ul>
+    <li><a href="#a-1">A. 目录与配置文件位置</a></li>
+    <li><a href="#a-2">B. 退出码与错误排查</a></li>
+  </ul>
+</div>
+
+<div class="part">第一部分：IDEA 插件使用</div>
+
+<h2 id="p1-1">1.1 插件概述与功能特性</h2>
+<p>FLUX 客服更新插件是 IntelliJ IDEA 集成工具，让开发人员可以在 IDE 中直接将代码变更部署到客户 FTP 或本地包，实现零切换的开发体验。</p>
+<table>
+  <tr><th>功能</th><th>说明</th></tr>
+  <tr><td>工程树形选择</td><td>点击工程下拉框，树形展示所有 Maven 模块，单击叶子节点选中</td></tr>
+  <tr><td>两种更新模式</td><td>整包更新 / 增量更新（Git 变更默认勾选 + 用户可调）</td></tr>
+  <tr><td>文件树形勾选</td><td>多级目录树，支持全选/单选，显示「已选 N / 总数 M」</td></tr>
+  <tr><td>FTP 三级联动</td><td>项目 → 系统 → 目标包，自动精确匹配产物</td></tr>
+  <tr><td>WAR lib 对齐</td><td>全量更新 WAR 时自动以远程包的 WEB-INF/lib 为准</td></tr>
+  <tr><td>多主目标</td><td>同名 JAR 跨子目录并行备份/加锁/上传，互不干扰</td></tr>
+  <tr><td>本地模式</td><td>不登录 FTP，直接对本地 jar/war 打补丁输出新包</td></tr>
+  <tr><td>安全部署流程</td><td>备份 → 加锁 → 上传 → SHA256 校验 → 解锁</td></tr>
+  <tr><td>一键回滚</td><td>失败自动回滚，成功后可手动回滚到备份版本</td></tr>
+  <tr><td>实时日志 + 文件保存</td><td>实时输出，按日期保存到 <code>.flux-deploy-log/</code></td></tr>
+</table>
+
+<h2 id="p1-2">1.2 插件安装与首次使用</h2>
+<h3>安装步骤</h3>
+<ol>
+  <li>获取插件 ZIP 包：<code>flux-deploy-plugin-1.2.3.zip</code></li>
+  <li>IDEA → Settings → Plugins → ⚙ → <b>Install Plugin from Disk</b></li>
+  <li>选择 ZIP 文件，重启 IDEA</li>
+  <li>右侧栏出现「FLUX 客服更新」工具窗口</li>
+</ol>
+<h3>首次连接 FTP</h3>
+<p>点「账号 ▾ → 添加新账号」，输入：</p>
+<table>
+  <tr><th>字段</th><th>示例</th><th>说明</th></tr>
+  <tr><td>主机</td><td>47.102.153.34</td><td>FTP 服务器 IP 或域名</td></tr>
+  <tr><td>端口</td><td>18080</td><td>默认 FTP 端口</td></tr>
+  <tr><td>用户名</td><td>xumanyi</td><td>FTP 账号</td></tr>
+  <tr><td>密码</td><td>********</td><td>AES-256-GCM 加密保存</td></tr>
+</table>
+<p>连接成功后凭据自动保存到 <code>~/.flux-deploy/credentials.toml</code>，后续无需再次输入。</p>
+
+<h2 id="p1-3">1.3 三种使用入口</h2>
+<table>
+  <tr><th>入口</th><th>位置</th><th>说明</th></tr>
+  <tr><td>工具窗口</td><td>右侧栏「FLUX 客服更新」</td><td>常规入口，完整面板</td></tr>
+  <tr><td>右键菜单</td><td>项目树中右键 Maven 模块或具体文件</td><td>快速触发并自动预选</td></tr>
+  <tr><td>本地模式</td><td>工具窗口切换到「本地模式」</td><td>对本地 jar/war 打补丁，不登录 FTP</td></tr>
+</table>
+<h3>右键菜单项</h3>
+<table>
+  <tr><th>菜单项</th><th>切换到的模式</th><th>触发条件</th><th>预填行为</th></tr>
+  <tr><td>整包更新</td><td>FULL</td><td>右键模块目录</td><td>—</td></tr>
+  <tr><td>自动检测</td><td>INCREMENTAL</td><td>右键模块目录</td><td>自动跑 Git 检测，把变更项默认勾选</td></tr>
+  <tr><td>手动选择</td><td>INCREMENTAL</td><td>右键具体文件</td><td>把右键选中的文件预先勾选</td></tr>
+  <tr><td>打开更新面板</td><td>-</td><td>任何位置</td><td>—</td></tr>
+</table>
+<p>「自动检测」与「手动选择」都进入<b>同一个增量更新模式</b>，只是两种快捷预填方式。进面板后用户仍可任意调整勾选。</p>
+
+<h2 id="p1-4">1.4 主面板布局</h2>
+<p>面板分四个区域，从上到下：<b>源 → 目标 → 信息 → 按钮栏</b>，底部是日志区。</p>
+
+<h3>源 Section</h3>
+<table>
+  <tr><th>控件</th><th>操作</th><th>说明</th></tr>
+  <tr><td>工程下拉框</td><td>点击弹出树</td><td>树形展示所有 Maven 模块，单击叶子选中</td></tr>
+  <tr><td>产物显示</td><td>自动</td><td>从 pom.xml 解析，优先扫描 <code>target/</code> 实际产物</td></tr>
+  <tr><td>更新模式</td><td>下拉选择</td><td>整包更新 / 增量更新</td></tr>
+  <tr><td>文件树</td><td>勾选</td><td>多级目录树，右上角显示「已选 N / 总数 M」</td></tr>
+  <tr><td>全选 / 刷新</td><td>勾选 / 点 ↻</td><td>一键全选；刷新按当前模式重新扫描</td></tr>
+</table>
+<p>文件状态标识：<b>[A]</b> 新增（绿色）、<b>[M]</b> 修改（蓝色）、<b>[D]</b> 删除（橙色）。</p>
+
+<h3>目标 Section</h3>
+<table>
+  <tr><th>控件</th><th>操作</th><th>说明</th></tr>
+  <tr><td>FTP 状态 / 账号 ▾</td><td>点击</td><td>切换/添加/删除账号</td></tr>
+  <tr><td>项目下拉框</td><td>下拉</td><td>对应 <code>/开发/{项目}/</code>，支持搜索</td></tr>
+  <tr><td>系统下拉框</td><td>下拉</td><td>对应 <code>/开发/{项目}/{系统}/</code></td></tr>
+  <tr><td>目标包树</td><td>勾选</td><td>列出 JAR/WAR；与源产物同名的包自动勾选并锁定</td></tr>
+  <tr><td>全选 WAR</td><td>勾选</td><td>一键勾选所有 WAR（用于 JAR 嵌入更新）</td></tr>
+  <tr><td>刷新 ↻</td><td>点击</td><td>重连 FTP + 按当前层级重新拉取</td></tr>
+</table>
+<p>产物匹配规则：本地产物文件名必须与远程包完全一致（含版本号）。不同版本不会自动匹配。</p>
+
+<h3>信息 Section</h3>
+<table>
+  <tr><th>字段</th><th>必填</th><th>说明</th></tr>
+  <tr><td>更新版本记录</td><td>否</td><td>勾选后显示任务号、客服号输入框</td></tr>
+  <tr><td>任务号</td><td>勾选后任务/客服至少填一项</td><td>示例 <code>20260328155300000001</code></td></tr>
+  <tr><td>客服号</td><td>同上</td><td>示例 <code>20260328155300000001A</code></td></tr>
+  <tr><td>开发</td><td>勾选备份或版本记录时必填</td><td>英文 ID，如 <code>xumanyi</code>；自动缓存上次值</td></tr>
+</table>
+
+<h3>按钮栏与日志</h3>
+<table>
+  <tr><th>按钮</th><th>位置</th><th>功能</th></tr>
+  <tr><td>预检</td><td>左</td><td>仅检查 FTP 状态和远端包，不编译、不上传、不修改</td></tr>
+  <tr><td>打包并上传</td><td>左</td><td>完整执行：编译 → 备份 → 加锁 → 上传 → SHA256 校验 → 解锁</td></tr>
+  <tr><td>回滚</td><td>左</td><td>恢复上次备份版本；仅成功部署后可用，回滚后置灰</td></tr>
+  <tr><td>清空日志</td><td>右</td><td>清屏幕日志，不影响已保存的日志文件</td></tr>
+  <tr><td>重置</td><td>右</td><td>重置所有表单字段、文件列表、目标选择</td></tr>
+</table>
+<p>日志区位于面板底部，实时显示每步详情。日志自动保存到 <code>项目根/.flux-deploy-log/YYYY-MM-DD/HH-mm-ss_update.log</code>，同次部署的预检/部署/回滚追加到同一文件。</p>
+
+<h2 id="p1-5">1.5 更新模式（整包 / 增量）</h2>
+<p>v1.1.2 起，更新模式从原来的三档（整包 / 手动选择 / 自动检测变更）合并为<b>两档</b>。「文件来源」（手选 / Git 检测）不再是模式选项，而是同一个「增量更新」模式下的两种预填方式。</p>
+
+<h3>整包更新（FULL）</h3>
+<p><code>mvn clean package</code> 编译整个模块，完整替换远程包。</p>
+<ul>
+  <li>适用：大版本更新、整体变更</li>
+  <li>WAR 特殊处理：自动以远程 <code>WEB-INF/lib</code> 为准对齐</li>
+  <li>无文件清单：选这个模式后右侧只展示「将替换整个远程包」提示</li>
+</ul>
+
+<h3>增量更新（INCREMENTAL）</h3>
+<p>列出模块下全部可部署文件，<b>Git 变更项默认勾选</b>，用户可在此基础上自由增删勾选。</p>
+<ul>
+  <li>适用：日常迭代、针对性 bug 修复</li>
+  <li>状态标识：<b>[A]</b> 新增（绿）、<b>[M]</b> 修改（蓝）、<b>[D]</b> 删除（橙）</li>
+  <li>三种快捷入口都进这个模式：
+    <ul>
+      <li>下拉切换 → 默认按 Git 变更勾选</li>
+      <li>右键模块「自动检测」→ 同上，等价于直接进面板</li>
+      <li>右键文件「手动选择」→ 把右键选中的文件预先勾选</li>
+    </ul>
+  </li>
+  <li>所有勾选都可以人工再调整（取消默认勾选 / 加 Git 没识别到的文件）</li>
+</ul>
+
+<h3>刷新按钮</h3>
+<p>「更新模式」下拉右侧的 <code>↻</code> 按钮，点击后根据当前模式重新拉取：</p>
+<ul>
+  <li><b>整包更新</b>：仅输出提示（无列表可刷新）</li>
+  <li><b>增量更新</b>：重新扫描模块文件 + 重跑 Git 变更检测；用户已勾选项会被尽量保留（仍存在于扫描结果的）</li>
+</ul>
+
+<h2 id="p1-6">1.6 备份与回滚</h2>
+<p>勾选「执行备份」后，上传前会把远端原包备份到 <code>backup/yyyyMMdd_{开发}/</code>。更新失败会自动回滚。更新成功后「回滚」按钮可用，可手动回滚到备份版本。</p>
+<div class="warn">⚠ 不备份的情况下失败无法自动恢复，请谨慎使用。</div>
+
+<h3>安全机制一览</h3>
+<table>
+  <tr><th>机制</th><th>作用</th><th>实现</th></tr>
+  <tr><td>备份</td><td>恢复点</td><td>加锁前自动备份到 <code>backup/YYYYMMDD_op/</code>，保留相对目录结构</td></tr>
+  <tr><td>文件锁</td><td>防并发</td><td>rename 为 <code>__LOCK__</code> 格式</td></tr>
+  <tr><td>SHA256</td><td>完整性</td><td>上传后重新下载比对哈希</td></tr>
+  <tr><td>自动回滚</td><td>失败恢复</td><td>任何步骤失败自动从备份恢复</td></tr>
+  <tr><td>路径校验</td><td>防误操作</td><td>必须在 <code>/开发/</code> 下，禁止 <code>..</code></td></tr>
+  <tr><td>线程安全</td><td>连接稳定</td><td>FTP 操作加锁串行化</td></tr>
+  <tr><td>凭据加密</td><td>密码安全</td><td>AES-256-GCM 加密存储</td></tr>
+</table>
+
+<h2 id="p1-7">1.7 本地模式</h2>
+<p>用户手里有一个本地 jar/war 包，想把本地编译的变更打进去，输出新包。<b>不登录 FTP、不备份、不写版本记录、不可回滚。</b></p>
+
+<h3>三种分流</h3>
+<p>按「源工程产物类型 × 用户提供包类型」自动判定：</p>
+<ul>
+  <li><b>jar → jar</b>：源工程 jar 模块，用户提供 jar 包；校验包名前缀 + 版本号严格一致后直接替换 jar 内条目。</li>
+  <li><b>war → war</b>：源工程 war 模块，用户提供 war 包；校验后替换 <code>WEB-INF/classes/</code> 下的类。</li>
+  <li><b>jar → war/lib</b>：源工程 jar，用户提供 war 包；在 <code>WEB-INF/lib/</code> 下定位匹配的 jar，版本严格一致后抽出 → 打补丁 → 回写 war。</li>
+</ul>
+
+<h3>输出与交互</h3>
+<ul>
+  <li>默认输出到 <code>&lt;包所在目录&gt;/patched_{yyyyMMdd_HHmmss}/</code>，同名文件。可手动改。</li>
+  <li>支持从 Finder 或项目树 <b>拖拽</b> jar/war 进来</li>
+  <li>点「本地打包」先预检 → 弹出变更清单（修改/新增/删除）→ 确认后编译 + 打包</li>
+  <li>成功后弹卡片：打开所在目录 / 复制路径 / 关闭</li>
+</ul>
+
+<h2 id="p1-8">1.8 前置校验</h2>
+<p>点击<b>打包并上传</b>或<b>打包不上传</b>按钮时，插件会先做一次硬性前置校验。以下任一条件缺失都会弹窗阻断：</p>
+<ul>
+  <li>未选择工程</li>
+  <li>FTP 未连接</li>
+  <li>未选择目标包（主目标或嵌入目标）</li>
+  <li>未勾选任何待更新文件（整包更新模式豁免）</li>
+  <li>勾选了「更新版本记录」但任务和客服都为空</li>
+  <li>勾选了「更新版本记录」或「执行备份」但开发为空</li>
+</ul>
+<p><b>预检</b>按钮不走此校验，仅输出日志，方便快速查看当前状态。</p>
+
+<h2 id="p1-9">1.9 多主目标与备份冲突</h2>
+
+<h3>多主目标</h3>
+<p>同一系统下若多个子目录存在同名 JAR（如 <code>shared-edp/X.jar</code> + <code>shared-tms/X.jar</code>），插件会自动识别并锁定所有同名包，每个独立备份 / 加锁 / 上传：</p>
+<ul>
+  <li>备份路径按父目录分隔：<code>backup/yyyyMMdd_{开发}/shared-edp/X.jar</code> 和 <code>backup/yyyyMMdd_{开发}/shared-tms/X.jar</code></li>
+  <li>每个目标单独下载远端、独立打补丁、独立上传；内容不同的包互不干扰</li>
+  <li>回滚时按路径逐一恢复</li>
+</ul>
+
+<h3>备份冲突处理</h3>
+<p>点击「打包并上传」时会自动查询：今天该开发人员是否已经备份过这些目标。如果有冲突，弹出选择对话框：</p>
+<ul>
+  <li><b>覆盖备份</b>：用当前远端包覆盖老备份。⚠ 上一版远端包将永久丢失。</li>
+  <li><b>使用原始备份</b>（推荐）：本次不重新备份，保留更早的备份作为回滚源。适合「同一天多次更新同一个包」的场景。</li>
+  <li><b>新增备份目录</b>：另建 <code>yyyyMMdd_{开发}_v2 / _v3 / ...</code> 目录，老备份完整保留。</li>
+</ul>
+<div class="tip">💡 多次更新同一个包时建议取消勾选「执行备份」，用第一次的备份作为回滚来源。</div>
+
+<h2 id="p1-10">1.10 更新记录格式</h2>
+<p>勾选「更新版本记录」后，上传成功时在远端同目录追加 <code>*_update_note.txt</code>，每次追加两行：</p>
+<pre>取包|2026-04-17 21:00:04|xumanyi|任务：【xxx】补丁|客服：20260417xxx|scev6-xxx.jar
+传包|2026-04-17 21:00:04|xumanyi|任务：【xxx】补丁|客服：20260417xxx|scev6-xxx.jar</pre>
+<p>任务和客服至少填一项即可，未填字段保留标签、值为空。</p>
+
+<h2 id="p1-11">1.11 常见问题</h2>
+
+<h3>FTP 连接失败？</h3>
+<p>检查 VPN 是否连上、端口是否正确（默认 18080）。可以点「账号 ▾ → 添加新账号」重新输凭据。</p>
+
+<h3>预检通过但上传失败？</h3>
+<p>多半是目标包被别人加锁了。看日志里的锁文件名，联系对应的开发解锁，或等他更新完再试。</p>
+
+<h3>本地模式提示"版本号不匹配"？</h3>
+<p>源工程产物版本号必须和本地包版本号完全一致。<code>scev6-utils-tms-10.0.0.jar</code> 不能对 <code>scev6-utils-tms-10.0.0-SNAPSHOT.jar</code> 打补丁。</p>
+
+<h3>war 的 lib 里找不到目标 jar？</h3>
+<p>检查 war 是否是目标客户环境的，或 lib 里的 jar 名前缀是否一致。</p>
+
+<h3>同时更新多个包？</h3>
+<p>可以。JAR 更新时勾选多个 WAR 实现嵌入更新；多主目标场景下同名 JAR 会自动并行处理。</p>
+
+<h3>备份包在哪？</h3>
+<p>FTP 系统目录下 <code>backup/YYYYMMDD_operator/</code>。多个子目录的同名包会在备份目录下按原相对路径镜像保留。</p>
+
+
+<div class="part">第二部分：CLI 命令行使用</div>
+
+<p>CLI 工具是独立的命令行版本，适用于自动化脚本、CI/CD 集成、或无 IDEA 环境的场景。功能上和插件完全对等：部署、备份、回滚、凭据管理，外加插件未直接暴露的「残留锁清理」。</p>
+
+<h2 id="p2-1">2.1 环境准备</h2>
+<table>
+  <tr><th>项目</th><th>要求</th></tr>
+  <tr><td>Java</td><td>JDK 17 或以上，确保 <code>java -version</code> 可用</td></tr>
+  <tr><td>CLI 工具</td><td><code>flux-deploy-cli.jar</code>（约 3MB fat-jar，自包含所有依赖）</td></tr>
+  <tr><td>网络</td><td>能访问目标 FTP 服务器</td></tr>
+</table>
+
+<h3>获取与部署</h3>
+<pre>./gradlew :cli:shadowJar
+cp cli/build/libs/flux-deploy-cli-1.1.2-all.jar ~/bin/flux-deploy-cli.jar</pre>
+<p>或设置环境变量 <code>FLUX_DEPLOY_CLI</code> 指向 jar 绝对路径。</p>
+
+<h2 id="p2-2">2.2 子命令速查</h2>
+<table>
+  <tr><th>子命令</th><th>用途</th></tr>
+  <tr><td><code>deploy</code></td><td>按 JSON 配置执行一次完整的 FTP 部署流水线</td></tr>
+  <tr><td><code>schema</code></td><td>输出 deploy 配置的 JSON Schema，便于脚本或工具理解字段</td></tr>
+  <tr><td><code>credential</code></td><td>管理本机凭据缓存：<code>set</code> / <code>list</code> / <code>delete</code></td></tr>
+  <tr><td><code>unlock</code></td><td>扫描并恢复残留锁文件（中断部署留下的 <code>*__LOCK__*</code>）</td></tr>
+  <tr><td><code>rollback</code></td><td>从指定备份目录恢复 FTP 上的包</td></tr>
+</table>
+<p>所有子命令都支持 <code>--help / -h</code> 查看详细参数。</p>
+
+<h2 id="p2-3">2.3 凭据管理（credential）</h2>
+<p>CLI 自管凭据缓存，位置 <code>~/.flux-deploy/credentials.toml</code>（文件权限 600，密码 AES-256-GCM 加密，密钥绑定当前机器和用户）。</p>
+
+<h3>首次配置（交互式输入密码）</h3>
+<pre>java -jar ~/bin/flux-deploy-cli.jar credential set \
+  --host 47.102.153.34 --port 18080 --user xumanyi
+# CLI 提示: Enter password:（输入隐藏，不进 shell history）</pre>
+
+<h3>查看与删除</h3>
+<pre># 列出所有条目（不显示密码）
+java -jar ~/bin/flux-deploy-cli.jar credential list
+
+# 删除指定条目
+java -jar ~/bin/flux-deploy-cli.jar credential delete \
+  --host 47.102.153.34 --port 18080 --user xumanyi
+
+# 清空全部（直接删文件）
+rm ~/.flux-deploy/credentials.toml</pre>
+<div class="warn">⚠ 拷贝到其他机器无法解密（密钥绑定本机），换机必须重新 <code>credential set</code>。</div>
+
+<h2 id="p2-4">2.4 部署（deploy）</h2>
+
+<h3>调用格式</h3>
+<pre>java -jar ~/bin/flux-deploy-cli.jar deploy --config &lt;json文件&gt;
+  [--password-file &lt;密码文件&gt;]   # 可选，覆盖缓存
+  [--dry-run]                    # 可选，仅预检不改动远程
+  [--verbose]                    # 可选，调试信息到 stderr</pre>
+
+<h3>更新模式（mode 字段）</h3>
+<p>CLI 与插件 UI 一致，只支持两种更新模式：</p>
+<table>
+  <tr><th>mode</th><th>含义</th><th>必填字段</th><th>CLI 编译</th></tr>
+  <tr><td><code>full</code>（默认）</td><td>整包替换，上传 <code>localFile</code>。CLI 不参与编译，由用户提前 <code>mvn package</code></td><td><code>targets[].localFile</code></td><td>不编译</td></tr>
+  <tr><td><code>incremental</code></td><td>下载远端包 → 按 <code>files</code> 打补丁 → 上传</td><td><code>projectDir</code>, <code>files</code>, <code>targets[].name</code></td><td><b>强制</b> <code>mvn clean package -DskipTests</code></td></tr>
+</table>
+<p><b>注意</b>：</p>
+<ul>
+  <li>v1.1.2 起删除了原 <code>mode=auto</code>。"文件来源"（手选 / Git 检测）由调用方负责——插件 UI 用预填清单组件，Skill 用 <code>git status</code> 后向用户确认；CLI 不内置 git 检测。</li>
+  <li>v1.1.2 起删除了原 <code>skipCompile</code> 字段。<code>incremental</code> 模式必编译，避免 "改了源码忘编译就上线" 的事故。</li>
+</ul>
+
+<h3>JSON 配置字段</h3>
+<table>
+  <tr><th>字段</th><th>必填</th><th>说明</th></tr>
+  <tr><td><code>ftp.host</code></td><td>是</td><td>纯 IP 或主机名，不含 <code>ftp://</code></td></tr>
+  <tr><td><code>ftp.port</code></td><td>否</td><td>默认 <code>18080</code></td></tr>
+  <tr><td><code>ftp.username</code></td><td>是</td><td>登录用户名，同时用作凭据缓存匹配键</td></tr>
+  <tr><td><code>remoteDir</code></td><td>是</td><td>FTP 登录后 cwd 的目标路径</td></tr>
+  <tr><td><code>mode</code></td><td>否</td><td><code>full</code> / <code>incremental</code>，默认 <code>full</code></td></tr>
+  <tr><td><code>projectDir</code></td><td>条件</td><td>incremental 模式必填，模块根（含 pom.xml）</td></tr>
+  <tr><td><code>files</code></td><td>条件</td><td>incremental 必填；条目示例 <code>"M src/main/java/Foo.java"</code></td></tr>
+  <tr><td><code>mavenHome</code> / <code>javaHome</code></td><td>否</td><td>覆盖 mvn / JDK 路径（仅 incremental 用）</td></tr>
+  <tr><td><code>targets[].localFile</code></td><td>条件</td><td>full 模式必填；incremental 留空（CLI 自动生成）</td></tr>
+  <tr><td><code>targets[].name</code></td><td>条件</td><td>full 可省略（自动扫描）；incremental 必填</td></tr>
+  <tr><td><code>targets[].relativePath</code></td><td>否</td><td>远程相对路径；有多级目录时必填</td></tr>
+  <tr><td><code>meta.taskId / customerId / operator</code></td><td>否</td><td>版本记录相关；要求备份时 operator 必填</td></tr>
+  <tr><td><code>options.skipBackup</code></td><td>否</td><td>默认 false；想跳过备份时设 true</td></tr>
+  <tr><td><code>options.skipNote</code></td><td>否</td><td>默认 false；不写版本记录时设 true</td></tr>
+  <tr><td><code>options.outputFormat</code></td><td>否</td><td><code>json</code> 或 <code>text</code>，默认 text</td></tr>
+</table>
+<p>完整字段定义（含 <code>embedTargets</code> 等）用 <a href="#p2-5">2.5 schema</a> 子命令获取。</p>
+
+<h3>示例 1：扫描模式，无备份无版本记录</h3>
+<pre>cat &gt; /tmp/deploy.json &lt;&lt;'EOF'
+{
+  "ftp":       { "host": "47.102.153.34", "port": 18080, "username": "xumanyi" },
+  "remoteDir": "/开发/1测试项目/TMS V9.0-P7/",
+  "targets":   [ { "localFile": "/path/to/scev6-utils-tms-9.0.0-SNAPSHOT.jar" } ],
+  "options":   { "skipBackup": true, "skipNote": true, "outputFormat": "json" }
+}
+EOF
+java -jar ~/bin/flux-deploy-cli.jar deploy --config /tmp/deploy.json</pre>
+<p>CLI 自动扫描 remoteDir 下所有 <code>scev6-utils-tms-9.0.0-SNAPSHOT.jar</code> 并并行更新。</p>
+
+<h3>示例 2：显式路径 + 备份 + 版本记录</h3>
+<pre>{
+  "ftp":       { "host": "47.102.153.34", "port": 18080, "username": "xumanyi" },
+  "remoteDir": "/开发/AISKILL测试项目/TMS V9.0-P7/",
+  "targets":   [ {
+    "localFile": "/build/tm10srv.war",
+    "name": "tm10srv.war",
+    "relativePath": "tmssrv-1/tm10srv.war"
+  } ],
+  "meta":      { "taskId": "T-12345", "customerId": "C-67890", "operator": "xumanyi" },
+  "options":   { "skipBackup": false, "skipNote": false, "outputFormat": "json" }
+}</pre>
+
+<h3>示例 3：增量模式（手动指定文件）</h3>
+<pre>{
+  "ftp":       { "host": "47.102.153.34", "port": 18080, "username": "xumanyi" },
+  "remoteDir": "/开发/1测试项目/TMS V9.0-P7/",
+  "mode":      "incremental",
+  "projectDir": "/Users/xumanyi/scev6/v6_000_utils/scev6-utils-tms",
+  "files": [
+    "M src/main/java/com/flux/Foo.java",
+    "M src/main/resources/log4j.xml"
+  ],
+  "targets": [ {
+    "name": "scev6-utils-tms-9.0.0-SNAPSHOT.jar",
+    "relativePath": "shared-tms-20260410-V9.0.0-p11/shared-edp/scev6-utils-tms-9.0.0-SNAPSHOT.jar"
+  } ],
+  "options":   { "skipBackup": true, "skipNote": true, "outputFormat": "json" }
+}</pre>
+<p>CLI 流程：编译 → 下载远端 jar → 替换两个条目 → 上传校验。</p>
+
+<h3>示例 4：增量更新（调用方提供 files 列表）</h3>
+<pre>{
+  "ftp":       { "host": "47.102.153.34", "port": 18080, "username": "xumanyi" },
+  "remoteDir": "/开发/1测试项目/TMS V9.0-P7/",
+  "mode":      "incremental",
+  "projectDir": "/Users/xumanyi/scev6/v6_000_utils/scev6-utils-tms",
+  "files":     [ "M src/main/java/Foo.java", "A src/main/resources/new.xml" ],
+  "targets":   [ { "name": "scev6-utils-tms-9.0.0-SNAPSHOT.jar" } ],
+  "options":   { "skipBackup": true, "skipNote": true, "outputFormat": "json" }
+}</pre>
+<p>CLI 拿到 <code>files</code> 后自动 <code>mvn clean package</code>，再按 jar 内条目映射打补丁。<b>v1.1.2 起 CLI 不再内置 git 检测</b>——<code>files</code> 由调用方（脚本 / Skill）通过 <code>git status --porcelain</code> 等手段产出。</p>
+
+<h3>输出与退出码</h3>
+<p>成功（exit 0）时 stdout 输出 JSON，含每个目标的 <code>remotePath / backupPath / localSha256 / remoteSha256 / verified / noteUpdated</code>。</p>
+<table>
+  <tr><th>code</th><th>含义</th></tr>
+  <tr><td>0</td><td>全部目标成功</td></tr>
+  <tr><td>64</td><td>用法/配置错误（JSON 语法、缺字段、本地文件不存在、缺密码等）</td></tr>
+  <tr><td>70</td><td>执行期错误（FTP 连接失败、远程校验失败、门禁失败）；CLI 已自动回滚</td></tr>
+</table>
+
+<h2 id="p2-5">2.5 查看字段定义（schema）</h2>
+<p>输出 deploy 配置的 JSON Schema，自描述字段含义、默认值、必填项、退出码：</p>
+<pre>java -jar ~/bin/flux-deploy-cli.jar schema</pre>
+<p>输出格式为标准 JSON Schema (draft-07)，顶层含 <code>cliVersion</code> 字段，可直接 <code>| jq</code> 解析。</p>
+
+<h2 id="p2-6">2.6 清理残留锁（unlock）</h2>
+<p>部署被中断时会留下 <code>&lt;pkg&gt;__LOCK__&lt;user&gt;_&lt;timestamp&gt;</code> 文件。LockGate 检测到残留锁会拒绝新部署，此时用 <code>unlock</code> 清理。</p>
+
+<pre>java -jar ~/bin/flux-deploy-cli.jar unlock \
+  --host &lt;host&gt; --port &lt;port&gt; --user &lt;user&gt; \
+  --remote-dir &lt;path&gt;
+  [--delete-orphans]   # 活跃包已存在的孤立锁直接删除</pre>
+
+<h3>恢复规则</h3>
+<ul>
+  <li>锁文件同目录<b>无</b>活跃包 → rename 回原名（恢复）</li>
+  <li>锁文件同目录<b>有</b>活跃包 →
+    <ul>
+      <li>不带 <code>--delete-orphans</code>：列为冲突并跳过（安全）</li>
+      <li>带 <code>--delete-orphans</code>：直接删除孤立锁（确认活跃包是想要版本时才用）</li>
+    </ul>
+  </li>
+</ul>
+
+<h2 id="p2-7">2.7 历史回滚（rollback）</h2>
+<p>从指定备份目录恢复 FTP 包。全流程启用安全门禁：自动对当前状态再备份一份（方便"撤销回滚"）、加锁、上传备份内容、SHA256 校验、解锁。</p>
+
+<pre>java -jar ~/bin/flux-deploy-cli.jar rollback \
+  --host &lt;host&gt; --port &lt;port&gt; --user &lt;user&gt; \
+  --remote-dir &lt;systemRoot&gt; \
+  --backup-dir &lt;backupDirName&gt; \
+  [--operator &lt;id&gt;]         # 默认 rollback
+  [--dry-run]                # 预览映射不实际修改
+  [--no-safety-backup]       # 跳过对当前状态的再备份（不推荐）</pre>
+
+<h3>行为</h3>
+<ol>
+  <li>解析系统根（<code>--remote-dir</code> 前 3 级），拼出 <code>&lt;systemRoot&gt;/backup/&lt;backupDirName&gt;/</code></li>
+  <li>递归扫描备份目录下所有文件</li>
+  <li>对每个文件，校验生产上对应路径是否存在；不存在则跳过并警告（不会新建孤立文件）</li>
+  <li>下载备份到本地临时目录</li>
+  <li>对当前生产状态做安全备份到 <code>backup/&lt;YYYYMMDD&gt;_rollback_&lt;HHmmss&gt;/</code></li>
+  <li>走完整门禁（加锁/上传/校验/解锁）；失败自动回滚到回滚前</li>
+</ol>
+
+<h3>示例</h3>
+<pre># 先用 dry-run 看清楚要恢复哪些
+java -jar ~/bin/flux-deploy-cli.jar rollback \
+  --host 47.102.153.34 --port 18080 --user xumanyi \
+  --remote-dir "/开发/1测试项目/TMS V9.0-P7/" \
+  --backup-dir "20260424_xumanyi" \
+  --dry-run
+
+# 确认无误后正式执行
+java -jar ~/bin/flux-deploy-cli.jar rollback \
+  --host 47.102.153.34 --port 18080 --user xumanyi \
+  --remote-dir "/开发/1测试项目/TMS V9.0-P7/" \
+  --backup-dir "20260424_xumanyi" \
+  --operator xumanyi</pre>
+
+<div class="tip">💡 回滚是高风险操作，强烈建议先 <code>--dry-run</code> 核对映射表；默认保留的安全备份让你可以在意外时"撤销回滚"。</div>
+
+<h2 id="p2-8">2.8 本地打补丁（patch-local）</h2>
+<p>对应插件「本地模式」：用户手里有一个本地 jar/war 包，让 CLI 把源工程的变更打进去，输出新包。<b>不登录 FTP、不备份、不写版本记录、不可回滚。</b></p>
+
+<pre>java -jar ~/bin/flux-deploy-cli.jar patch-local \
+  --project-dir &lt;模块根&gt; \
+  --local-package &lt;本地 jar/war 路径&gt; \
+  --mode full|incremental|auto \
+  [--files "f1,f2,..."]      # incremental 模式必填
+  [--artifact-name &lt;name&gt;]   # 可选，默认从 pom.xml 推断
+  [--git-root &lt;path&gt;]        # auto 模式可选
+  [--output-dir &lt;path&gt;]      # 可选，默认 &lt;包所在目录&gt;/patched_&lt;时间戳&gt;/
+  [--maven-home &lt;path&gt;] [--java-home &lt;path&gt;]</pre>
+
+<h3>三种分流（自动判定）</h3>
+<ul>
+  <li><b>jar → jar</b>：源工程是 jar 模块，用户提供 jar 包；校验包名前缀+版本一致后替换 jar 内条目</li>
+  <li><b>war → war</b>：源工程是 war 模块，用户提供 war 包；替换 <code>WEB-INF/classes/</code> 下条目</li>
+  <li><b>jar → war/lib</b>：源工程是 jar，用户提供 war 包；定位 <code>WEB-INF/lib/</code> 下匹配的 jar，抽出 → 打补丁 → 回写</li>
+</ul>
+
+<h3>示例</h3>
+<pre>java -jar ~/bin/flux-deploy-cli.jar patch-local \
+  --project-dir /Users/xumanyi/scev6/v6_000_utils/scev6-utils-tms \
+  --local-package /Users/xumanyi/Downloads/tm10srv.war \
+  --mode auto</pre>
+
+<h2 id="p2-9">2.9 浏览 FTP（browse）</h2>
+<p>对应插件的项目/系统/包三级下拉。AI 不知道目标 FTP 有哪些项目/包时，先 browse 探一下。</p>
+
+<pre># 列出指定目录下的子目录
+java -jar ~/bin/flux-deploy-cli.jar browse \
+  --host &lt;host&gt; --port &lt;port&gt; --user &lt;user&gt; \
+  --list-dirs "/开发/1测试项目/"
+
+# 递归扫描可部署包（JAR/WAR）
+java -jar ~/bin/flux-deploy-cli.jar browse \
+  --host &lt;host&gt; --port &lt;port&gt; --user &lt;user&gt; \
+  --scan-packages "/开发/1测试项目/TMS V9.0-P7/"</pre>
+
+<p>输出 JSON 到 stdout，含每个包的 <code>subDirectory / packageName / type / relativePath / size</code>，可直接 <code>| jq</code> 解析。</p>
+
+
+<div class="part">附录</div>
+
+<h2 id="a-1">A. 目录与配置文件位置</h2>
+<table>
+  <tr><th>路径</th><th>用途</th></tr>
+  <tr><td><code>~/.flux-deploy/credentials.toml</code></td><td>凭据缓存（AES 加密，权限 600）</td></tr>
+  <tr><td><code>~/bin/flux-deploy-cli.jar</code></td><td>推荐的 CLI jar 放置位置</td></tr>
+  <tr><td>项目根/<code>.flux-deploy-log/</code></td><td>插件日志输出根目录（按日期分子目录）</td></tr>
+  <tr><td>FTP: <code>&lt;systemRoot&gt;/backup/</code></td><td>FTP 备份根目录，每次备份一个子目录 <code>YYYYMMDD_operator/</code></td></tr>
+</table>
+
+<h2 id="a-2">B. 退出码与错误排查</h2>
+<table>
+  <tr><th>退出码</th><th>典型场景</th><th>排查</th></tr>
+  <tr><td>0</td><td>成功</td><td>—</td></tr>
+  <tr><td>64</td><td>JSON 语法错 / 缺字段 / 本地文件不存在</td><td>看 stderr 第一行，修 JSON</td></tr>
+  <tr><td>64</td><td>stderr 含「缺少密码」或「Tag mismatch」</td><td>跑 <code>credential set</code> 重设凭据</td></tr>
+  <tr><td>70</td><td>FTP 连接失败</td><td>检查 VPN、端口、用户名</td></tr>
+  <tr><td>70</td><td>远程校验 SHA256 不一致</td><td>CLI 已自动回滚，查日志核对本地/远端差异</td></tr>
+  <tr><td>70</td><td>stderr 含「发现残留锁包」</td><td>跑 <code>unlock</code> 清理后重试</td></tr>
+  <tr><td>70</td><td>stderr 含「未找到匹配文件」（扫描模式）</td><td>用 <code>targets[].name</code>/<code>relativePath</code> 显式指定</td></tr>
+</table>
+
+</div>
+</body>
+</html>

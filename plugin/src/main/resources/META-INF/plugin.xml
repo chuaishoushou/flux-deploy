@@ -1,0 +1,44 @@
+<idea-plugin>
+    <id>com.flux.deploy.plugin</id>
+    <name>FLUX Customer Service Deploy</name>
+    <vendor>FLUX</vendor>
+    <description>FLUX Customer Service Deploy plugin for IntelliJ IDEA. Right-click on project modules to deploy files to FTP servers with one click. Supports full package deployment, Git-based auto-detection of modified files, and selective file deployment.</description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>Git4Idea</depends>
+    <!-- 依赖 IDEA 内置 Maven 插件：编译前需读 effective pom 拿 source/target/release 自动匹配 JDK -->
+    <depends>org.jetbrains.idea.maven</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="FLUX Deploy"
+                    factoryClass="com.flux.deploy.plugin.toolwindow.FluxDeployToolWindowFactory"
+                    anchor="right"/>
+
+        <projectService
+            serviceImplementation="com.flux.deploy.plugin.service.PluginSettingsService"/>
+    </extensions>
+
+    <actions>
+        <group id="FluxDeploy.ActionGroup"
+               class="com.flux.deploy.plugin.action.FluxDeployActionGroup"
+               text="FLUX Deploy"
+               popup="true">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+
+            <action id="FluxDeploy.FullDeploy"
+                    class="com.flux.deploy.plugin.action.FullDeployAction"
+                    text="整包更新"/>
+            <action id="FluxDeploy.GitAutoDetect"
+                    class="com.flux.deploy.plugin.action.GitAutoDetectAction"
+                    text="自动检测变更"/>
+            <action id="FluxDeploy.DeploySelected"
+                    class="com.flux.deploy.plugin.action.DeploySelectedFilesAction"
+                    text="手动选择"/>
+            <separator/>
+            <action id="FluxDeploy.OpenPanel"
+                    class="com.flux.deploy.plugin.action.OpenDeployPanelAction"
+                    text="打开更新面板"/>
+        </group>
+    </actions>
+</idea-plugin>

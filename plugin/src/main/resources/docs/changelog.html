@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>版本记录</title>
+<style>
+  :root {
+    --bg: #1e1f22;
+    --bg-soft: #2b2d30;
+    --fg: #dcdcdc;
+    --muted: #8a8e93;
+    --accent: #6bb0ff;
+    --border: #3a3d41;
+    --code: #e0b870;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 28px 32px 60px; }
+  h1 {
+    font-size: 22px; font-weight: 600;
+    margin: 0 0 24px;
+    color: #fff;
+  }
+  .version-block {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 18px;
+  }
+  .version-title {
+    display: flex; align-items: baseline;
+    font-size: 17px; font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .version-title .date {
+    margin-left: 10px;
+    color: var(--muted);
+    font-size: 12.5px;
+    font-weight: 400;
+  }
+  h3 {
+    font-size: 13px; font-weight: 600;
+    margin: 14px 0 6px;
+    text-transform: none;
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+  }
+  .tag-new { background: #1f3a26; color: #95d4a0; }
+  .tag-opt { background: #1d2f4a; color: #9dc0eb; }
+  .tag-fix { background: #3a2820; color: #e8b090; }
+  ul { margin: 6px 0 10px 22px; }
+  li { margin: 4px 0; }
+  b, strong { color: #f2f2f2; font-weight: 600; }
+  code {
+    background: #1a1c1f;
+    color: var(--code);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>版本记录</h1>
+
+<div class="version-block">
+  <div class="version-title">v1.2.5 <span class="date">2026-04-28</span></div>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>批量备份多个 WAR 包时 FTP 421 断连</b>：长时间传输大文件会让控制连接空闲过久，部分 FTP 服务端会关闭连接。本版为 FTP 传输启用控制连接保活，并将批量备份中的目录创建、下载、上传、大小校验拆成短连接执行，避免一个长连接在多包备份过程中被踢掉。</li>
+    <li><b>Marketplace 2024.1.7 兼容性校验</b>：补充 Java 模块依赖声明，修复使用 <code>JavaSdk / JavaSdkVersion</code> 但未声明 <code>com.intellij.modules.java</code> 导致的兼容性问题。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.2.4 <span class="date">2026-04-27</span></div>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>编译 JDK 按 pom 自动匹配</b>：原先固定用 Project SDK（全工作空间共用，切分支不同步）。现在按模块 effective pom 的 <code>release / target / source</code> 在 IDEA 全局 SDK 表中精确匹配；匹配不到直接报错，不向上回退；pom 未声明则沿用 Project SDK。日志带 <code>[编译][JDK]</code> 前缀。</li>
+  </ul>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>兼容 IDEA 2024.2+ MavenProject API 变更</b>：<code>getReleaseLevel / getTargetLevel / getSourceLevel</code> 被移除导致 <code>NoSuchMethodError</code>，已兼容，跨 2024.1 ~ 2025.x 可用。</li>
+    <li><b>FTP「打包不上传模式」</b>：增量更新下，本地产物改为与 FTP 上传同源（staging / aligned 包，WAR 嵌入走 <code>patchExistingJar</code>），包内未变更条目保留远端原始时间戳。</li>
+    <li><b>FTP「部署目标」主目标支持取消勾选</b>：客户备份目录命名不规范（如 <code>yyyyMMdd</code> 等非 <code>backup</code> 关键字目录）时，<code>SCAN_SKIP_DIRS</code> 兜不住，备份包会被当作主目标锁定且无法取消；现移除"锁定不可取消"约束（默认仍勾选 + 加粗显示），用户可手动取消任意目录下的包。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.2.3 <span class="date">2026-04-27</span></div>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>FTP「部署目标」扫描会把备份目录下的历史包当作主目标列出</b>：在已存在 <code>backups/{YYYYMMDD}_{user}/</code> 等目录的客户环境上，UI 会把这些备份包勾成主目标，存在被覆盖写的风险。<code>core</code> 中扫描跳过列表 <code>SCAN_SKIP_DIRS</code> 原本只在 CLI 校验路径生效，UI 浏览路径自带一份不完整的硬编码黑名单（仅 <code>backup / bak</code>）；现统一为单一真相源 <code>{backup, backups, bak, .backup, .flux-lock}</code>，CLI 与 UI 共用，避免漂移。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.1.2 <span class="date">2026-04-25</span></div>
+
+  <h3 class="tag-opt">架构优化</h3>
+  <ul>
+    <li><b>工程拆分为多模块</b>：原单工程 <code>flux-deploy-plugin</code> 拆成 <code>core / plugin / cli</code> 三个 Gradle 模块。<code>core</code> 是纯业务（不依赖 IntelliJ Platform），<code>plugin</code> 仅做 IDEA 插件壳，<code>cli</code> 输出独立 fat-jar。代码级 156 处 IntelliJ import 编译期保证只在 plugin 模块——再也不会"误把 IDE 类打进 CLI"。</li>
+    <li><b>恢复 CLI 入口</b>：<code>cli/build/libs/flux-deploy-cli-1.1.2-all.jar</code> 约 776KB，含完整业务代码 + commons-net + Gson；可直接 <code>java -jar</code> 调用。子命令：<code>deploy / schema / credential / unlock / rollback / patch-local / browse</code>。</li>
+    <li><b>新增 AI Skill</b>：<code>flux-customer-service-update</code>，让 LLM 通过 CLI 完成客服更新；密码全程不经过 AI（由 CLI 内部从 <code>~/.flux-deploy/credentials.toml</code> 读取并 AES-256-GCM 解密）。</li>
+  </ul>
+
+  <h3 class="tag-opt">UI 简化</h3>
+  <ul>
+    <li><b>更新模式三档合并为两档</b>：<code>整包更新 / 手动选择 / 自动检测变更</code> → <code>整包更新 / 增量更新</code>。「文件来源」（手选 / Git 检测）不再是模式选项，而是同一个增量模式下的预填方式：进面板默认按 Git 变更勾选，用户可任意增删。原来三个模式互斥，现在能"在 Git 默认基础上调整"——更灵活。</li>
+    <li>右键菜单「自动检测」「手动选择」两个入口保留，但都进入新的「增量更新」模式，只是预填方式不同。</li>
+    <li>插件 ZIP 600KB（基本不变）；CLI fat-jar 776KB（含全部业务代码 + 第三方依赖）。</li>
+  </ul>
+
+  <h3 class="tag-opt">CLI Schema 简化</h3>
+  <ul>
+    <li>删除 <code>mode=auto</code>（合并进 <code>incremental</code>）；CLI 不再内置 <code>git status</code> 检测，"文件来源"由调用方负责。</li>
+    <li>删除 <code>skipCompile</code> 字段；<code>incremental</code> 模式强制 <code>mvn clean package</code>，避免"改了源码忘编译就上线"。</li>
+    <li>删除 <code>gitRoot</code> 字段。</li>
+    <li><code>schema</code> 子命令（v1.1.1 引入）输出的 JSON Schema 反映新约束，AI Skill 可实时加载。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.1.1 <span class="date">2026-04-24</span></div>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>运行日志默认展开</b>：面板打开即可看到日志窗口，无需手动点开；日志区比例沿用默认 <code>0.66</code>。</li>
+    <li><b>部署目标 Tab 未选中态常驻灰底</b>：未选中的「FTP 模式 / 本地模式」按钮一直显示灰色背景，提示用户这是可点击按钮（原先只在鼠标悬浮时才有灰底）。</li>
+    <li><b>变更文件树支持目录双击展开/折叠</b>：在目录节点上双击即可切换展开状态，无需精确点击左侧三角图标；文件叶子节点不响应。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.1.0 <span class="date">2026-04-23</span></div>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li>执行按钮重命名：<code>更新FTP → 打包并上传</code>、<code>本地打包 → 打包不上传</code>。</li>
+    <li>本地模式源包区改为拖放式卡片。</li>
+    <li>FTP 刷新独立为行内图标按钮（从 <code>⋯</code> 菜单中取出）；图标按钮统一去边框。</li>
+    <li>执行区 / 日志区默认高度按执行区所需最低高度自适应，源工程 / 目标拿到剩余空间。</li>
+    <li>各类树 / 下拉弹窗加鼠标悬浮行高亮。</li>
+  </ul>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li>"⋯ 更多 → 切换账号" 抛 <code>IllegalComponentStateException</code>。</li>
+    <li>首次打开面板时"更新模式"下拉与右侧显示区不一致。</li>
+    <li>工程 / 项目 / 账号弹窗切到其他应用时仍浮在对方窗口上。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.0.9 <span class="date">2026-04-21</span></div>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>Windows 下手动选择模式文件树展成一列</b>：源头把路径分隔符 <code>\</code> 规范化为 <code>/</code>，文件按多级目录正常展开；同时修复工程按钮 / 确认对话框 / 本地文件扫描里同类隐患。</li>
+    <li><b>Windows 下工程按钮显示完整路径</b>：按钮只保留最后一段目录名（原实现仅识别 <code>/</code>，Windows 路径全是 <code>\</code> 时整条路径被当成模块名）。</li>
+    <li><b>编译执行 mvn 时继承 IDE 环境的 JAVA_HOME</b>：现在强制使用 IDEA Project Structure 里配置的 Project SDK，日志新增 <code>[编译] 使用 JDK: {path}</code> 便于排障。Project SDK 未配置时直接报错。</li>
+  </ul>
+
+  <h3 class="tag-new">新增</h3>
+  <ul>
+    <li><b>目标区加载中状态条</b>：FTP 请求期间顶部显示旋转图标 + 描述文字（"加载系统列表…" / "加载目标包列表…" 等），避免慢速 FTP 下"下拉框空白以为没内容"。并发任务用计数器保护，所有任务都结束才隐藏。</li>
+    <li><b>预检总结日志</b>：预检结束后必定输出一行 <code>[预检] 通过</code> 或 <code>[预检] 未通过：{原因}</code>，覆盖"有主目标 / 仅嵌入目标 / 无目标"三种分支。</li>
+    <li><b>更新记录文件历史命名自动迁移</b>：FTP 上两种命名（<code>xxx.jar_update_note.txt</code> 标准 vs <code>xxx_update_note.txt</code> 历史）会被自动统一到标准命名；写入顺序"先写后删"保证不丢数据，首次合并时头部加迁移标记，防重复拼接。</li>
+  </ul>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>更新模式重命名</b>：整包替换 → <b>整包更新</b>；更新选中文件 → <b>手动选择</b>；自动检索修改文件 → <b>自动检测变更</b>。</li>
+    <li><b>默认选中"自动检测变更"</b>：日常高频场景，少一次点击。</li>
+    <li><b>执行区 / 执行日志 默认高度对齐</b>：左列源/执行 和 右列目标/日志 比例均改为 <code>0.66</code>，下半部同高。</li>
+    <li><b>术语统一</b>：内部类"残留清理"替换原"孤儿清理"表述（功能行为不变）。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.0.8 <span class="date">2026-04-19</span></div>
+
+  <h3 class="tag-new">新增</h3>
+  <ul>
+    <li><b>备份冲突三选项策略</b>：点击「更新 FTP」检测到当天已有备份时，弹出处理方式对话框，可选：
+      <ul>
+        <li><b>覆盖备份</b>：用当前远端包覆盖老备份（原始远端包将永久丢失）</li>
+        <li><b>使用原始备份</b>（推荐）：本次不备份，保留更早的备份作为回滚源</li>
+        <li><b>新增备份目录</b>：并行建 <code>yyyyMMdd_{开发}_v2 / _v3 / ...</code> 目录，两份备份都保留</li>
+      </ul>
+    </li>
+    <li><b>多主目标支持</b>：同系统下同名 JAR 分散在不同子目录（如 <code>shared-edp/X.jar</code> + <code>shared-tms/X.jar</code>）时，会自动识别并独立备份 / 加锁 / 上传每一个；备份路径按父目录自动分隔为 <code>backup/yyyyMMdd_{开发}/{子目录}/X.jar</code>。</li>
+    <li><b>内部类残留清理</b>：修改主类时，若原远端包含有 <code>Foo$N.class</code> 而本地编译产物中已不存在（重构时删掉了某个内部类），会自动将残留条目从输出包中清理，避免运行时 <code>NoClassDefFoundError</code>。</li>
+    <li><b>编译前自动保存 IDE buffer</b>：编译前调用 <code>FileDocumentManager.saveAllDocuments()</code>，消除"改了代码没保存导致 mvn 读旧源码"的顽固问题。</li>
+    <li><b>编译后产物校验</b>：打印产物大小与 mtime；若 mtime 早于 mvn 启动时间，输出警告（可能 pom finalName 不对 / mvn clean 失败）。</li>
+    <li><b>本地打包确认对话框</b>：FTP 模式下点击「本地打包」会弹出确认框，列出目标包与执行计划，避免误点。</li>
+    <li><b>源工程选择弹窗：加搜索框</b>：在工程树上方加入搜索框，输入时切换为扁平列表、显示每个模块的父路径，支持 <code>artifactId</code> 和父目录名关键字匹配。</li>
+    <li><b>自动化测试套件</b>：
+      <ul>
+        <li><code>./gradlew runLocalModeTest</code>：本地模式 3 场景 × 3 模式全自动回归</li>
+        <li><code>./gradlew runFtpModeTest</code>：FTP 模式 3 种 DeployMode 全自动（自建测试目录、自清理）</li>
+        <li><code>./gradlew runAllE2ETests</code>：一键跑全部</li>
+      </ul>
+    </li>
+    <li><b>失败总结卡片</b>：部署失败后日志末尾统一输出 <code>❌ 部署失败</code> 卡片 + 原因，避免用户往上滚才能定位失败点。</li>
+  </ul>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>日志格式整体改版</b>：
+      <ul>
+        <li>消息内嵌 <code>\n</code> 会自动拆行，每行独立带时间戳，空段转为无前缀空行做视觉分隔。原先的 banner 错位问题（<code>╔══╗</code> 不带时间戳）已修复</li>
+        <li>部署开始不再清空日志，追加 <code>────── 开始新一轮部署 ──────</code> 分隔线，保留前置检查上下文</li>
+        <li>所有用户动作加 <code>[操作]</code> 前缀日志：按钮点击、对话框确认/取消、策略选择都留痕</li>
+        <li>mvn 输出去除 <code>-q</code> 确保 <code>BUILD SUCCESS</code> 可见；增加 <code>mvn 退出码</code> 日志</li>
+        <li>备份冲突检测：每个目标路径都打印查询结果 <code>[备份检查] ✓ 已存在 ...</code></li>
+        <li>去除重复 <code>开始预检...</code> 输出</li>
+      </ul>
+    </li>
+    <li><b>本地模式多版本 lib 精确选择</b>：当 WAR 的 <code>WEB-INF/lib/</code> 下同时存在同前缀多个版本（如 <code>scev6-utils-tms-9.0.0.jar</code> 和 <code>10.0.0.jar</code>）时，自动挑选版本与源产物一致的那个做替换；老版本不受影响。相应的 <code>WarEmbedUtil.embedJar</code> 也改用完整包名做精确前缀。</li>
+    <li><b>回滚：递归清理空备份子目录</b>：多目标备份形成的 <code>backup/日期_开发/子目录/子子目录/X.jar</code> 结构，回滚后自底向上递归清理所有空目录。</li>
+    <li><b>重置按钮行为对齐</b>：本地模式重置按钮现在和 FTP 模式一致，同步清空源工程、本地包路径、日志、预检状态。</li>
+    <li><b>本地模式支持整包更新</b>：新增三种场景的 FULL 分流：
+      <ul>
+        <li><code>jar → jar</code>：新产物整体覆盖</li>
+        <li><code>war → war</code>：新产物整体覆盖</li>
+        <li><code>jar → war/lib</code>：新 jar 精确替换 WAR 内匹配版本的 lib jar</li>
+      </ul>
+    </li>
+    <li><b>WAR lib 对齐产物校验</b>：FULL + WAR 模式的 <code>alignWarLibs</code> 产物做 size / 存在性校验，异常立即终止而非传给后续阶段。</li>
+    <li><b>更新模式感知的刷新</b>：点击更新模式旁刷新按钮时，INCREMENTAL 模式下保留用户已勾选且仍存在的文件；AUTO_DETECT 重跑 Git；FULL 输出提示。</li>
+  </ul>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>多目标 FTP 部署 "包还是旧的" / 550 File not found</b>：之前多目标重构把暂存包构建移到了加锁之后，加锁会把远端原文件 rename，导致后续下载 550；已改为加锁前预构建每个目标的产物并缓存。</li>
+    <li><b>多目标嵌入阶段 mainOffset 错位</b>：<code>lockedPackages.get(ei + mainOffset)</code> 在多主目标下会取到错误的锁信息；改为 <code>mainOffset = mainTargets.size()</code>。</li>
+    <li><b>USE_EXISTING 策略下回滚会误删老备份</b>：借用已有备份作为回滚源时，rollback 后不再清理该备份（否则后续再次 USE_EXISTING 找不到回滚源）；<code>manualRollback</code> 同步处理。</li>
+    <li><b>凭据解密 Tag mismatch</b>：命令行测试启动时 <code>user.name</code> 与 IDE 运行时不同导致密钥派生不匹配；测试 gradle 任务已锁定 <code>user.name=xumanyi</code> 规避。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.0.7 <span class="date">2026-04-18</span></div>
+
+  <h3 class="tag-new">新增</h3>
+  <ul>
+    <li><b>更新前置校验</b>：点击「更新 FTP」或「本地打包」时会先做硬性校验（工程 / FTP 连接 / 目标包 / 勾选文件 / 任务客服 / 开发），缺失项会弹窗逐条列出阻断操作；预检按钮仍只输出日志不阻断。</li>
+    <li><b>备份冲突检测</b>：点击「更新 FTP」后会自动查询 FTP，若检测到当天同开发已有备份，弹出确认框列出将被覆盖的包，用户可选「仍然覆盖」或「取消」。</li>
+    <li><b>刷新按钮</b>：更新模式下拉旁新增 <code>↻</code> 按钮；整包模式提示，手动选择模式重扫模块并<b>保留用户之前勾选项</b>，自动检索模式重跑 Git。</li>
+    <li><b>备份使用提示</b>：执行备份勾选框旁加内联灰色斜体提示「重复备份会覆盖原包，多次更新请取消」，悬浮有详细说明。</li>
+    <li><b>源 ↕ 执行 可拖动</b>：左列新增分割手柄，可手动调整源区域与执行区的高度比例。</li>
+    <li><b>全量交互悬浮提示</b>：所有输入框、下拉、按钮、勾选框、Tab 都增加了功能/行为说明的 tooltip。</li>
+  </ul>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>按钮重命名</b>：<code>更新到FTP → 更新FTP</code>、<code>仅打包 → 本地打包</code>；本地模式的「生成新包」也统一改为「本地打包」。</li>
+    <li><b>FTP 状态行</b>：状态文字与按钮分两行，窄面板下按钮不再被窗口右边界遮挡。</li>
+    <li><b>账号切换弹窗</b>：每行加入「切换」「删除」按钮（替代红 × 图标），右对齐按钮边界防遮挡，最近验证日期显示为次级文字。</li>
+  </ul>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>文档对话框样式崩溃</b>：之前使用了 Swing HTMLEditorKit 不支持的 CSS（border-radius / border shorthand），改为 IntelliJ 内置 JCEF（Chrome 内核）渲染，字体与样式完全等同浏览器。</li>
+    <li><b>文档按钮切换</b>：标题栏「使用手册 / 更新日志」按钮再次点击可切回部署面板，等同于「返回」按钮。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.0.6 <span class="date">2026-04-17</span></div>
+
+  <h3 class="tag-new">新增</h3>
+  <ul>
+    <li><b>本地模式</b>：目标区新增「本地模式」Tab，用户可直接选择或拖入本地 jar/war 包，在本地生成打补丁后的新包；支持 jar→jar、war→war、jar→war/lib 三种分流场景；校验包名前缀与版本号严格一致；不登录 FTP、不备份、无版本记录、不可回滚。</li>
+    <li><b>多账号管理</b>：FTP 登录支持保存多个账号。点「账号 ▾」弹出列表，可切换、删除、添加新账号；切换时自动刷新项目 / 系统 / 目标包。</li>
+    <li><b>使用手册 / 更新日志</b>：工具窗口标题栏新增图标按钮，点击后在面板内切换到文档视图。</li>
+    <li><b>拖拽选包</b>：本地模式支持从 Finder 或项目树拖入 jar/war 到面板或包路径输入框。</li>
+  </ul>
+
+  <h3 class="tag-opt">优化</h3>
+  <ul>
+    <li><b>布局重构</b>：左列分上下两段，源占主区域、执行区固定在左下自适应高度；右列目标 ↕ 日志 可上下拖动，带抓取手柄；执行区不再参与拖动。</li>
+    <li><b>日志默认高度</b>：从 50% 调整为 34%（目标占 66%），日志空间不再过大。</li>
+    <li><b>执行区输入</b>：开发 / 任务 / 客服 改为单独一行，所有标签对齐。</li>
+    <li><b>字段重命名</b>：操作人 → 开发，任务号 → 任务，客服号 → 客服；内容允许中文、特殊字符、长文本原样保存。</li>
+    <li><b>勾选项联动</b>：未勾选「更新版本记录」和「执行备份」时，开发输入框自动隐藏，可不填。</li>
+    <li><b>勾选项提示</b>：鼠标悬浮「更新版本记录」和「执行备份」会显示详细说明。</li>
+    <li><b>账号弹窗</b>：右对齐按钮右边界避免被遮挡；账号行增加「切换 / 删除」按钮，带悬浮高亮和最近验证日期。</li>
+    <li><b>本地模式摘要</b>：包文件输入框只显示文件名，完整路径、输出路径、待更新文件数移到下方摘要区。</li>
+  </ul>
+
+  <h3 class="tag-fix">修复</h3>
+  <ul>
+    <li><b>版本记录格式</b>：任务字段加「任务：」前缀，客服字段加「客服：」前缀；时间格式统一为 <code>yyyy-MM-dd HH:mm:ss</code>；任务 / 客服至少填一项即可，未填字段保留标签、值为空。</li>
+    <li><b>任务 / 客服必填逻辑</b>：改为至少填一个，不再强制要求任务。</li>
+  </ul>
+</div>
+
+<div class="version-block">
+  <div class="version-title">v1.0.5 及更早 <span class="date">历史版本</span></div>
+  <ul>
+    <li>基础 FTP 部署：整包更新 / 手动选择 / 自动检测变更三种模式</li>
+    <li>事务性多目标部署：备份 → 加锁 → 上传 → 嵌入 → 解锁 → 版本记录</li>
+    <li>手动回滚</li>
+    <li>本地打包（不上传 FTP）</li>
+    <li>Git 变更检测</li>
+    <li>FTP 凭据缓存与自动连接</li>
+  </ul>
+</div>
+
+</div>
+</body>
+</html>
