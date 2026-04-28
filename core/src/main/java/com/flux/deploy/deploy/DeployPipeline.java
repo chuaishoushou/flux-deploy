@@ -144,10 +144,16 @@ public class DeployPipeline {
                             + ": " + msg);
 
                     // 临时：旧的全量回滚移除后，在 DeployPipeline 重构（Task 11/12）前先单目标回滚
-                    try { rollback.rollbackTarget(target); } catch (Exception ex) { /* ignore */ }
+                    boolean rolledBackOk = true;
+                    try {
+                        rollback.rollbackTarget(target);
+                    } catch (Exception ex) {
+                        rolledBackOk = false;
+                        System.err.println("[回滚异常] " + target.getPackageName() + ": " + ex.getMessage());
+                    }
                     DeployResult.RollbackResult rollbackResult = new DeployResult.RollbackResult();
                     rollbackResult.setAttempted(true);
-                    rollbackResult.setSuccess(true);
+                    rollbackResult.setSuccess(rolledBackOk);
                     result.setRollback(rollbackResult);
 
                     // 填充已完成目标的结果
