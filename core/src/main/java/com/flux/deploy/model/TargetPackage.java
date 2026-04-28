@@ -62,6 +62,10 @@ public class TargetPackage {
         COMPLETED,
         /** 已回滚 */
         ROLLED_BACK,
+        /** 因前序失败被跳过（fail-fast 后未开始） */
+        SKIPPED,
+        /** 失败且自动回滚未完成，需人工介入 */
+        FAILED_NEEDS_MANUAL,
         /** 失败 */
         FAILED
     }

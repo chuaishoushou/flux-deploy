@@ -20,6 +20,8 @@ public class DeployResult {
     private List<TargetResult> targets = new ArrayList<>();
     private RollbackResult rollback;
     private List<ErrorInfo> errors = new ArrayList<>();
+    /** 是否因用户主动取消而结束 */
+    private boolean cancelled;
 
     /**
      * 创建部署结果实例，自动记录当前时间戳
@@ -78,6 +80,9 @@ public class DeployResult {
 
     public List<ErrorInfo> getErrors() { return errors; }
     public void setErrors(List<ErrorInfo> errors) { this.errors = errors; }
+
+    public boolean isCancelled() { return cancelled; }
+    public void setCancelled(boolean cancelled) { this.cancelled = cancelled; }
 
     // ========== 内部结构 ==========
 
