@@ -1020,10 +1020,15 @@ public class DeployExecutionService {
                     logCallback.accept("\n╔══════════════════════════════╗");
                     logCallback.accept("║        部署全部完成          ║");
                     logCallback.accept("╚══════════════════════════════╝");
-                    logCallback.accept("已更新 " + updatedPackages.size() + " 个包：");
-                    for (String[] pair : updatedPackages) {
-                        logCallback.accept("  ✓ " + pair[0]);
+                    StringBuilder fileNames = new StringBuilder();
+                    for (int i = 0; i < updatedPackages.size(); i++) {
+                        String remotePath = updatedPackages.get(i)[0];
+                        int slashIdx = remotePath.lastIndexOf('/');
+                        String fileName = slashIdx >= 0 ? remotePath.substring(slashIdx + 1) : remotePath;
+                        if (i > 0) fileNames.append("、");
+                        fileNames.append(fileName);
                     }
+                    logCallback.accept("已更新 " + updatedPackages.size() + " 个包：" + fileNames);
                     if (backupDir != null) {
                         logCallback.accept("备份目录：" + backupDir);
                     } else {
