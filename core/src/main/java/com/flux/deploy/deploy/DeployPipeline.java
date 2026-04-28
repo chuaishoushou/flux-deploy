@@ -131,13 +131,15 @@ public class DeployPipeline {
                               List<TargetPackage> targets, DeployResult result) {
         ResidualLockResolver resolver = new ResidualLockResolver(
                 ResidualLockResolver.wrap(ops, ftpLock), config.getOperator());
-        java.util.List<ResidualLockDiagnosis> all = new java.util.ArrayList<>();
+        List<ResidualLockDiagnosis> all = new ArrayList<>();
+        String currentTarget = "";
         try {
             for (TargetPackage t : targets) {
+                currentTarget = t.getPackageName();
                 all.addAll(resolver.diagnose(t.getRemoteDir(), t.getPackageName()));
             }
         } catch (IOException e) {
-            result.addError("stage0", "", "残留锁扫描失败: " + e.getMessage());
+            result.addError("stage0", currentTarget, "残留锁扫描失败: " + e.getMessage());
             return false;
         }
 
@@ -153,16 +155,18 @@ public class DeployPipeline {
         }
 
         if (policy == DeployConfig.ResidualLockPolicy.AUTO_RESOLVE_OWN) {
-            java.util.List<ResidualLockDiagnosis> others = new java.util.ArrayList<>();
+            List<ResidualLockDiagnosis> others = new ArrayList<>();
+            int alreadyCleaned = 0;
             for (ResidualLockDiagnosis d : all) {
                 if (d.isOwnedByCurrentUser()
                         && d.getSuggestion() != ResidualLockDiagnosis.SuggestedAction.NEEDS_HUMAN) {
                     try {
                         resolver.apply(d);
+                        alreadyCleaned++;
                         System.out.println("[stage0] 自动清理: " + d.getLockFileName() + " (" + d.getSuggestion() + ")");
                     } catch (IOException e) {
                         result.addError("stage0", d.getOriginalPackageName(),
-                                "残留锁自动清理失败: " + e.getMessage());
+                                "残留锁自动清理失败 (在已清理 " + alreadyCleaned + " 个后中止): " + e.getMessage());
                         return false;
                     }
                 } else {
