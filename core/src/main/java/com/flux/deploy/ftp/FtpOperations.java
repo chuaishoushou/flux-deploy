@@ -216,6 +216,33 @@ public class FtpOperations {
     }
 
     /**
+     * 递归删除目录（含子目录与所有文件）。
+     *
+     * @param remoteDirPath 要删除的目录路径
+     * @throws IOException 列表 / 删除失败
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public void removeDirRecursively(String remoteDirPath) throws IOException {
+        String d = remoteDirPath.endsWith("/") ? remoteDirPath : remoteDirPath + "/";
+        for (FTPFile f : listFiles(d)) {
+            String n = FtpSession.decodeRemotePath(f.getName());
+            if (".".equals(n) || "..".equals(n)) continue;
+            String p = d + n;
+            if (f.isDirectory()) {
+                removeDirRecursively(p);
+            } else {
+                delete(p);
+            }
+        }
+        // Remove the directory itself via FTPClient.removeDirectory
+        if (!session.getClient().removeDirectory(d)) {
+            throw new IOException("无法删除目录: " + d
+                    + "（可能仍有内容或权限不足）");
+        }
+    }
+
+    /**
      * 检查远程文件是否存在并返回大小
      *
      * @param remoteFilePath 远程文件完整路径

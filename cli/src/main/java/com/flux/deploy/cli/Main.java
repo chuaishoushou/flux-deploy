@@ -78,6 +78,9 @@ public final class Main {
         if ("rollback".equals(cmd)) {
             System.exit(RollbackCommand.run(slice(args, 1)));
         }
+        if ("backup-prune".equals(cmd)) {
+            System.exit(BackupPruneCommand.run(slice(args, 1)));
+        }
         if ("patch-local".equals(cmd)) {
             System.exit(PatchLocalCommand.run(slice(args, 1)));
         }
@@ -274,6 +277,7 @@ public final class Main {
         out.println("  unlock     扫描并恢复残留锁文件（中断的部署留下的 *__LOCK__* 文件）");
         out.println("  unlock-resolve 残留锁结构化诊断与清理（推荐替代 unlock）");
         out.println("  rollback   从指定备份目录恢复 FTP 上的包");
+        out.println("  backup-prune  清理 backup/ 下保留期外的备份目录");
         out.println("  patch-local 对本地 jar/war 打补丁（本地模式，不涉及 FTP）");
         out.println("  browse     列出 FTP 目录结构（子目录 / 可部署包）");
         out.println();
