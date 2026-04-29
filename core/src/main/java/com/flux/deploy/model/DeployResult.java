@@ -64,6 +64,45 @@ public class DeployResult {
         this.success = true;
     }
 
+    /**
+     * 生成人类可读的部署报告（CLI 文本输出 / IDE 日志面板使用）。
+     */
+    public String formatReport() {
+        StringBuilder sb = new StringBuilder();
+        int total = targets == null ? 0 : targets.size();
+        int completed = 0;
+        java.util.List<String> failedNames = new java.util.ArrayList<>();
+        java.util.List<String> okNames = new java.util.ArrayList<>();
+        java.util.List<String> skippedNames = new java.util.ArrayList<>();
+        if (targets != null) {
+            for (TargetResult t : targets) {
+                if (t.isVerified()) { completed++; okNames.add(t.getPackageName()); }
+                else if (errors != null && hasErrorFor(t.getPackageName())) failedNames.add(t.getPackageName());
+                else skippedNames.add(t.getPackageName());
+            }
+        }
+        String header = cancelled ? "[CANCELLED] 部署被取消"
+                : (errors != null && !errors.isEmpty()) ? "[FAIL] 部署中止"
+                : "[OK] 部署成功 " + completed + "/" + total;
+        sb.append(header).append('\n');
+        if (!okNames.isEmpty()) sb.append("  ✅ 成功: ").append(okNames).append('\n');
+        if (!failedNames.isEmpty()) sb.append("  ❌ 失败: ").append(failedNames).append('\n');
+        if (!skippedNames.isEmpty()) sb.append("  ⏭ 跳过: ").append(skippedNames).append('\n');
+        if (errors != null) {
+            for (ErrorInfo e : errors) {
+                sb.append("  [").append(e.getGate()).append("] ")
+                  .append(e.getTarget()).append(" - ").append(e.getMessage()).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private boolean hasErrorFor(String pkg) {
+        if (errors == null) return false;
+        for (ErrorInfo e : errors) if (pkg != null && pkg.equals(e.getTarget())) return true;
+        return false;
+    }
+
     // ========== Getters & Setters ==========
 
     public boolean isSuccess() { return success; }
