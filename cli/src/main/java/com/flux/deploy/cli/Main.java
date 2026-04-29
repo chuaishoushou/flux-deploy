@@ -202,6 +202,10 @@ public final class Main {
      * @date 2026-03-21
      */
     private static void printResult(DeployResult result, String format) {
+        // 始终先打印人类可读 summary 到 stderr，便于操作者快速看到结果（不影响 stdout 上的 JSON / text 输出）
+        if (result != null) {
+            System.err.println(result.formatReport());
+        }
         if ("text".equalsIgnoreCase(format)) {
             System.out.println("success=" + isSuccess(result));
             System.out.println("targets=" + (result.getTargets() == null ? 0 : result.getTargets().size()));
