@@ -1,5 +1,6 @@
 package com.flux.deploy.plugin.service;
 
+import com.flux.deploy.deploy.CancellationToken;
 import com.flux.deploy.deploy.DeployPipeline;
 import com.flux.deploy.ftp.FtpOperations;
 import com.flux.deploy.ftp.FtpSession;
@@ -64,6 +65,36 @@ public class DeployExecutionService {
     /** null 安全转空字符串 */
     private static String nullToEmpty(String s) {
         return s == null ? "" : s;
+    }
+
+    /**
+     * 把当前 IDEA 后台任务的 {@link ProgressIndicator} 适配成核心层的
+     * {@link CancellationToken} 注入到 {@link DeployConfig}，
+     * 让 pipeline 能在网关之间感知用户点击 IDE 取消按钮。
+     *
+     * <p>必须在每次 {@code new DeployPipeline(cfg).execute()} 之前调用，
+     * 这样在 stage1 / stage2 的轮询点上 {@code isCancelled()} 才能返回 true。
+     * 当 indicator 为 null（非任务上下文）时，token 永远返回 false，行为退化为不可取消。</p>
+     *
+     * @param cfg 即将交给 pipeline 的部署配置
+     * @author claude
+     * @date 2026-04-29
+     */
+    private static void applyCancellationToken(DeployConfig cfg) {
+        ProgressIndicator indicator = ProgressManager.getInstance().getProgressIndicator();
+        cfg.setCancellationToken(new CancellationToken() {
+            @Override
+            public boolean isCancelled() {
+                return indicator != null && indicator.isCanceled();
+            }
+
+            @Override
+            public void throwIfCancelled() {
+                if (isCancelled()) {
+                    throw new CancellationToken.CancellationException();
+                }
+            }
+        });
     }
 
     /**
@@ -583,6 +614,7 @@ public class DeployExecutionService {
 
                         if (mainTarget0 != null) {
                             // 有主目标：用 pipeline 预检
+                            applyCancellationToken(config);
                             DeployPipeline pipeline = new DeployPipeline(config);
                             DeployResult result = pipeline.execute();
                             // 总结日志：成功 / 失败一律输出一行
@@ -906,6 +938,7 @@ public class DeployExecutionService {
                             targetConfig.setSkipNote(true);
                             targetConfig.setSkipLock(true);
 
+                            applyCancellationToken(targetConfig);
                             DeployPipeline pipeline = new DeployPipeline(targetConfig);
                             DeployResult thisResult = pipeline.execute();
 
@@ -1685,6 +1718,7 @@ public class DeployExecutionService {
             embedConfig.setSkipNote(true);
             embedConfig.setSkipLock(true);
 
+            applyCancellationToken(embedConfig);
             DeployPipeline embedPipeline = new DeployPipeline(embedConfig);
             DeployResult embedDeployResult = embedPipeline.execute();
 
