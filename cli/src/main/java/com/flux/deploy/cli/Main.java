@@ -100,6 +100,7 @@ public final class Main {
         Path passwordFile = null;
         boolean dryRun = false;
         boolean verbose = false;
+        boolean autoResolveOwn = false;
 
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -115,6 +116,9 @@ public final class Main {
                     break;
                 case "--verbose":
                     verbose = true;
+                    break;
+                case "--auto-resolve-own":
+                    autoResolveOwn = true;
                     break;
                 case "-h":
                 case "--help":
@@ -139,6 +143,10 @@ public final class Main {
         } catch (ConfigLoader.InvalidConfigException e) {
             System.err.println("[flux-deploy-cli] 配置错误: " + e.getMessage());
             return EX_USAGE;
+        }
+
+        if (autoResolveOwn) {
+            cfg.setResidualLockPolicy(com.flux.deploy.model.DeployConfig.ResidualLockPolicy.AUTO_RESOLVE_OWN);
         }
 
         if (verbose) {
@@ -270,6 +278,7 @@ public final class Main {
         out.println("  --password-file <path>  (可选) 密码文件路径，覆盖 ftp.password");
         out.println("  --dry-run               (可选) 强制仅预检，不改动远程");
         out.println("  --verbose               (可选) 打印调试信息到 stderr");
+        out.println("  --auto-resolve-own       (可选) 自动清理 owner == 当前用户的残留锁；他人的锁仍报错");
         out.println("  -h, --help              显示帮助");
         out.println();
         out.println("Exit codes:");
