@@ -2,6 +2,9 @@ package com.flux.deploy.plugin.service;
 
 import com.flux.deploy.deploy.CancellationToken;
 import com.flux.deploy.deploy.DeployPipeline;
+import com.flux.deploy.deploy.ResidualLockDiagnosis;
+import com.flux.deploy.deploy.ResidualLockResolver;
+import com.flux.deploy.ftp.FtpLock;
 import com.flux.deploy.ftp.FtpOperations;
 import com.flux.deploy.ftp.FtpSession;
 import com.flux.deploy.model.DeployConfig;
@@ -9,6 +12,7 @@ import com.flux.deploy.model.DeployResult;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.flux.deploy.plugin.model.FtpTargetSelection;
 import com.flux.deploy.plugin.model.PluginDeployConfig;
+import com.flux.deploy.plugin.toolwindow.ResidualLockResolveDialog;
 import com.flux.deploy.plugin.util.LogInterceptor;
 import com.flux.deploy.util.WarEmbedUtil;
 import com.intellij.openapi.application.ReadAction;
@@ -889,6 +893,88 @@ public class DeployExecutionService {
                         return; // localOnly 模式到此结束
                     }
 
+                    // ── Stage 0 (IDE)：弹窗确认残留锁处理 ──
+                    // 在 Phase 2 加锁之前先排查残留锁；若存在，让用户在 IDE 弹窗中勾选要清理的锁。
+                    // 用户取消或仍有残留 → 中止部署；用户清理完成 → 后续每个 targetConfig 设
+                    // EXTERNAL_RESOLVED，使核心 pipeline 内部 Stage 0 直接跳过（与 IDE 已处理一致）。
+                    java.util.List<ResidualLockDiagnosis> stage0All = new java.util.ArrayList<>();
+                    java.util.List<String[]> stage0Targets = new java.util.ArrayList<>();
+                    for (FtpTargetSelection t : allTargets) {
+                        String rp = t.getRemoteDir() + t.getRelativePath();
+                        int lastSlash = rp.lastIndexOf('/');
+                        String dir = lastSlash > 0 ? rp.substring(0, lastSlash + 1) : t.getRemoteDir();
+                        if (!dir.endsWith("/")) dir = dir + "/";
+                        stage0Targets.add(new String[]{dir, t.getTargetName()});
+                    }
+                    if (!stage0Targets.isEmpty()) {
+                        try (FtpSession s0 = new FtpSession(ftpHost, ftpPort)) {
+                            s0.connect(ftpUsername, ftpPassword);
+                            FtpOperations s0Ops = new FtpOperations(s0);
+                            FtpLock s0Lock = new FtpLock(s0Ops);
+                            ResidualLockResolver resolver = new ResidualLockResolver(
+                                    ResidualLockResolver.wrap(s0Ops, s0Lock), pluginConfig.getOperator());
+                            for (String[] t : stage0Targets) {
+                                stage0All.addAll(resolver.diagnose(t[0], t[1]));
+                            }
+                            if (!stage0All.isEmpty()) {
+                                java.util.List<ResidualLockDiagnosis> finalAll = stage0All;
+                                boolean[] proceed = {false};
+                                java.util.List<ResidualLockDiagnosis> selected = new java.util.ArrayList<>();
+                                try {
+                                    SwingUtilities.invokeAndWait(() -> {
+                                        ResidualLockResolveDialog dialog =
+                                                new ResidualLockResolveDialog(project, finalAll);
+                                        if (dialog.showAndGet()) {
+                                            selected.addAll(dialog.getSelected());
+                                            proceed[0] = true;
+                                        }
+                                    });
+                                } catch (Exception swingEx) {
+                                    logCallback.accept("[stage0] 对话框异常: " + swingEx.getMessage());
+                                    logFailureSummary(logCallback, "Stage 0 对话框异常");
+                                    onComplete.accept(null);
+                                    return;
+                                }
+                                if (!proceed[0]) {
+                                    logCallback.accept("[stage0] 用户取消");
+                                    logFailureSummary(logCallback, "用户取消 Stage 0 残留锁处理");
+                                    onComplete.accept(null);
+                                    return;
+                                }
+                                for (ResidualLockDiagnosis d : selected) {
+                                    try {
+                                        resolver.apply(d);
+                                        logCallback.accept("[stage0] 已清理: " + d.getLockFileName());
+                                    } catch (java.io.IOException ie) {
+                                        logCallback.accept("[stage0] 清理失败: " + ie.getMessage());
+                                        logFailureSummary(logCallback, "Stage 0 清理失败: " + ie.getMessage());
+                                        onComplete.accept(null);
+                                        return;
+                                    }
+                                }
+                                // 复检：仍有未处理的残留锁则中止
+                                boolean stillHasResidual = false;
+                                for (String[] t : stage0Targets) {
+                                    if (!resolver.diagnose(t[0], t[1]).isEmpty()) {
+                                        stillHasResidual = true;
+                                        break;
+                                    }
+                                }
+                                if (stillHasResidual) {
+                                    logCallback.accept("[stage0] 仍有未处理的残留锁，部署中止");
+                                    logFailureSummary(logCallback, "Stage 0 仍有未处理的残留锁");
+                                    onComplete.accept(null);
+                                    return;
+                                }
+                            }
+                        } catch (java.io.IOException ftpEx) {
+                            logCallback.accept("[stage0] FTP 错误: " + ftpEx.getMessage());
+                            logFailureSummary(logCallback, "Stage 0 FTP 错误: " + ftpEx.getMessage());
+                            onComplete.accept(null);
+                            return;
+                        }
+                    }
+
                     // ── Phase 2: 加锁 ──
                     logCallback.accept("\n━━ 正在加锁所有目标包 ━━");
                     List<String[]> lockedPackages = new ArrayList<>();
@@ -937,6 +1023,8 @@ public class DeployExecutionService {
                             targetConfig.setSkipBackup(true);
                             targetConfig.setSkipNote(true);
                             targetConfig.setSkipLock(true);
+                            // IDE 已在 Phase 0 处理过残留锁，告知 pipeline 直接跳过其内部 Stage 0
+                            targetConfig.setResidualLockPolicy(DeployConfig.ResidualLockPolicy.EXTERNAL_RESOLVED);
 
                             applyCancellationToken(targetConfig);
                             DeployPipeline pipeline = new DeployPipeline(targetConfig);
