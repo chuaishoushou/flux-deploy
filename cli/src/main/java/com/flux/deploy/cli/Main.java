@@ -72,6 +72,9 @@ public final class Main {
         if ("unlock".equals(cmd)) {
             System.exit(UnlockCommand.run(slice(args, 1)));
         }
+        if ("unlock-resolve".equals(cmd)) {
+            System.exit(UnlockResolveCommand.run(slice(args, 1)));
+        }
         if ("rollback".equals(cmd)) {
             System.exit(RollbackCommand.run(slice(args, 1)));
         }
@@ -269,6 +272,7 @@ public final class Main {
         out.println("  schema     输出 JSON Schema（供 AI Skill 加载以了解当前 CLI 能力）");
         out.println("  credential 管理本机凭据缓存（set / list / delete；密码只在终端与 CLI 之间流动）");
         out.println("  unlock     扫描并恢复残留锁文件（中断的部署留下的 *__LOCK__* 文件）");
+        out.println("  unlock-resolve 残留锁结构化诊断与清理（推荐替代 unlock）");
         out.println("  rollback   从指定备份目录恢复 FTP 上的包");
         out.println("  patch-local 对本地 jar/war 打补丁（本地模式，不涉及 FTP）");
         out.println("  browse     列出 FTP 目录结构（子目录 / 可部署包）");
