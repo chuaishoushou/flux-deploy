@@ -236,11 +236,96 @@ public class DeployPipeline {
         return true;
     }
 
+    /**
+     * Stage 2: 每个目标各自跑完 stage2 全部 Gate。任一失败：回滚当前目标 + 剩余目标 SKIPPED。
+     */
     private void executeStage2(List<TargetPackage> targets, List<Gate> gates,
                                Rollback rollback, DeployResult result, CancellationToken cancel) {
-        // 过渡实现：Task 11 用真正的 per-target 流水替换
+        int idx = 0;
+        for (; idx < targets.size(); idx++) {
+            TargetPackage current = targets.get(idx);
+            try {
+                for (Gate gate : gates) {
+                    cancel.throwIfCancelled();
+                    gate.execute(current);
+                }
+                // 全部 gates 通过：状态由最后一个 Gate（UnlockGate）置为 COMPLETED
+            } catch (CancellationToken.CancellationException ce) {
+                result.setCancelled(true);
+                result.addError("cancel", current.getPackageName(), "用户取消");
+                attemptRollback(rollback, current, result);
+                markRemainingSkipped(targets, idx + 1, "用户取消，前序中止");
+                fillTargetResults(targets, result);
+                return;
+            } catch (Gate.GateException ge) {
+                result.addError(ge.getGateName(), current.getPackageName(), ge.getMessage());
+                current.setStatus(TargetPackage.Status.FAILED);
+                attemptRollback(rollback, current, result);
+                markRemainingSkipped(targets, idx + 1, "fail-fast: " + current.getPackageName() + " 失败");
+                fillTargetResults(targets, result);
+                return;
+            } catch (IOException ioe) {
+                // FTP 连接异常：留给 Task 12 处理（重连+rollback 或 FAILED_NEEDS_MANUAL）
+                handleIoException(current, ioe, rollback, targets, idx, result);
+                fillTargetResults(targets, result);
+                return;
+            }
+        }
         result.markSuccess();
         fillTargetResults(targets, result);
+    }
+
+    /**
+     * 尝试对当前目标执行回滚，结果写入 result.rollback。
+     * 回滚抛异常时将目标置为 FAILED_NEEDS_MANUAL。
+     */
+    private void attemptRollback(Rollback rollback, TargetPackage current, DeployResult result) {
+        DeployResult.RollbackResult rr = new DeployResult.RollbackResult();
+        rr.setAttempted(true);
+        try {
+            boolean acted = rollback.rollbackTarget(current);
+            rr.setSuccess(true);
+            if (acted) rr.getRestoredPackages().add(current.getPackageName());
+        } catch (Exception ex) {
+            rr.setSuccess(false);
+            current.setStatus(TargetPackage.Status.FAILED_NEEDS_MANUAL);
+            result.addError("rollback", current.getPackageName(),
+                    "回滚失败，需人工: " + ex.getMessage());
+        }
+        result.setRollback(rr);
+    }
+
+    /**
+     * 把 from 之后还处于 PENDING/BACKED_UP 的目标置为 SKIPPED。
+     */
+    private void markRemainingSkipped(List<TargetPackage> targets, int from, String reason) {
+        for (int i = from; i < targets.size(); i++) {
+            TargetPackage t = targets.get(i);
+            if (t.getStatus() == TargetPackage.Status.PENDING
+                    || t.getStatus() == TargetPackage.Status.BACKED_UP) {
+                t.setStatus(TargetPackage.Status.SKIPPED);
+            }
+        }
+    }
+
+    /**
+     * 处理 Stage 2 中 Gate 抛出的 IOException（FTP 连接级异常）。
+     * 当前先按现状记录并尝试回滚；Task 12 将扩展为重连后再 rollback。
+     */
+    private void handleIoException(TargetPackage current, IOException ioe,
+                                   Rollback rollback, List<TargetPackage> targets, int idx,
+                                   DeployResult result) {
+        // Task 12 扩展为重连后 rollback；当前先按现状记录
+        result.addError("io", current.getPackageName(), "FTP 异常: " + ioe.getMessage());
+        current.setStatus(TargetPackage.Status.FAILED);
+        try {
+            rollback.rollbackTarget(current);
+        } catch (Exception ex) {
+            current.setStatus(TargetPackage.Status.FAILED_NEEDS_MANUAL);
+            result.addError("rollback", current.getPackageName(),
+                    "回滚失败，需人工: " + ex.getMessage());
+        }
+        markRemainingSkipped(targets, idx + 1, "前序 IO 失败");
     }
 
     /**
@@ -443,8 +528,12 @@ public class DeployPipeline {
             tr.setBackupPath(target.getBackupRemotePath());
             tr.setLocalSha256(target.getLocalSha256());
             tr.setRemoteSha256(target.getRemoteSha256());
-            tr.setVerified(target.getStatus().ordinal() >= TargetPackage.Status.VERIFIED.ordinal());
-            tr.setNoteUpdated(target.getStatus().ordinal() >= TargetPackage.Status.NOTE_UPDATED.ordinal());
+            TargetPackage.Status s = target.getStatus();
+            tr.setVerified(s == TargetPackage.Status.VERIFIED
+                    || s == TargetPackage.Status.NOTE_UPDATED
+                    || s == TargetPackage.Status.COMPLETED);
+            tr.setNoteUpdated(s == TargetPackage.Status.NOTE_UPDATED
+                    || s == TargetPackage.Status.COMPLETED);
             tr.setNoteBackupSynced(target.getStatus() == TargetPackage.Status.COMPLETED);
             result.addTarget(tr);
         }
