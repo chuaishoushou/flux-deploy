@@ -105,13 +105,29 @@ public class DeployPipeline {
                 gates.add(new UnlockGate(ops, ftpLock));
             }
 
-            // 4. Dry-run 模式
+            // 4. 拆分 Stage 1 / Stage 2 门禁
+            List<Gate> stage1Gates = new ArrayList<>();
+            List<Gate> stage2Gates = new ArrayList<>();
+            for (Gate g : gates) {
+                if (g instanceof PreCheckGate || g instanceof BackupGate) {
+                    stage1Gates.add(g);
+                } else {
+                    stage2Gates.add(g);
+                }
+            }
+
+            CancellationToken cancel = config.getCancellationToken();
+
             if (config.isDryRun()) {
                 return executeDryRun(targets, ops, ftpLock, result);
             }
 
-            // 5. 逐门禁、逐目标执行
-            executeGates(targets, gates, rollback, result);
+            if (!executeStage1(targets, stage1Gates, result, cancel)) {
+                fillTargetResults(targets, result);
+                return result;
+            }
+
+            executeStage2(targets, stage2Gates, rollback, result, cancel);
 
         } catch (IOException e) {
             result.addError("connection", "", "FTP 连接失败: " + e.getMessage());
@@ -192,54 +208,37 @@ public class DeployPipeline {
     }
 
     /**
-     * 逐门禁执行：每个门禁对所有目标包执行完毕后，再进入下一个门禁
+     * Stage 1: 全员 PreCheck → 全员 Backup。任一失败立即返回 false（result 已有错误）。
      *
-     * @param targets  目标包列表
-     * @param gates    门禁序列
-     * @param rollback 回滚策略
-     * @param result   部署结果对象（用于记录错误和最终状态）
-     * @author xumanyi
-     * @date 2026-03-26
+     * @return true=全员通过可进 Stage 2；false=已记录错误
      */
-    private void executeGates(List<TargetPackage> targets, List<Gate> gates,
-                              Rollback rollback, DeployResult result) {
-        for (Gate gate : gates) {
-
+    private boolean executeStage1(List<TargetPackage> targets, List<Gate> stage1Gates,
+                                  DeployResult result, CancellationToken cancel) {
+        for (Gate gate : stage1Gates) {
             for (TargetPackage target : targets) {
                 try {
+                    cancel.throwIfCancelled();
                     gate.execute(target);
+                } catch (CancellationToken.CancellationException ce) {
+                    result.setCancelled(true);
+                    result.addError(gate.name(), target.getPackageName(), "用户取消");
+                    return false;
                 } catch (Gate.GateException | IOException e) {
-                    // 门禁失败：记录错误，触发回滚
-                    String msg = e instanceof Gate.GateException
-                            ? e.getMessage()
+                    String msg = e instanceof Gate.GateException ? e.getMessage()
                             : gate.name() + " 操作异常: " + e.getMessage();
                     result.addError(gate.name(), target.getPackageName(), msg);
                     target.setStatus(TargetPackage.Status.FAILED);
-
-                    System.err.println("[失败] " + gate.name() + " - " + target.getPackageName()
-                            + ": " + msg);
-
-                    // 临时：旧的全量回滚移除后，在 DeployPipeline 重构（Task 11/12）前先单目标回滚
-                    boolean rolledBackOk = true;
-                    try {
-                        rollback.rollbackTarget(target);
-                    } catch (Exception ex) {
-                        rolledBackOk = false;
-                        System.err.println("[回滚异常] " + target.getPackageName() + ": " + ex.getMessage());
-                    }
-                    DeployResult.RollbackResult rollbackResult = new DeployResult.RollbackResult();
-                    rollbackResult.setAttempted(true);
-                    rollbackResult.setSuccess(rolledBackOk);
-                    result.setRollback(rollbackResult);
-
-                    // 填充已完成目标的结果
-                    fillTargetResults(targets, result);
-                    return;
+                    System.err.println("[失败] Stage1 " + gate.name() + " - " + target.getPackageName() + ": " + msg);
+                    return false;
                 }
             }
         }
+        return true;
+    }
 
-        // 全部成功
+    private void executeStage2(List<TargetPackage> targets, List<Gate> gates,
+                               Rollback rollback, DeployResult result, CancellationToken cancel) {
+        // 过渡实现：Task 11 用真正的 per-target 流水替换
         result.markSuccess();
         fillTargetResults(targets, result);
     }
