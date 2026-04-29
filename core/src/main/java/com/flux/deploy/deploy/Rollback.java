@@ -18,8 +18,8 @@ import com.flux.deploy.model.TargetPackage;
  */
 public class Rollback {
 
-    private final FtpOperations ops;
-    private final FtpLock ftpLock;
+    private FtpOperations ops;
+    private FtpLock ftpLock;
 
     /**
      * 创建回滚策略实例
@@ -32,6 +32,19 @@ public class Rollback {
     public Rollback(FtpOperations ops, FtpLock ftpLock) {
         this.ops = ops;
         this.ftpLock = ftpLock;
+    }
+
+    /**
+     * 重绑定 FTP 操作与锁（用于 Stage 2 IO 异常后重连场景）
+     *
+     * @param newOps  新的 FTP 操作对象
+     * @param newLock 新的 FTP 锁操作对象
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public void rebind(FtpOperations newOps, FtpLock newLock) {
+        this.ops = newOps;
+        this.ftpLock = newLock;
     }
 
     /**

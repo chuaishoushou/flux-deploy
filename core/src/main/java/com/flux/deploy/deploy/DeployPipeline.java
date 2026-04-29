@@ -313,15 +313,44 @@ public class DeployPipeline {
 
     /**
      * 处理 Stage 2 中 Gate 抛出的 IOException（FTP 连接级异常）。
-     * 当前先按现状记录并尝试回滚；Task 12 将扩展为重连后再 rollback。
+     *
+     * <p>策略：
+     * <ul>
+     *   <li>PENDING/BACKED_UP：未触达远端写操作，直接 FAILED 并跳过剩余</li>
+     *   <li>LOCKED 及以上：必须回滚，重连一个新的 FtpSession 后再调用 Rollback.rollbackTarget</li>
+     *   <li>重连或回滚仍失败：置 FAILED_NEEDS_MANUAL，错误信息中带残留锁名提示人工处理</li>
+     * </ul>
      */
     private void handleIoException(TargetPackage current, IOException ioe,
                                    Rollback rollback, List<TargetPackage> targets, int idx,
                                    DeployResult result) {
-        // Task 12 扩展为重连后 rollback；当前先按现状记录
         result.addError("io", current.getPackageName(), "FTP 异常: " + ioe.getMessage());
-        current.setStatus(TargetPackage.Status.FAILED);
-        attemptRollback(rollback, current, result);
+
+        // 没进入会改远端的状态，直接跳过
+        TargetPackage.Status s = current.getStatus();
+        if (s == TargetPackage.Status.PENDING || s == TargetPackage.Status.BACKED_UP) {
+            current.setStatus(TargetPackage.Status.FAILED);
+            markRemainingSkipped(targets, idx + 1, "前序 IO 失败");
+            return;
+        }
+
+        // 已 LOCKED 或更高：必须回滚，先尝试重连
+        System.err.println("[stage2] " + current.getPackageName()
+                + " 已进入 " + s + " 状态，尝试重连后回滚...");
+        try (FtpSession reconnect = new FtpSession(config.getHost(), config.getPort())) {
+            reconnect.connect(config.getUsername(), config.getPassword());
+            reconnect.changeWorkingDirectory(config.getRemoteDir());
+            FtpOperations newOps = new FtpOperations(reconnect);
+            FtpLock newLock = new FtpLock(newOps);
+            rollback.rebind(newOps, newLock);
+            rollback.rollbackTarget(current);
+            current.setStatus(TargetPackage.Status.ROLLED_BACK);
+        } catch (Exception reconnEx) {
+            current.setStatus(TargetPackage.Status.FAILED_NEEDS_MANUAL);
+            result.addError("rollback", current.getPackageName(),
+                    "重连回滚失败，需手动 unlock-resolve: " + reconnEx.getMessage()
+                            + "（残留锁可能为 " + current.getLockName() + "）");
+        }
         markRemainingSkipped(targets, idx + 1, "前序 IO 失败");
     }
 
