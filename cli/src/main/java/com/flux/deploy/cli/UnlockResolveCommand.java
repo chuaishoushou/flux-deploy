@@ -6,7 +6,6 @@ import com.flux.deploy.ftp.FtpLock;
 import com.flux.deploy.ftp.FtpOperations;
 import com.flux.deploy.ftp.FtpSession;
 import com.flux.deploy.util.CredentialCache;
-import org.apache.commons.net.ftp.FTPFile;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -32,21 +31,26 @@ final class UnlockResolveCommand {
         int port = 18080;
         boolean apply = false, includeOthers = false;
 
-        for (int i = 0; i < args.length; i++) {
-            switch (args[i]) {
-                case "--host": host = args[++i]; break;
-                case "--port": port = Integer.parseInt(args[++i]); break;
-                case "--user":
-                case "--username": username = args[++i]; break;
-                case "--remote-dir": remoteDir = args[++i]; break;
-                case "--apply": apply = true; break;
-                case "--include-others": includeOthers = true; break;
-                case "-h":
-                case "--help": printUsage(System.out); return 0;
-                default:
-                    System.err.println("[unlock-resolve] 未知参数: " + args[i]);
-                    return EX_USAGE;
+        try {
+            for (int i = 0; i < args.length; i++) {
+                switch (args[i]) {
+                    case "--host": host = requireValue(args, ++i, "--host"); break;
+                    case "--port": port = Integer.parseInt(requireValue(args, ++i, "--port")); break;
+                    case "--user":
+                    case "--username": username = requireValue(args, ++i, args[i - 1]); break;
+                    case "--remote-dir": remoteDir = requireValue(args, ++i, "--remote-dir"); break;
+                    case "--apply": apply = true; break;
+                    case "--include-others": includeOthers = true; break;
+                    case "-h":
+                    case "--help": printUsage(System.out); return 0;
+                    default:
+                        System.err.println("[unlock-resolve] 未知参数: " + args[i]);
+                        return EX_USAGE;
+                }
             }
+        } catch (IllegalArgumentException e) {
+            System.err.println("[unlock-resolve] 参数解析失败: " + e.getMessage());
+            return EX_USAGE;
         }
         if (host == null || username == null || remoteDir == null) {
             printUsage(System.err);
@@ -65,19 +69,21 @@ final class UnlockResolveCommand {
             FtpOperations ops = new FtpOperations(session);
             FtpLock lock = new FtpLock(ops);
 
-            // 收集 remoteDir 下所有 *.war / *.jar 包名
-            List<FTPFile> files = ops.listFiles(remoteDir);
+            // 递归扫描 remoteDir 下所有残留锁（包括子目录），按 (parentDir, original) 去重后逐一诊断
+            List<String> lockPaths = ops.scanLockFiles(remoteDir);
             List<ResidualLockDiagnosis> all = new ArrayList<>();
             ResidualLockResolver resolver = new ResidualLockResolver(
                     ResidualLockResolver.wrap(ops, lock), username);
-            for (FTPFile f : files) {
-                String name = FtpSession.decodeRemotePath(f.getName());
-                if (FtpLock.isLockFile(name)) {
-                    String original = FtpLock.extractOriginalName(name);
-                    if (original != null) {
-                        all.addAll(resolver.diagnose(remoteDir, original));
-                    }
-                }
+            java.util.Set<String> processed = new java.util.HashSet<>();
+            for (String lockPath : lockPaths) {
+                int lastSlash = lockPath.lastIndexOf('/');
+                String parentDir = lastSlash > 0 ? lockPath.substring(0, lastSlash + 1) : remoteDir;
+                String lockName = lockPath.substring(lastSlash + 1);
+                String original = FtpLock.extractOriginalName(lockName);
+                if (original == null) continue;
+                String key = parentDir + "::" + original;
+                if (!processed.add(key)) continue;
+                all.addAll(resolver.diagnose(parentDir, original));
             }
 
             if (all.isEmpty()) {
@@ -139,5 +145,12 @@ final class UnlockResolveCommand {
         out.println("  --remote-dir <path> 扫描根目录");
         out.println("  --apply             执行清理（默认仅诊断）");
         out.println("  --include-others    也处理 owner != 当前用户的锁");
+    }
+
+    private static String requireValue(String[] args, int idx, String flag) {
+        if (idx >= args.length) {
+            throw new IllegalArgumentException("flag " + flag + " 需要值");
+        }
+        return args[idx];
     }
 }
