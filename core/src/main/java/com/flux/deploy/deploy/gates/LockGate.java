@@ -52,22 +52,12 @@ public class LockGate implements Gate {
     public void execute(TargetPackage target) throws IOException, GateException {
         String remoteDir = target.getRemoteDir();
 
-        // 1. 检查残留锁
+        // 防御性 assert：Stage 0 应已清理残留锁；此处仍发现视为 bug
         List<String> residualLocks = ftpLock.findResidualLocks(remoteDir, target.getPackageName());
         if (!residualLocks.isEmpty()) {
-            StringBuilder msg = new StringBuilder("发现残留锁包，可能存在未完成的更新：\n");
-            for (String lockFile : residualLocks) {
-                String[] info = FtpLock.parseLockInfo(lockFile);
-                if (info != null) {
-                    msg.append("  - ").append(lockFile)
-                            .append(" (持有者: ").append(info[0])
-                            .append(", 时间: ").append(info[1]).append(")\n");
-                } else {
-                    msg.append("  - ").append(lockFile).append("\n");
-                }
-            }
-            msg.append("请先处理残留锁包后再执行更新");
-            throw new GateException(name(), msg.toString());
+            throw new GateException(name(),
+                    "Stage 0 后仍发现残留锁，疑似 Stage 0 未执行或漏处理: " + residualLocks
+                            + "（请先运行 unlock-resolve）");
         }
 
         // 2. 加锁
