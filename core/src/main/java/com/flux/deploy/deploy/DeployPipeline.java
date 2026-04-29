@@ -299,6 +299,9 @@ public class DeployPipeline {
      * 把 from 之后还处于 PENDING/BACKED_UP 的目标置为 SKIPPED。
      */
     private void markRemainingSkipped(List<TargetPackage> targets, int from, String reason) {
+        if (from < targets.size()) {
+            System.err.println("[stage2] 跳过剩余 " + (targets.size() - from) + " 个目标 - " + reason);
+        }
         for (int i = from; i < targets.size(); i++) {
             TargetPackage t = targets.get(i);
             if (t.getStatus() == TargetPackage.Status.PENDING
@@ -318,13 +321,7 @@ public class DeployPipeline {
         // Task 12 扩展为重连后 rollback；当前先按现状记录
         result.addError("io", current.getPackageName(), "FTP 异常: " + ioe.getMessage());
         current.setStatus(TargetPackage.Status.FAILED);
-        try {
-            rollback.rollbackTarget(current);
-        } catch (Exception ex) {
-            current.setStatus(TargetPackage.Status.FAILED_NEEDS_MANUAL);
-            result.addError("rollback", current.getPackageName(),
-                    "回滚失败，需人工: " + ex.getMessage());
-        }
+        attemptRollback(rollback, current, result);
         markRemainingSkipped(targets, idx + 1, "前序 IO 失败");
     }
 
