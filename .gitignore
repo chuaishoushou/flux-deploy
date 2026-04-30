@@ -16,3 +16,12 @@ dist-archive/
 
 # Node deps used by docs/
 docs/node_modules/
+
+# IntelliJ Platform Gradle plugin cache
+.intellijPlatform/
+
+# Claude Code workspace settings (per-developer)
+.claude/
+
+# Superpowers skill scratch (plans/specs are local working notes)
+docs/superpowers/
