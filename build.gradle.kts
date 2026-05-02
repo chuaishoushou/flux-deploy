@@ -3,7 +3,7 @@
 
 allprojects {
     group = "com.flux.deploy"
-    version = "1.2.5"
+    version = "1.2.7"
 }
 
 // 给所有子模块的 Java 编译统一一套 toolchain 与编码配置。

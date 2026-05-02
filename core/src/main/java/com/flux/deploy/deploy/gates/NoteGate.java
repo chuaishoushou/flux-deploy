@@ -15,23 +15,33 @@ import java.time.format.DateTimeFormatter;
 /**
  * 说明文件门禁
  *
- * <p>在包上传校验成功后，向标准命名的更新记录文件追加 取包/传包 两行记录。
- * 标准命名格式：{@code <包名>.jar_update_note.txt}（包名含扩展名 + 固定后缀）。</p>
+ * <p>在包上传校验成功后，向更新记录文件追加 取包/传包 两行记录。</p>
  *
- * <p><b>历史命名兼容</b>：FTP 上早期版本使用过"去扩展名"的命名：
- * {@code <包名去扩展名>_update_note.txt}，这部分历史文件会被自动迁移为标准命名：</p>
+ * <p><b>命名兼容</b>：FTP 上历史遗留两种命名格式：</p>
  * <ul>
- *   <li>只存在历史命名 → FTP rename 原子改名为标准命名，再追加</li>
- *   <li>两者都存在 → 读取历史文件全文，拼接到标准文件头部（附迁移标记块），删除历史文件，再追加</li>
- *   <li>只存在标准命名 → 直接追加</li>
- *   <li>都不存在 → 新建标准文件</li>
+ *   <li>标准命名：{@code <包全名>_update_note.txt}（如 {@code tm10srv.war_update_note.txt}）</li>
+ *   <li>历史命名：{@code <包名去扩展名>_update_note.txt}（如 {@code tm10srv_update_note.txt}）</li>
  * </ul>
  *
- * <p><b>幂等保护</b>：拼接前先判断标准文件是否已含 {@link #MIGRATION_MARKER_PREFIX}，
- * 有则说明上次已合并过（只是历史文件删除失败残留），本次只需删历史文件不再重复拼接。</p>
+ * <p><b>解析规则</b>：</p>
+ * <ul>
+ *   <li>仅标准命名 → 直接追加</li>
+ *   <li>仅历史命名 → 沿用历史命名追加，不重命名</li>
+ *   <li>都不存在 → 按标准命名新建</li>
+ *   <li><b>两者都在</b> → 安全合并到标准命名，删除历史文件（详见下文）</li>
+ * </ul>
  *
- * <p><b>执行顺序</b>：所有涉及历史文件的场景，一律"先把标准文件写完整，再删除历史文件"，
- * 即使中途失败也不会出现历史丢失（标准文件已经留底）。</p>
+ * <p><b>双文件合并安全策略</b>：上一版本的迁移逻辑在删除 legacy 失败时会留下双文件，需要清理。</p>
+ * <ol>
+ *   <li>下载两份文件到本地，比较字节大小，<b>大的作为 base，小的追加到末尾</b>（含合并标记行）</li>
+ *   <li>本地拼接出最终内容（无任何 FTP 写操作）</li>
+ *   <li>upload 到标准命名路径</li>
+ *   <li>re-download 校验远端字节数与本地一致</li>
+ *   <li>校验通过才 delete 历史文件；任一步失败 legacy 保持不动，下次重试</li>
+ * </ol>
+ *
+ * <p><b>幂等保护</b>：合并标记 {@link #MERGE_MARKER_PREFIX} 写入产物。下次再发现双文件时，
+ * 若 canonical 已含针对该 legacy 名的标记 → 说明上次已合并、只是 delete 残留，直接删 legacy 不再重复合并。</p>
  *
  * @author xumanyi
  * @date 2026-03-26
@@ -40,9 +50,8 @@ public class NoteGate implements Gate {
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    /** 迁移标记块起始行前缀；字符串匹配即可识别，无需结构化解析。 */
-    private static final String MIGRATION_MARKER_PREFIX = "==== 以下来自历史文件 ";
-    private static final String MIGRATION_MARKER_SUFFIX = "==== 历史文件结束 ====";
+    /** 合并标记行前缀；canonical 内若含 "{@code MERGE_MARKER_PREFIX} + legacyName" 即视为已合并过该 legacy。 */
+    private static final String MERGE_MARKER_PREFIX = "==== 合并历史文件 ";
 
     private final FtpOperations ops;
     private final DeployConfig config;
@@ -84,11 +93,65 @@ public class NoteGate implements Gate {
         String canonicalRemotePath = remoteDir + canonicalName;
         String legacyRemotePath = remoteDir + legacyName;
 
+        boolean canonExists = ops.exists(canonicalRemotePath);
+        boolean legacyExists = legacyDistinct && ops.exists(legacyRemotePath);
+
         Path tempNote = Files.createTempFile("note-", ".txt");
+        Path tempLegacy = Files.createTempFile("note-legacy-", ".txt");
         try {
-            // ===== 1. 决定工作文件路径，合并历史文件（如有） =====
-            String existingContent = prepareCanonicalContent(
-                    canonicalRemotePath, legacyRemotePath, legacyName, legacyDistinct, tempNote);
+            // ===== 1. 决定写入路径 + 准备 base 内容（处理双文件合并） =====
+            String writePath;
+            String writeName;
+            String baseContent;
+            boolean shouldDeleteLegacyAfter = false;
+
+            if (canonExists && legacyExists) {
+                // 双文件 — 安全合并（大的为基底，小的追加到尾部）
+                ops.download(canonicalRemotePath, tempNote);
+                ops.download(legacyRemotePath, tempLegacy);
+                String canonContent = Files.readString(tempNote, StandardCharsets.UTF_8);
+                String legacyContent = Files.readString(tempLegacy, StandardCharsets.UTF_8);
+                long canonBytes = canonContent.getBytes(StandardCharsets.UTF_8).length;
+                long legacyBytes = legacyContent.getBytes(StandardCharsets.UTF_8).length;
+
+                System.out.println("  [说明] 检测到双文件: " + canonicalName + "(" + canonBytes
+                        + "B) + " + legacyName + "(" + legacyBytes + "B)");
+
+                if (canonContent.contains(MERGE_MARKER_PREFIX + legacyName)) {
+                    // 上次已合并，legacy 是 delete 失败留下的残留，直接清理
+                    System.out.println("  [说明] canonical 已含合并标记，跳过合并，仅清理 legacy 残留");
+                    baseContent = canonContent;
+                } else if (canonBytes > legacyBytes) {
+                    System.out.println("  [说明] canonical 较大，作为 base，将 legacy 追加到末尾");
+                    baseContent = mergeContents(canonContent, legacyContent, legacyName, legacyBytes);
+                } else if (legacyBytes > canonBytes) {
+                    System.out.println("  [说明] legacy 较大，作为 base，将 canonical 追加到末尾");
+                    baseContent = mergeContents(legacyContent, canonContent, canonicalName, canonBytes);
+                } else {
+                    // 大小相等 — 默认 canonical（标准命名）作为 base
+                    System.out.println("  [说明] 两文件大小相等，canonical 作为 base，将 legacy 追加到末尾");
+                    baseContent = mergeContents(canonContent, legacyContent, legacyName, legacyBytes);
+                }
+
+                writePath = canonicalRemotePath;
+                writeName = canonicalName;
+                shouldDeleteLegacyAfter = true;
+            } else if (canonExists) {
+                ops.download(canonicalRemotePath, tempNote);
+                baseContent = Files.readString(tempNote, StandardCharsets.UTF_8);
+                writePath = canonicalRemotePath;
+                writeName = canonicalName;
+            } else if (legacyExists) {
+                ops.download(legacyRemotePath, tempLegacy);
+                baseContent = Files.readString(tempLegacy, StandardCharsets.UTF_8);
+                writePath = legacyRemotePath;
+                writeName = legacyName;
+                System.out.println("  [说明] 沿用历史命名文件: " + legacyName);
+            } else {
+                baseContent = "";
+                writePath = canonicalRemotePath;
+                writeName = canonicalName;
+            }
 
             // ===== 2. 构造本次两条记录 =====
             //    取包|yyyy-MM-dd HH:mm:ss|{开发}|任务：{任务描述}|客服：{客服号}|{包名}
@@ -102,132 +165,90 @@ public class NoteGate implements Gate {
             String uploadRecord = String.join("|",
                     "传包", now, operator, taskSeg, customerSeg, target.getPackageName());
 
-            // ===== 3. 追加到内容末尾（已有内容时先加一个空行分隔） =====
-            StringBuilder sb = new StringBuilder(existingContent);
-            if (!existingContent.isEmpty()) {
-                if (!existingContent.endsWith("\n")) {
+            // ===== 3. 拼接最终内容（已有内容时空行分隔） =====
+            StringBuilder sb = new StringBuilder(baseContent);
+            if (!baseContent.isEmpty()) {
+                if (!baseContent.endsWith("\n")) {
                     sb.append("\n");
                 }
-                sb.append("\n"); // 空行分隔
+                sb.append("\n");
             }
             sb.append(fetchRecord).append("\n");
             sb.append(uploadRecord).append("\n");
+            String finalContent = sb.toString();
 
-            String newContent = sb.toString();
+            // ===== 4. 上传 =====
+            Files.writeString(tempNote, finalContent, StandardCharsets.UTF_8);
+            long expectedBytes = Files.size(tempNote);
+            ops.upload(tempNote, writePath);
+            System.out.println("  [说明] 已上传 " + writeName + " (" + expectedBytes + "B)");
 
-            // ===== 4. 先写标准文件 =====
-            Files.writeString(tempNote, newContent, StandardCharsets.UTF_8);
-            ops.upload(tempNote, canonicalRemotePath);
+            // ===== 5. 涉及删除 legacy 时，先 re-download 校验远端字节数 =====
+            if (shouldDeleteLegacyAfter) {
+                Path verify = Files.createTempFile("note-verify-", ".txt");
+                try {
+                    ops.download(writePath, verify);
+                    long actualBytes = Files.size(verify);
+                    if (actualBytes != expectedBytes) {
+                        System.out.println("  [说明] 校验失败：远端 size=" + actualBytes
+                                + " 期望=" + expectedBytes + "，保留 legacy 不删，下次重试");
+                        shouldDeleteLegacyAfter = false;
+                    } else {
+                        System.out.println("  [说明] 校验通过：远端 size=" + actualBytes);
+                    }
+                } finally {
+                    Files.deleteIfExists(verify);
+                }
+            }
 
-            // ===== 5. 标准文件写成功，再清理历史文件（先写后删，失败也不丢数据） =====
-            if (legacyDistinct && ops.exists(legacyRemotePath)) {
+            // ===== 6. 校验通过后才删 legacy =====
+            if (shouldDeleteLegacyAfter) {
                 try {
                     ops.delete(legacyRemotePath);
-                    System.out.println("  [说明] 已清理历史命名文件: " + legacyName);
+                    System.out.println("  [说明] 已删除历史命名残留: " + legacyName);
                 } catch (IOException delFail) {
-                    // 删除失败不影响主流程：标准文件已包含历史内容（或有迁移标记），
-                    // 下次部署幂等保护会跳过重复拼接，只再次尝试删除。
+                    // 删除失败不影响主流程；下次部署靠合并标记识别后再次尝试删除
                     System.out.println("  [说明] 历史文件删除失败（下次部署会重试）: "
                             + legacyName + " - " + delFail.getMessage());
                 }
             }
 
             target.setStatus(TargetPackage.Status.NOTE_UPDATED);
-            System.out.println("  [说明] " + canonicalName + " 已追加 2 条记录");
+            System.out.println("  [说明] " + writeName + " 已追加 2 条记录");
 
         } finally {
             Files.deleteIfExists(tempNote);
+            Files.deleteIfExists(tempLegacy);
         }
     }
 
     /**
-     * 按四种场景准备出标准文件将要写入的基础内容（不含本次两条新记录）。
+     * 把 {@code appended} 内容追加到 {@code base} 末尾，并写入合并标记行。
+     * 标记行格式：{@code ==== 合并历史文件 <appendedName>（<bytes>B，于 yyyy-MM-dd HH:mm:ss） ====}
      *
-     * <pre>
-     * 标准文件存在 | 历史文件存在 | 动作
-     * ------------ + ------------ + --------------------------------------------------------------
-     *      ✓       |      ✗       | 读标准文件原文返回
-     *      ✓       |      ✓       | 读标准文件：
-     *              |              |   - 已含迁移标记 → 原文返回（下一步会删除残留的历史文件）
-     *              |              |   - 未含迁移标记 → 读历史文件，拼接 [迁移块 + 历史原文 + 标准原文]
-     *      ✗       |      ✓       | rename(历史 → 标准)：
-     *              |              |   - 成功 → 读标准文件原文返回（等价于场景 ✓ ✗）
-     *              |              |   - 失败 → 读历史原文返回，后续写入标准路径（双份过渡，下次重试）
-     *      ✗       |      ✗       | 返回空串（后续将新建标准文件）
-     * </pre>
-     *
-     * @param canonicalRemotePath 标准命名远程路径
-     * @param legacyRemotePath    历史命名远程路径
-     * @param legacyName          历史文件名（用于日志输出）
-     * @param legacyDistinct      历史命名是否与标准命名不同
-     * @param tempNote            本地临时文件，用于 FTP 下载中转
-     * @return 标准文件的基础内容字符串；都不存在时返回空串
-     * @throws IOException FTP 操作或本地文件 IO 失败
+     * @param base         作为基底的内容（较大）
+     * @param appended     被追加的内容（较小）
+     * @param appendedName 被追加文件的远端名（写入标记行供下次幂等识别）
+     * @param appendedBytes 被追加内容的字节数
+     * @return 合并后的完整字符串
      * @author xumanyi
-     * @date 2026-03-26
+     * @date 2026-04-30
      */
-    private String prepareCanonicalContent(String canonicalRemotePath,
-                                           String legacyRemotePath,
-                                           String legacyName,
-                                           boolean legacyDistinct,
-                                           Path tempNote) throws IOException {
-        boolean canonicalExists = ops.exists(canonicalRemotePath);
-        boolean legacyExists = legacyDistinct && ops.exists(legacyRemotePath);
-
-        // 场景 4：都不存在
-        if (!canonicalExists && !legacyExists) {
-            return "";
+    private static String mergeContents(String base, String appended,
+                                        String appendedName, long appendedBytes) {
+        String ts = LocalDateTime.now().format(TIME_FMT);
+        StringBuilder sb = new StringBuilder(base);
+        if (!base.isEmpty() && !base.endsWith("\n")) {
+            sb.append("\n");
         }
-
-        // 场景 3：只有历史文件 —— 优先用 rename 原子改名
-        if (!canonicalExists && legacyExists) {
-            try {
-                ops.rename(legacyRemotePath, canonicalRemotePath);
-                System.out.println("  [说明] 历史命名 " + legacyName + " 已重命名为标准格式");
-                // 重命名后读标准文件
-                ops.download(canonicalRemotePath, tempNote);
-                return Files.readString(tempNote, StandardCharsets.UTF_8);
-            } catch (IOException renameFail) {
-                // rename 失败：降级为直接读历史文件，写入标准路径；历史文件保留等下次再试
-                System.out.println("  [说明] rename 失败，降级读历史文件写入标准路径: "
-                        + renameFail.getMessage());
-                ops.download(legacyRemotePath, tempNote);
-                return Files.readString(tempNote, StandardCharsets.UTF_8);
-            }
+        sb.append("\n");
+        sb.append(MERGE_MARKER_PREFIX).append(appendedName)
+                .append("（").append(appendedBytes).append("B，于 ").append(ts).append("） ====\n");
+        sb.append(appended);
+        if (!appended.isEmpty() && !appended.endsWith("\n")) {
+            sb.append("\n");
         }
-
-        // 场景 1：只有标准文件 —— 直读
-        if (canonicalExists && !legacyExists) {
-            ops.download(canonicalRemotePath, tempNote);
-            return Files.readString(tempNote, StandardCharsets.UTF_8);
-        }
-
-        // 场景 2：两者都在 —— 判幂等
-        ops.download(canonicalRemotePath, tempNote);
-        String canonicalContent = Files.readString(tempNote, StandardCharsets.UTF_8);
-        if (canonicalContent.contains(MIGRATION_MARKER_PREFIX)) {
-            // 标准文件里已经有历史迁移块，说明上次已合并，只是历史文件删除失败残留
-            System.out.println("  [说明] 检测到历史迁移痕迹，跳过重复合并，仅删除残留历史文件");
-            return canonicalContent;
-        }
-
-        // 真正的首次合并：读历史文件原文，拼接到标准文件头部
-        ops.download(legacyRemotePath, tempNote);
-        String legacyContent = Files.readString(tempNote, StandardCharsets.UTF_8);
-
-        String migratedAt = LocalDateTime.now().format(TIME_FMT);
-        StringBuilder merged = new StringBuilder();
-        merged.append(MIGRATION_MARKER_PREFIX).append(legacyName)
-                .append("（迁移于 ").append(migratedAt).append("） ====\n");
-        merged.append(legacyContent);
-        if (!legacyContent.endsWith("\n")) {
-            merged.append("\n");
-        }
-        merged.append(MIGRATION_MARKER_SUFFIX).append("\n\n");
-        merged.append(canonicalContent);
-
-        System.out.println("  [说明] 检测到历史文件 " + legacyName + "，已合并到标准文件头部");
-        return merged.toString();
+        return sb.toString();
     }
 
     /**

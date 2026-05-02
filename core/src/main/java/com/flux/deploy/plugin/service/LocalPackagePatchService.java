@@ -101,6 +101,26 @@ public class LocalPackagePatchService {
                                             List<String> changedFiles,
                                             String localPackagePath, String outputDir,
                                             Consumer<String> logCallback) {
+        return execute(mode, modulePath, artifactFileName, changedFiles,
+                localPackagePath, outputDir, false, logCallback);
+    }
+
+    /**
+     * 执行本地模式补丁/整包替换（带 skipCompile 开关）
+     *
+     * <p>调用方根据"勾选清单是否含 .java"传入 {@code skipCompile}。开启后，资源文件
+     * 直接从 src/main/resources、src/main/java 下读取，不依赖 target/classes。</p>
+     *
+     * @param skipCompile 是否跳过编译模式：true 时静态资源直接从源目录读
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public static LocalPatchResult execute(DeployMode mode,
+                                            String modulePath, String artifactFileName,
+                                            List<String> changedFiles,
+                                            String localPackagePath, String outputDir,
+                                            boolean skipCompile,
+                                            Consumer<String> logCallback) {
         try {
             Path localPackage = Path.of(localPackagePath);
             if (!Files.isRegularFile(localPackage)) {
@@ -137,11 +157,11 @@ public class LocalPackagePatchService {
                     case JAR_TO_JAR:
                     case WAR_TO_WAR:
                         changed = patchDirect(modulePath, artifactFileName, changedFiles,
-                                localPackage, outputPackage, logCallback);
+                                localPackage, outputPackage, skipCompile, logCallback);
                         break;
                     case JAR_TO_WAR_LIB:
                         changed = patchWarLib(modulePath, artifactFileName, changedFiles,
-                                localPackage, outputPackage, logCallback);
+                                localPackage, outputPackage, skipCompile, logCallback);
                         break;
                     default:
                         return fail(logCallback, "未知场景");
@@ -274,9 +294,11 @@ public class LocalPackagePatchService {
     private static int patchDirect(String modulePath, String artifactFileName,
                                     List<String> changedFiles,
                                     Path localPackage, Path outputPackage,
+                                    boolean skipCompile,
                                     Consumer<String> logCallback) throws IOException {
         StagingPackageBuilder builder = new StagingPackageBuilder(
-                modulePath, artifactFileName, changedFiles, logCallback);
+                modulePath, artifactFileName, changedFiles, logCallback)
+                .setSkipCompile(skipCompile);
         return builder.buildFromLocal(localPackage, outputPackage);
     }
 
@@ -289,6 +311,7 @@ public class LocalPackagePatchService {
     private static int patchWarLib(String modulePath, String artifactFileName,
                                     List<String> changedFiles,
                                     Path localWar, Path outputWar,
+                                    boolean skipCompile,
                                     Consumer<String> logCallback) throws IOException {
         String prefix = extractArtifactPrefix(artifactFileName);
         logCallback.accept("[本地] 在 WAR 内 WEB-INF/lib 下定位前缀=" + prefix + " 的 JAR...");
@@ -322,7 +345,8 @@ public class LocalPackagePatchService {
             // 4. 对 lib jar 打补丁
             Path patchedJar = tempDir.resolve("patched-" + innerLibName);
             StagingPackageBuilder builder = new StagingPackageBuilder(
-                    modulePath, artifactFileName, changedFiles, logCallback);
+                    modulePath, artifactFileName, changedFiles, logCallback)
+                    .setSkipCompile(skipCompile);
             int changed = builder.buildFromLocal(extractedJar, patchedJar);
             if (changed <= 0) return 0;
 

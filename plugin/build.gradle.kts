@@ -17,6 +17,12 @@ dependencies {
     // 纯业务代码来自 core 模块；commons-net 由 core 通过 api 暴露
     implementation(project(":core"))
 
+    // TinyPinyin：纯查表式的中文转拼音库（~100KB、零依赖），
+    // 用于项目/系统/文件搜索框的拼音首字母与全拼模糊匹配。
+    // 原坐标 com.github.promeg:tinypinyin 在 jcenter 关闭后失效，
+    // io.github.biezhi 是 Maven Central 上的重发版本，包名保持 com.github.promeg.*。
+    implementation("io.github.biezhi:TinyPinyin:2.0.3.RELEASE")
+
     intellijPlatform {
         intellijIdeaCommunity("2024.1")
         bundledPlugin("Git4Idea")

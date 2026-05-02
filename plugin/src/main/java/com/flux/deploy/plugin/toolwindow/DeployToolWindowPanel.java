@@ -111,11 +111,28 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
     private String currentModulePath;
     private String currentArtifactFileName;
+    /**
+     * 上一次发射出去的 {@code [提示] ...} 内容，用于在 {@link #onModeChanged} 被相邻多次触发
+     * 但状态完全相同（如 IDEA VFS 双 refresh）时跳过重复输出，避免日志面板出现一字不差的两行。
+     * 切换模块或文件状态发生实际变化时，提示文本会变，dedup 不会误屏蔽。
+     */
+    private String lastModeHint = "";
+    /**
+     * 上一次 onModeChanged 实际加载文件列表时所对应的模块路径。
+     * 用于判断切模块场景：模块变了就不应保留旧模块的勾选项。
+     */
+    private String lastFilesLoadedForModule = null;
 
     /** 是否有已完成的部署 */
     private boolean hasDeployed = false;
     /** 是否已执行过预检 */
     private boolean hasPreChecked = false;
+
+    /** 「打包并上传」按钮的运行态：IDLE 触发部署 / RUNNING 触发停止弹窗 / STOPPING 禁用等待 */
+    private enum DeployButtonState { IDLE, RUNNING, STOPPING }
+    private DeployButtonState deployButtonState = DeployButtonState.IDLE;
+    /** 缓存「打包并上传」按钮的原色（accentBlue），STOPPING / IDLE 切换时复用 */
+    private Color deployButtonIdleColor;
     /** 用户在冲突对话框里选择的策略，仅在本轮部署生效（单次消费）；无冲突时保持默认 OVERWRITE */
     private com.flux.deploy.plugin.model.BackupConflictStrategy pendingBackupStrategy
             = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
@@ -279,7 +296,10 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         leftSplit.setFirstComponent(createCardPanel("源工程", sourceSection));
         leftSplit.setSecondComponent(execCard);
         JPanel leftColumn = new JPanel(new BorderLayout());
-        leftColumn.add(leftSplit, BorderLayout.CENTER);
+        // 用 JLayer 包一层 → 在 divider 上下各 4px 范围加"幽灵命中区"，
+        // 视觉宽度仍为 dividerWidth，但鼠标可在更宽的隐形带上抓取拖动（详见 ExtendedSplitterHitZoneUI）
+        leftColumn.add(new JLayer<>(leftSplit, new ExtendedSplitterHitZoneUI()),
+                BorderLayout.CENTER);
 
         // 首次布局后按 execCard 的首选高度收紧左右两列下半区：
         //  - 左列：执行区维持其自身所需的最低高度，上半部源工程拿到剩余高度；
@@ -306,7 +326,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         // ═══ 主分割：左列 | 右列（可左右拖动） ═══
         mainSplit = new OnePixelSplitter(false, 0.5f);
         mainSplit.setFirstComponent(leftColumn);
-        mainSplit.setSecondComponent(rightSplit);
+        // 同 leftSplit：JLayer 包装扩展 rightSplit 的拖动命中区
+        mainSplit.setSecondComponent(new JLayer<>(rightSplit, new ExtendedSplitterHitZoneUI()));
 
         deployCard = new JPanel(new BorderLayout());
         deployCard.setBorder(JBUI.Borders.empty(4));
@@ -377,7 +398,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
         deployButton.putClientProperty("JButton.buttonType", "default");
         deployButton.setFont(deployButton.getFont().deriveFont(Font.BOLD));
-        deployButton.setForeground(accentBlue());
+        deployButtonIdleColor = accentBlue();
+        deployButton.setForeground(deployButtonIdleColor);
         deployButton.setMargin(JBUI.insets(3, 12));
         deployButton.setToolTipText("合并本地 Maven 编译产物，生成新包上传到 FTP 服务器");
         gc.gridx = 1; p.add(deployButton, gc);
@@ -431,6 +453,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             hasPreChecked = true;
         });
         deployButton.addActionListener(e -> {
+            // 三态分发：RUNNING 时按钮变身"停止"，弹收尾选择对话框；STOPPING 已请求停止，忽略
+            if (deployButtonState == DeployButtonState.RUNNING) {
+                logSection.appendLog("[操作] 点击「停止」");
+                showStopDialogAndDispatch();
+                return;
+            }
+            if (deployButtonState == DeployButtonState.STOPPING) {
+                return;
+            }
             logSection.appendLog("[操作] 点击「打包并上传」");
             // 打包并上传：硬性前置校验，任何缺失都弹窗阻断
             List<String> missing = validateFtpPrerequisites();
@@ -552,6 +583,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         config.setMode(sourceSection.getMode());
         config.setChangedFiles(files);
         config.setLocalTarget(lt);
+        config.setSkipCompile(!sourceSection.needsCompile());
 
         logSection.appendLog("[本地] 开始打包...");
         setLocalButtonsEnabled(false);
@@ -634,6 +666,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         // 源工程（与 FTP 模式的 resetFtpMode 对齐）
         currentModulePath = null;
         currentArtifactFileName = null;
+        lastFilesLoadedForModule = null;
         sourceSection.setModule(null);
         sourceSection.setArtifact(null);
         sourceSection.setMode(DeployMode.FULL);
@@ -652,6 +685,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private void resetFtpMode() {
         currentModulePath = null;
         currentArtifactFileName = null;
+        lastFilesLoadedForModule = null;
         sourceSection.setModule(null);
         sourceSection.setArtifact(null);
         sourceSection.setMode(DeployMode.FULL);
@@ -981,7 +1015,6 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         // 不再清空日志：保留前置步骤（前置校验、备份冲突检查）的输出，
         // 方便用户在失败时往上滚动看到完整上下文。想清空可点日志区「清空」按钮。
         logSection.appendLog("────── 开始新一轮" + (dryRun ? "预检" : localOnly ? "打包不上传" : "打包并上传") + " ──────");
-        logSection.appendLog(dryRun ? "开始预检..." : localOnly ? "开始打包（不上传 FTP）..." : "开始打包并上传 FTP...");
 
         PluginDeployConfig pluginConfig = new PluginDeployConfig();
         pluginConfig.setTargetMode(DeployTargetMode.FTP);
@@ -994,6 +1027,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         pluginConfig.setDryRun(dryRun);
         pluginConfig.setLocalOnly(localOnly);
         pluginConfig.setSkipBackup(!backupCheckBox.isSelected());
+        pluginConfig.setSkipCompile(!sourceSection.needsCompile());
 
         if (selectedFiles != null) {
             pluginConfig.setChangedFiles(selectedFiles);
@@ -1039,7 +1073,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
         infoSection.saveToCache();
 
-        setButtonsEnabled(false);
+        enterRunningState();
         logSection.setProgressVisible(true);
 
         DeployExecutionService.execute(project, pluginConfig,
@@ -1047,10 +1081,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 targetSection.getConnectedUsername(), targetSection.getConnectedPassword(),
                 logSection::appendLog,
                 result -> SwingUtilities.invokeLater(() -> {
-                    setButtonsEnabled(true);
+                    exitToIdleState();
                     logSection.setProgressVisible(false);
+                    // KEEP_SUCCEEDED 路径下 service 已登记 lastUpdatedPackages，启用回滚按钮
+                    boolean keptForManualRollback = DeployExecutionService.hasRollbackData();
                     if (result != null && result.isSuccess() && !dryRun && !localOnly
                             && backupCheckBox.isSelected()) {
+                        hasDeployed = true;
+                        rollbackButton.setEnabled(true);
+                    } else if (keptForManualRollback) {
                         hasDeployed = true;
                         rollbackButton.setEnabled(true);
                     }
@@ -1067,6 +1106,105 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         if (enabled && hasDeployed) {
             rollbackButton.setEnabled(true);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  「打包并上传」按钮状态机：IDLE / RUNNING / STOPPING
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * 进入 RUNNING 态：禁用其他按钮，把"打包并上传"变身为红色"停止"。
+     * 由 executeDeploy 在异步任务启动时调用。
+     */
+    private void enterRunningState() {
+        deployButtonState = DeployButtonState.RUNNING;
+        preCheckButton.setEnabled(false);
+        localOnlyButton.setEnabled(false);
+        rollbackButton.setEnabled(false);
+        resetButton.setEnabled(false);
+        deployButton.setEnabled(true);
+        deployButton.setText("停止");
+        deployButton.setForeground(JBColor.RED);
+        deployButton.setToolTipText("点击停止当前部署：将弹出对话框选择如何处理已成功的包");
+    }
+
+    /**
+     * 进入 STOPPING 态：用户已确认停止，在后台 catch 块跑完前禁用按钮防抖。
+     */
+    private void enterStoppingState() {
+        deployButtonState = DeployButtonState.STOPPING;
+        deployButton.setEnabled(false);
+        deployButton.setText("正在停止…");
+    }
+
+    /**
+     * 回到 IDLE 态：恢复"打包并上传"原文案 / 原色 / 启用所有按钮。
+     * 由 executeDeploy 的 onComplete 回调调用。
+     */
+    private void exitToIdleState() {
+        deployButtonState = DeployButtonState.IDLE;
+        deployButton.setText("打包并上传");
+        deployButton.setForeground(deployButtonIdleColor);
+        deployButton.setToolTipText("合并本地 Maven 编译产物，生成新包上传到 FTP 服务器");
+        setButtonsEnabled(true);
+    }
+
+    /**
+     * 弹出"如何停止"对话框：根据已成功的包数量给出 2 / 3 选项，用户选择后翻取消标志。
+     *
+     * <p>与 IDEA 进度条 cancel 按钮的区别：进度条 cancel 直接走 ROLLBACK_ALL 兜底，
+     * 不弹窗；本方法仅由我们自己的"停止"按钮触发。</p>
+     */
+    private void showStopDialogAndDispatch() {
+        if (DeployExecutionService.isStopRequested()) {
+            // 防止用户手快二连点
+            return;
+        }
+        boolean dryRun = DeployExecutionService.isCurrentDryRun();
+        int total = DeployExecutionService.getLiveTotalTargets();
+        java.util.List<String> succeededNames = DeployExecutionService.getLiveSucceededNames();
+        int succeeded = succeededNames.size();
+
+        StringBuilder msg = new StringBuilder();
+        msg.append(dryRun ? "预检进行中。\n\n" : "部署进行中。\n\n");
+        if (total > 0 && !dryRun) {
+            msg.append("已成功：").append(succeeded).append(" / ").append(total).append("\n");
+            if (!succeededNames.isEmpty()) {
+                for (String n : succeededNames) {
+                    msg.append("  ✓ ").append(n).append("\n");
+                }
+            }
+        }
+        msg.append("\n请选择如何处理：");
+
+        String[] options;
+        if (succeeded > 0 && !dryRun) {
+            options = new String[]{"继续部署", "停止并回滚已成功的包", "停止但保留已成功的包"};
+        } else {
+            options = new String[]{"继续部署", "停止"};
+        }
+        int choice = JOptionPane.showOptionDialog(this, msg.toString(),
+                dryRun ? "停止预检？" : "停止部署？",
+                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
+                null, options, options[0]);
+        // 0 = 继续 / -1 = ESC 关闭：都视为继续
+        if (choice <= 0) {
+            logSection.appendLog("[操作] 用户取消停止，继续部署");
+            return;
+        }
+        DeployExecutionService.CancelMode mode;
+        if (succeeded > 0 && !dryRun) {
+            mode = (choice == 1)
+                    ? DeployExecutionService.CancelMode.ROLLBACK_ALL
+                    : DeployExecutionService.CancelMode.KEEP_SUCCEEDED;
+        } else {
+            mode = DeployExecutionService.CancelMode.ROLLBACK_ALL;
+        }
+        logSection.appendLog("[操作] 请求停止：" + (
+                mode == DeployExecutionService.CancelMode.KEEP_SUCCEEDED
+                        ? "保留已成功的包" : "回滚已成功的包"));
+        DeployExecutionService.requestStop(mode);
+        enterStoppingState();
     }
 
     /**
@@ -1238,7 +1376,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
         if (mode == DeployMode.FULL) {
             // 整包更新模式无文件列表需要刷新；仅输出一次提示
-            logSection.appendLog("[提示] 整包更新模式：将重新编译并替换整个远程包");
+            appendModeHintOnce("[提示] 整包更新模式：将重新编译并替换整个远程包");
             return;
         }
         if (mode == DeployMode.INCREMENTAL) {
@@ -1248,7 +1386,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             //   - 用户取消默认勾选并自己挑 → 等同原 INCREMENTAL（手动选择）
             //   - 用户在默认基础上增删 → 混合模式（合并前做不到）
             VirtualFile moduleRoot = LocalFileSystem.getInstance().findFileByPath(modulePath);
-            Set<String> prevSelected = normalizeSelectedPaths(sourceSection.getSelectedFiles());
+            // 仅在仍是同一个模块时保留用户上一次的手动勾选；切模块时上次的勾选属于旧模块，
+            // 文件路径不通用，必须清空，否则会出现"切到新工程默认还勾着旧工程文件"的错觉
+            boolean sameModule = modulePath.equals(lastFilesLoadedForModule);
+            Set<String> prevSelected = sameModule
+                    ? normalizeSelectedPaths(sourceSection.getSelectedFiles())
+                    : java.util.Collections.emptySet();
             List<String> changedFiles = moduleRoot != null
                     ? GitChangeDetector.detectChangedFiles(project, moduleRoot)
                     : java.util.Collections.emptyList();
@@ -1257,18 +1400,39 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             Set<String> selectedPaths = normalizeSelectedPaths(changedFiles);
             selectedPaths.addAll(prevSelected);
             sourceSection.setChangedFiles(displayFiles, false, selectedPaths, true);
+            lastFilesLoadedForModule = modulePath;
 
             if (displayFiles.isEmpty()) {
-                logSection.appendLog("[提示] 模块下未找到可部署文件");
+                appendModeHintOnce("[提示] 模块下未找到可部署文件");
             } else if (changedFiles.isEmpty()) {
-                logSection.appendLog("[提示] 未检测到 Git 变更，已显示 "
+                appendModeHintOnce("[提示] 未检测到 Git 变更，已显示 "
                         + displayFiles.size() + " 个可部署文件，可手动勾选");
             } else {
-                logSection.appendLog("[提示] 检测到 " + changedFiles.size()
+                appendModeHintOnce("[提示] 检测到 " + changedFiles.size()
                         + " 个 Git 变更，已显示 " + displayFiles.size()
                         + " 个可部署文件并默认勾选变更项");
             }
         }
+    }
+
+    /**
+     * 输出"模式 / 文件状态"类提示，但仅在与上一次完全不同时才追加到日志面板。
+     *
+     * <p>问题来源：IDEA 在某些场景会让 {@link #onModeChanged} 在毫秒级内被触发两次（比如
+     * VFS 刷新连带 module-rootschanged，或 Git tracker 异步回填），两次回调拿到的文件列表
+     * 完全一致，原本会让日志里出现一字不差的两行 {@code [提示]} ——纯噪音。</p>
+     *
+     * <p>仅做"与上一次相同则跳过"的就近 dedup。模块切换或文件状态发生实际变化时提示文本
+     * 必然不同，不会被误屏蔽。</p>
+     *
+     * @param message 即将追加的提示文本
+     * @author xumanyi
+     * @date 2026-04-30
+     */
+    private void appendModeHintOnce(String message) {
+        if (message.equals(lastModeHint)) return;
+        lastModeHint = message;
+        logSection.appendLog(message);
     }
 
     /**
@@ -1431,5 +1595,164 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         }
         @Override
         public Insets getBorderInsets(Component c) { return JBUI.insets(1); }
+    }
+
+    /**
+     * 扩展 JBSplitter 拖动命中区的 LayerUI
+     *
+     * <p>JBSplitter 的 {@code dividerWidth} 同时决定视觉宽度与鼠标命中范围。
+     * 默认值 2px 视觉细但极难抓取。本 UI 通过 {@link JLayer} 包一层透明事件拦截：
+     * 在 divider 真实位置上下各 {@value #HIT_PADDING} px 的隐形带内同样响应拖动，
+     * 视觉宽度保持不变（仅 dividerWidth），命中区扩大到 dividerWidth + 2*HIT_PADDING。</p>
+     *
+     * <p><b>事件分流</b>：</p>
+     * <ul>
+     *   <li>鼠标在原 divider 内（onDivider=true）→ 不消费任何事件，让 divider 自身的
+     *       hover 高亮、拖动手势、setProportion 逻辑保持原状；</li>
+     *   <li>鼠标在扩展带但 divider 外（ghost band）→ MOVED 设 N_RESIZE 光标；
+     *       PRESSED 起始拖动并消费；DRAGGED 直接计算并 {@code setProportion}；
+     *       RELEASED 结束拖动。消费这些事件可阻止下方面板（树/列表/滚动条）误响应。</li>
+     * </ul>
+     *
+     * <p><b>限制</b>：上下面板内容贴近 divider 边缘的 4px 区域不再触发原本的点击交互
+     * （比如树最末行的下边沿）。这部分通常不是交互热点，权衡可接受。</p>
+     *
+     * @author xumanyi
+     * @date 2026-04-30
+     */
+    private static class ExtendedSplitterHitZoneUI extends javax.swing.plaf.LayerUI<JBSplitter> {
+        /** 上下各扩展的命中像素数；总命中带宽 = dividerWidth + 2*HIT_PADDING */
+        private static final int HIT_PADDING = 4;
+        /** 拖动时夹紧 proportion 的下限 / 上限（保持每侧最少有可见区域） */
+        private static final float MIN_PROPORTION = 0.05f;
+        private static final float MAX_PROPORTION = 0.95f;
+
+        /** 扩展带触发的拖动会话标志（divider 自身拖动不进入此状态） */
+        private boolean dragging;
+        /** 上一次被覆盖 cursor 的组件，离开命中区时还原 */
+        private Component cursorOverrideOn;
+
+        @Override
+        public void installUI(JComponent c) {
+            super.installUI(c);
+            ((JLayer<?>) c).setLayerEventMask(
+                    AWTEvent.MOUSE_EVENT_MASK | AWTEvent.MOUSE_MOTION_EVENT_MASK);
+        }
+
+        @Override
+        public void uninstallUI(JComponent c) {
+            ((JLayer<?>) c).setLayerEventMask(0);
+            clearCursorOverride();
+            super.uninstallUI(c);
+        }
+
+        @Override
+        protected void processMouseEvent(MouseEvent e, JLayer<? extends JBSplitter> l) {
+            handle(e, l);
+        }
+
+        @Override
+        protected void processMouseMotionEvent(MouseEvent e, JLayer<? extends JBSplitter> l) {
+            handle(e, l);
+        }
+
+        /** 统一处理鼠标事件：判断 zone → 设光标 / 启停拖动 / 更新 proportion */
+        private void handle(MouseEvent e, JLayer<? extends JBSplitter> l) {
+            JBSplitter splitter = l.getView();
+            if (splitter == null) return;
+            // divider Y/H 用 firstComponent 实际 bounds 推算，避免依赖 Splitter 内部 API
+            Component first = splitter.getFirstComponent();
+            Component second = splitter.getSecondComponent();
+            if (first == null || second == null) return;
+
+            int dividerY;
+            int dividerH;
+            if (first.isVisible() && second.isVisible()) {
+                dividerY = first.getY() + first.getHeight();
+                dividerH = second.getY() - dividerY;
+                if (dividerH <= 0) dividerH = splitter.getDividerWidth();
+            } else {
+                // 任一侧折叠时拖动语义不再成立，退出拖动并放弃命中
+                if (dragging) dragging = false;
+                clearCursorOverride();
+                return;
+            }
+
+            Component src = (Component) e.getSource();
+            Point onSplitter = SwingUtilities.convertPoint(src, e.getPoint(), splitter);
+            boolean onDivider = onSplitter.y >= dividerY && onSplitter.y < dividerY + dividerH;
+            boolean inExt = onSplitter.y >= dividerY - HIT_PADDING
+                    && onSplitter.y < dividerY + dividerH + HIT_PADDING;
+            boolean inGhostBand = inExt && !onDivider;
+
+            switch (e.getID()) {
+                case MouseEvent.MOUSE_MOVED:
+                    if (dragging) return;
+                    if (inGhostBand) {
+                        setCursorOverride(src,
+                                Cursor.getPredefinedCursor(Cursor.N_RESIZE_CURSOR));
+                    } else if (!onDivider) {
+                        // onDivider 时让 divider 自身处理光标，不在此处还原免抢覆盖
+                        clearCursorOverride();
+                    }
+                    break;
+                case MouseEvent.MOUSE_EXITED:
+                    if (!dragging) clearCursorOverride();
+                    break;
+                case MouseEvent.MOUSE_PRESSED:
+                    if (inGhostBand) {
+                        dragging = true;
+                        e.consume();
+                    }
+                    break;
+                case MouseEvent.MOUSE_DRAGGED:
+                    if (dragging) {
+                        int splitterH = splitter.getHeight();
+                        if (splitterH > 0) {
+                            float prop = onSplitter.y / (float) splitterH;
+                            if (prop < MIN_PROPORTION) prop = MIN_PROPORTION;
+                            if (prop > MAX_PROPORTION) prop = MAX_PROPORTION;
+                            splitter.setProportion(prop);
+                        }
+                        e.consume();
+                    }
+                    break;
+                case MouseEvent.MOUSE_RELEASED:
+                    if (dragging) {
+                        dragging = false;
+                        e.consume();
+                        // 释放后重新评估当前位置的光标状态
+                        if (inGhostBand) {
+                            setCursorOverride(src,
+                                    Cursor.getPredefinedCursor(Cursor.N_RESIZE_CURSOR));
+                        } else if (!onDivider) {
+                            clearCursorOverride();
+                        }
+                    }
+                    break;
+                default:
+                    // 其他事件（CLICKED / ENTERED 等）不处理
+                    break;
+            }
+        }
+
+        /** 在指定组件上覆盖 cursor，并记录以便后续还原（切组件时先还原旧的） */
+        private void setCursorOverride(Component c, Cursor cursor) {
+            if (cursorOverrideOn != null && cursorOverrideOn != c) {
+                try { cursorOverrideOn.setCursor(null); } catch (Exception ignored) {}
+            }
+            cursorOverrideOn = c;
+            try {
+                if (!cursor.equals(c.getCursor())) c.setCursor(cursor);
+            } catch (Exception ignored) {}
+        }
+
+        /** 还原最近一次被覆盖的组件 cursor（setCursor(null) 让其继承父节点默认值） */
+        private void clearCursorOverride() {
+            if (cursorOverrideOn != null) {
+                try { cursorOverrideOn.setCursor(null); } catch (Exception ignored) {}
+                cursorOverrideOn = null;
+            }
+        }
     }
 }

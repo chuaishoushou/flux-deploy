@@ -370,10 +370,23 @@ public class FtpOperations {
     }
 
     /**
-     * 扫描时跳过的目录名。
+     * 备份目录名集合。
      *
-     * <p>这些目录是 CLI 自身或常见外部约定生成的备份/锁目录，不应作为部署目标。
-     * 同时供 UI 端 {@code FtpBrowseService} 在浏览/勾选部署目标时复用，确保 CLI 和 UI 行为一致。</p>
+     * <p>常见外部约定的"原包备份"目录命名，含 CLI 自身写入的 {@code backup/} 以及历史习惯名。
+     * CLI 通过 {@link #SCAN_SKIP_DIRS} 跳过这些目录；UI 端 {@code FtpBrowseService}
+     * 不再过滤这些目录，但会标记落入备份目录的包，使其默认不勾选。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public static final java.util.Set<String> BACKUP_DIR_NAMES =
+            java.util.Set.of("backup", "backups", "bak", ".backup");
+
+    /**
+     * CLI 扫描时跳过的目录名（备份目录 + 锁控制目录）。
+     *
+     * <p>这些目录是 CLI 自身或常见外部约定生成的备份/锁目录，不应作为 CLI 端的部署目标。
+     * 仅 CLI 使用：UI 浏览不再共用此集合，避免备份目录在树里"消失"导致用户困惑。</p>
      */
     public static final java.util.Set<String> SCAN_SKIP_DIRS =
             java.util.Set.of("backup", "backups", "bak", ".backup", ".flux-lock");

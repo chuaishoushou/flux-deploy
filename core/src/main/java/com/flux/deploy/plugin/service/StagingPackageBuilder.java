@@ -37,6 +37,12 @@ public class StagingPackageBuilder {
     private final Consumer<String> logCallback;
 
     /**
+     * 跳过编译模式：true 时静态资源直接从 src/main/resources、src/main/java（非 .java）下读取，
+     * 不再走 target/classes。仅当上层调用方确认"勾选清单中无 .java 文件"时才设为 true。
+     */
+    private boolean skipCompile = false;
+
+    /**
      * 构造暂存包构建器
      *
      * @param modulePath         模块根目录路径
@@ -52,6 +58,25 @@ public class StagingPackageBuilder {
         this.artifactFileName = artifactFileName;
         this.changedSourceFiles = changedSourceFiles;
         this.logCallback = logCallback;
+    }
+
+    /**
+     * 设置"跳过编译"模式
+     *
+     * <p>开启后，静态资源（.js / .css / .csv / .properties / .xml 等）直接从源目录读取，
+     * 不再依赖 target/classes 下的产物。适用于勾选清单中**完全不含 .java** 的场景。</p>
+     *
+     * <p>调用方必须自行保证 changedSourceFiles 内不含 .java，否则会因 jar 内 .class 陈旧导致
+     * 部署旧代码。当前 UI 的"自动判定"规则已确保这一点。</p>
+     *
+     * @param skipCompile 是否跳过编译；默认 false
+     * @return 当前对象以支持链式调用
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public StagingPackageBuilder setSkipCompile(boolean skipCompile) {
+        this.skipCompile = skipCompile;
+        return this;
     }
 
     /**
@@ -191,13 +216,11 @@ public class StagingPackageBuilder {
             return null;
         }
 
-        logCallback.accept("[补丁] 找到 " + classEntries.size() + " 个 class 需要替换"
-                + (deleteEntries.isEmpty() ? "" : ", " + deleteEntries.size() + " 个需要删除"));
-
-        // 对提取的 JAR 做补丁
+        // 对提取的 JAR 做补丁；不再打"找到 N 个 class 需要替换"——下面那行结果已包含同等信息
         Path patchedJar = outputDir.resolve("patched-" + existingJar.getFileName());
         int count = patchJar(existingJar, patchedJar, classEntries);
-        logCallback.accept("[补丁] 已替换/删除 " + count + " 个条目");
+        logCallback.accept("[补丁] 替换 " + count + " 个 class"
+                + (deleteEntries.isEmpty() ? "" : "（含 " + deleteEntries.size() + " 个删除）"));
 
         return patchedJar;
     }
@@ -367,26 +390,39 @@ public class StagingPackageBuilder {
         }
 
         // 2. src/main/resources/ → JAR: 根目录 / WAR: WEB-INF/classes/
+        // skipCompile=true 时直接读源文件（用户未编译，target/classes 下可能是旧资源或不存在）；
+        // skipCompile=false 时优先走 target/classes（mvn 已经跑过 process-resources，含 filtering 后内容）
         int resIdx = pathStr.indexOf("src/main/resources/");
         if (resIdx >= 0) {
             String resRelative = pathStr.substring(resIdx + "src/main/resources/".length());
-            Path classesFile = moduleRoot.resolve("target/classes").resolve(resRelative);
-            if (Files.exists(classesFile)) {
+            Path resolved = skipCompile
+                    ? sourcePath
+                    : moduleRoot.resolve("target/classes").resolve(resRelative);
+            if (Files.exists(resolved)) {
                 // WAR 包：resources 打包到 WEB-INF/classes/ 下
                 String entryPath = isWar ? "WEB-INF/classes/" + resRelative : resRelative;
-                result.put(entryPath, classesFile);
+                result.put(entryPath, resolved);
+                if (skipCompile) {
+                    logCallback.accept("[源] " + resRelative + " ← src/main/resources/" + resRelative);
+                }
                 return;
             }
         }
 
         // 3. src/main/java/ 下的非 .java 文件（如 .xml mapper 文件）
+        // 同 2 的策略：skipCompile=true 时直接读源文件；否则走 target/classes
         int javaIdx = pathStr.indexOf("src/main/java/");
         if (javaIdx >= 0) {
             String javaRelative = pathStr.substring(javaIdx + "src/main/java/".length());
-            Path classesFile = moduleRoot.resolve("target/classes").resolve(javaRelative);
-            if (Files.exists(classesFile)) {
+            Path resolved = skipCompile
+                    ? sourcePath
+                    : moduleRoot.resolve("target/classes").resolve(javaRelative);
+            if (Files.exists(resolved)) {
                 String entryPath = isWar ? "WEB-INF/classes/" + javaRelative : javaRelative;
-                result.put(entryPath, classesFile);
+                result.put(entryPath, resolved);
+                if (skipCompile) {
+                    logCallback.accept("[源] " + javaRelative + " ← src/main/java/" + javaRelative);
+                }
                 return;
             }
         }

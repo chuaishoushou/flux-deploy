@@ -39,6 +39,8 @@ public class PluginDeployConfig {
     private boolean localOnly;
     /** 跳过备份 */
     private boolean skipBackup;
+    /** 跳过 Maven 编译，直接使用 target/ 下已有产物（适用于纯静态资源变更或已编译产物复用） */
+    private boolean skipCompile;
     /**
      * 备份冲突处理策略，仅在点击「打包并上传」前检测到同日同开发已有备份时生效；
      * 无冲突时此字段不参与逻辑。默认 OVERWRITE 兼容旧行为。
@@ -307,6 +309,27 @@ public class PluginDeployConfig {
      * @date 2026-03-27
      */
     public void setSkipBackup(boolean skipBackup) { this.skipBackup = skipBackup; }
+
+    /**
+     * 判断是否跳过 Maven 编译
+     *
+     * @return 是否跳过编译
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public boolean isSkipCompile() { return skipCompile; }
+
+    /**
+     * 设置是否跳过 Maven 编译
+     *
+     * <p>勾选后直接复用 {@code target/} 下已有产物，不触发 mvn package。
+     * 用户需自行确保产物为最新（UI 上显示产物 mtime 供肉眼确认）。</p>
+     *
+     * @param skipCompile 是否跳过编译
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public void setSkipCompile(boolean skipCompile) { this.skipCompile = skipCompile; }
 
     /**
      * 获取部署目标模式

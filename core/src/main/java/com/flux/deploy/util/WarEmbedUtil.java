@@ -90,8 +90,7 @@ public final class WarEmbedUtil {
         Path tempDir = Files.createTempDirectory("war-embed-");
 
         try {
-            // 2. 解压 WAR
-            System.out.println("  [嵌入] 解压 WAR: " + warFile.getFileName());
+            // 2. 解压 WAR（不打日志，属于实现细节）
             unzip(warFile, tempDir);
 
             // 3. 定位 WEB-INF/lib
@@ -141,7 +140,8 @@ public final class WarEmbedUtil {
                 destJar = libDir.resolve(matchedJarName);
             }
             Files.copy(newJarFile, destJar);
-            System.out.println("  [嵌入] 已替换: " + destJar.getFileName());
+            // 不打"已替换 X.jar"：上面"匹配到 WEB-INF/lib/X.jar"已表达"哪个 jar 被替换"；
+            // 名称变化场景由前面的"JAR 名称变更"行单独提示，无需此处再来一条同义记录。
 
             // 7. 记录替换后所有 lib 文件的 SHA256
             Map<String, String> afterHashes = hashAllFiles(libDir);
@@ -184,8 +184,7 @@ public final class WarEmbedUtil {
                 throw new IOException("WAR 嵌入校验失败: " + message);
             }
 
-            // 9. 重新打包 WAR
-            System.out.println("  [嵌入] 重新打包 WAR...");
+            // 9. 重新打包 WAR（不打"重新打包 WAR..."进度行，紧跟其后的"输出"行已自带语义）
             zip(tempDir, outputWarFile);
             System.out.println("  [嵌入] 输出: " + outputWarFile.getFileName()
                     + " (" + Files.size(outputWarFile) / 1024 + " KB)");

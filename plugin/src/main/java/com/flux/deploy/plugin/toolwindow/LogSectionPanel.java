@@ -22,6 +22,15 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
+    /**
+     * 行级标记：以该字符开头的日志行将不带时间戳前缀输出。
+     *
+     * <p>用于多行同组数据展示（例如"已更新 N 个包"下逐行列出完整路径），
+     * 让从属行视觉上归属于上一条带时间戳的主消息，避免重复时间戳干扰。
+     * 调用方在拼接行内容时只需在每行最前加上本字符即可。</p>
+     */
+    public static final char RAW_LINE_MARK = (char) 1;
+
     private final JBTextArea logArea;
     private final JProgressBar progressBar;
 
@@ -49,6 +58,14 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
      *
      * <p>自动添加时间戳前缀，并滚动到底部。</p>
      *
+     * <p>消息允许内嵌 {@code \n} 实现多行：</p>
+     * <ul>
+     *   <li>空段打印为无前缀空行（便于视觉分组）；</li>
+     *   <li>以 {@link #RAW_LINE_MARK} 开头的段，剥离标记后按原文输出，不加时间戳前缀
+     *       （用于在主消息下分行展示从属内容，例如逐行列出包路径）；</li>
+     *   <li>其余段独立带时间戳前缀。</li>
+     * </ul>
+     *
      * @param message 日志消息
      * @author xumanyi
      * @date 2026-03-27
@@ -56,13 +73,14 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
     public void appendLog(String message) {
         SwingUtilities.invokeLater(() -> {
             String timestamp = LocalTime.now().format(TIME_FMT);
-            // 允许消息内嵌 \n：按换行拆分，每个非空段单独带时间戳；
-            // 空段打印为无前缀空行（便于视觉分组）
             String[] lines = message == null ? new String[]{""} : message.split("\n", -1);
             StringBuilder sb = new StringBuilder();
             for (String line : lines) {
                 if (line.isEmpty()) {
                     sb.append('\n');
+                } else if (line.charAt(0) == RAW_LINE_MARK) {
+                    // 标记为"无时间戳"的从属行：剥离标记后按原文输出
+                    sb.append(line, 1, line.length()).append('\n');
                 } else {
                     sb.append(timestamp).append("  ").append(line).append('\n');
                 }

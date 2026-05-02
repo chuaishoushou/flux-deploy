@@ -8,6 +8,7 @@ import com.flux.deploy.plugin.service.ModuleEnumerator.ModuleTreeNode;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.CheckboxTree;
 import com.intellij.ui.CheckedTreeNode;
+import com.intellij.ui.SearchTextField;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
@@ -40,14 +41,22 @@ import java.util.function.Consumer;
 public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
     private final Project project;
-    private final JButton moduleButton;
+    private final PickerComboBox moduleCombo;
     private final JBTextField artifactField;
     private final JComboBox<DeployMode> modeComboBox;
     private final JPanel dynamicContent;
 
     private final JBLabel fullModeLabel;
+    /**
+     * 文件状态条：合并展示"已选 X / Y 个文件"与编译策略片段（含 .java 编译 / 静态资源跳过 / 未勾选）。
+     * 与右侧 TargetSectionPanel.selectionSummary 风格一致，单行展示节省纵向空间。
+     */
     private final JBLabel fileCountLabel;
-    private final JBTextField fileSearchField;
+    /**
+     * 文件搜索框，使用 IDEA 平台原生 SearchTextField：
+     * 自带左侧 🔍 图标、右侧 × 清空按钮、历史下拉，常驻显示无需 toggle。
+     */
+    private final SearchTextField fileSearchField;
 
     // CheckboxTree 替代 CheckBoxList
     private CheckboxTree fileTree;
@@ -91,11 +100,11 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         super(new GridBagLayout());
         this.project = project;
 
-        this.moduleButton = new JButton("点击选择工程 ▾");
-        moduleButton.setHorizontalAlignment(SwingConstants.LEFT);
-        moduleButton.setMargin(new Insets(2, 6, 2, 6));
-        moduleButton.setFocusable(false);
-        moduleButton.setToolTipText("选择要更新的 Maven 模块（源工程）");
+        // 用 PickerComboBox（视觉=JComboBox / 点击=自定义弹窗）替换原 JButton，
+        // 让控件边框、暗色背景、高度、下拉箭头与同面板的"产物""更新模式"
+        // 以及右侧"项目""系统"完全一致；点击下拉时仍弹出模块树搜索面板。
+        this.moduleCombo = new PickerComboBox("点击选择工程", this::showModuleTreePopup);
+        moduleCombo.setToolTipText("选择要更新的 Maven 模块（源工程）");
         this.artifactField = new JBTextField();
         artifactField.setEditable(false);
         artifactField.setFocusable(false);
@@ -114,9 +123,12 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
         this.fullModeLabel = new JBLabel("将替换整个远程包");
         this.fileCountLabel = new JBLabel("");
-        this.fileSearchField = new JBTextField();
-        fileSearchField.getEmptyText().setText("搜索文件名或路径...");
-        fileSearchField.setToolTipText("按文件名、目录路径或变更状态过滤文件树，支持空格分隔多个关键字");
+        // 关闭历史下拉：本场景每次进入文件列表都是新的模块/分支，复用历史关键字价值有限，
+        // 且会让 × 旁边多一个三角按钮，挤压输入区
+        this.fileSearchField = new SearchTextField(false);
+        fileSearchField.getTextEditor().getEmptyText().setText("搜索文件名或路径");
+        fileSearchField.getTextEditor().setToolTipText(
+                "按文件名、目录路径或变更状态过滤文件树，支持空格分隔多个关键字与拼音");
 
         // 初始化 CheckboxTree
         this.treeRoot = new CheckedTreeNode("变更文件");
@@ -206,7 +218,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         gbc.gridx = 0; gbc.gridy = 0;
         add(new JBLabel("工程："), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        add(moduleButton, gbc);
+        add(moduleCombo, gbc);
 
         gbc.gridx = 0; gbc.gridy = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
         add(new JBLabel("产物："), gbc);
@@ -217,10 +229,12 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         add(new JBLabel("更新模式："), gbc);
         JPanel modeRow = new JPanel(new BorderLayout(4, 0));
         modeRow.add(modeComboBox, BorderLayout.CENTER);
+
         JButton refreshModeButton = new JButton(AllIcons.Actions.Refresh);
-        refreshModeButton.setMargin(JBUI.emptyInsets());
         int btnSize = modeComboBox.getPreferredSize().height;
-        refreshModeButton.setPreferredSize(new Dimension(btnSize, btnSize));
+        Dimension iconBtnSize = new Dimension(btnSize, btnSize);
+        refreshModeButton.setMargin(JBUI.emptyInsets());
+        refreshModeButton.setPreferredSize(iconBtnSize);
         refreshModeButton.setFocusPainted(false);
         refreshModeButton.setFocusable(false);
         refreshModeButton.setToolTipText(
@@ -228,6 +242,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                 + "<br>整包更新：无变化"
                 + "<br>增量更新：重新扫描模块文件并重新执行 Git 变更检测</html>");
         refreshModeButton.addActionListener(e -> refreshCurrentMode());
+
         modeRow.add(refreshModeButton, BorderLayout.EAST);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
         add(modeRow, gbc);
@@ -235,12 +250,19 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         // 全量提示
         dynamicContent.add(fullModeLabel, "FULL");
 
-        // 文件树面板
+        // 文件树面板：南区用单个 fileCountLabel 同时承载"已选 X / Y"与编译策略片段，
+        // 与右侧 TargetSectionPanel.selectionSummary 风格统一，单行展示节省纵向空间
         JPanel fileListPanel = new JPanel(new BorderLayout(0, 4));
         fileListPanel.add(fileSearchField, BorderLayout.NORTH);
         fileListPanel.add(fileScrollPane, BorderLayout.CENTER);
         fileCountLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
         fileCountLabel.setBorder(JBUI.Borders.emptyTop(2));
+        fileCountLabel.setToolTipText(
+                "<html>编译策略由勾选清单自动决定，无需手动选择："
+                + "<br>• 含任意 <b>.java</b> 文件 → 执行 <code>mvn clean package</code>"
+                + "<br>• 全是静态资源（js/css/csv/模板等）→ 跳过编译，直接从源文件读取"
+                + "<br>• 整包更新模式 → 始终编译"
+                + "<br>取消勾选 .java 即可让本次部署跳过编译。</html>");
         fileListPanel.add(fileCountLabel, BorderLayout.SOUTH);
         dynamicContent.add(fileListPanel, "FILE_LIST");
 
@@ -256,38 +278,71 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         dynamicContent.setVisible(false);
     }
 
-    /** 初始化事件监听：工程选择按钮、模式切换和全选复选框 */
+    /** 初始化事件监听：模式切换、搜索过滤、Ctrl+F / Esc 快捷键 */
     private void initListeners() {
-        moduleButton.addActionListener(e -> showModuleTreePopup());
-
         modeComboBox.addActionListener(e -> {
             DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
             if (mode != null) {
                 CardLayout cl = (CardLayout) dynamicContent.getLayout();
                 cl.show(dynamicContent, mode == DeployMode.FULL ? "FULL" : "FILE_LIST");
-                // FULL 模式下只在已选工程时才显示提示
                 if (mode == DeployMode.FULL) {
                     dynamicContent.setVisible(currentModulePath != null);
                 }
-                // 通知外部根据模式和当前模块刷新文件列表（外部 setMode 时抑制）
                 if (!suppressModeCallback && modeChangeCallback != null
                         && currentModulePath != null) {
                     modeChangeCallback.accept(mode);
                 }
+                updateFileCountLabel();
             }
         });
 
-        fileSearchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+        // SearchTextField 自带 addDocumentListener；其 × 清空按钮会调 setText("")，
+        // 同样走这里的 listener，无需额外处理。
+        fileSearchField.addDocumentListener(new javax.swing.event.DocumentListener() {
             @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             private void refresh() {
-                if (!suppressFileSearchEvents) {
+                if (suppressFileSearchEvents) return;
+                // 在 document 事件回调里直接动 Swing 树模型在某些 LAF 下会被吞掉 repaint。
+                // 改为下一帧执行，保证每次输入都能看到树刷新。
+                SwingUtilities.invokeLater(() -> {
+                    if (suppressFileSearchEvents) return;
                     rebuildFileTreeFromFilter(true);
-                }
+                });
             }
         });
 
+        // 不绑定 Ctrl+F：IDEA IdeKeyEventDispatcher 在 Swing 之前就把 Ctrl+F 派给
+        // 全局 Find / SpeedSearch，本地 AnAction 注册也无法稳定压过；搜索框已常驻
+        // 显示，鼠标点击即可聚焦，无需快捷键。
+
+        // Esc：先清空（让 × 的功能也覆盖到键盘用户），已空时把焦点交回文件树
+        fileSearchField.getTextEditor().registerKeyboardAction(
+                e -> {
+                    if (!fileSearchField.getText().isEmpty()) {
+                        fileSearchField.setText("");
+                    } else {
+                        fileTree.requestFocusInWindow();
+                    }
+                },
+                KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ESCAPE, 0),
+                JComponent.WHEN_FOCUSED);
+    }
+
+    /**
+     * 把焦点放到搜索框输入区并全选已有文本。
+     *
+     * <p>FULL 模式下搜索框位于 CardLayout 隐藏卡内，requestFocusInWindow
+     * 会自然失败，无需额外校验。</p>
+     *
+     * @author xumanyi
+     * @date 2026-04-30
+     */
+    private void focusSearchField() {
+        JBTextField editor = fileSearchField.getTextEditor();
+        editor.requestFocusInWindow();
+        editor.selectAll();
     }
 
     /**
@@ -304,16 +359,18 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             // （Windows 下 modulePath 形如 D:\...\scev6-a05-srv，旧实现只认 '/' 所以整条路径都展示）
             int lastSep = Math.max(modulePath.lastIndexOf('/'), modulePath.lastIndexOf('\\'));
             String name = lastSep >= 0 ? modulePath.substring(lastSep + 1) : modulePath;
-            moduleButton.setText(name + " ▾");
+            // 不再追加 " ▾"：PickerComboBox 由 L&F 自动绘制下拉箭头
+            moduleCombo.setText(name);
             // FULL 模式下显示提示
             DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
             if (mode == DeployMode.FULL) {
                 dynamicContent.setVisible(true);
             }
         } else {
-            moduleButton.setText("点击选择工程 ▾");
+            moduleCombo.setText("点击选择工程");
             dynamicContent.setVisible(false);
         }
+        updateFileCountLabel();
     }
 
     /**
@@ -380,6 +437,67 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      */
     public void setArtifact(String artifactFileName) {
         artifactField.setText(artifactFileName != null ? artifactFileName : "");
+        updateFileCountLabel();
+    }
+
+    /**
+     * 根据当前模式与勾选清单判定是否需要 mvn package
+     *
+     * <p>规则：</p>
+     * <ul>
+     *   <li>FULL 模式：必须编译（要打整 jar）</li>
+     *   <li>INCREMENTAL 模式：勾选清单内含任意 <b>.java</b> → 编译；
+     *       全是静态资源（含 src/main/webapp、src/main/resources、src/main/java 下非 .java）→ 跳过</li>
+     *   <li>未选工程或未勾选任何文件：保守按"需要编译"返回，由上层兜底校验</li>
+     * </ul>
+     *
+     * @return true 表示需要执行 mvn package；false 表示可跳过
+     * @author xumanyi
+     * @date 2026-04-29
+     */
+    public boolean needsCompile() {
+        DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
+        if (mode == DeployMode.FULL) return true;
+        List<String> selected = getSelectedFiles();
+        if (selected.isEmpty()) return true;
+        for (String raw : selected) {
+            String path = raw == null ? "" : raw;
+            if (path.length() > 2 && path.charAt(1) == ' ') {
+                path = path.substring(path.indexOf(' ')).trim();
+            }
+            if (path.toLowerCase(Locale.ROOT).endsWith(".java")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 计算编译策略片段（带颜色 span，无 &lt;html&gt; 包裹），由 updateFileCountLabel 拼接到状态条尾部。
+     *
+     * <p>未选工程返回空串；FULL 分支保留以防未来在 FULL 卡内复用，
+     * 当前 CardLayout 下 fileCountLabel 仅出现在 FILE_LIST 卡。</p>
+     *
+     * @return 编译策略片段，未选模块返回空串
+     */
+    private String computeCompileStatusFragment() {
+        if (currentModulePath == null) return "";
+        DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
+        if (mode == DeployMode.FULL) {
+            return "<span style='color:#6897BB;'>⚙ 整包更新：将执行 mvn clean package</span>";
+        }
+        List<String> selected = getSelectedFiles();
+        if (selected.isEmpty()) {
+            return "<span style='color:gray;'>未勾选</span>";
+        }
+        int javaCount = 0;
+        for (String raw : selected) {
+            String p = raw == null ? "" : raw;
+            if (p.length() > 2 && p.charAt(1) == ' ') p = p.substring(p.indexOf(' ')).trim();
+            if (p.toLowerCase(Locale.ROOT).endsWith(".java")) javaCount++;
+        }
+        if (javaCount > 0) {
+            return "<span style='color:#6897BB;'>含 " + javaCount + " 个 .java，将编译</span>";
+        }
+        return "<span style='color:#6A8759;'>静态资源，跳过编译</span>";
     }
 
     /**
@@ -495,6 +613,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
         // 动态显隐
         dynamicContent.setVisible(!allFileEntries.isEmpty());
+        updateFileCountLabel();
         revalidate();
         repaint();
     }
@@ -598,6 +717,12 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
     /**
      * 按关键字过滤文件条目，空关键字返回全量条目。
+     *
+     * <p>支持空格分隔的多关键字"与"匹配，每个关键字命中以下任一即视为通过：</p>
+     * <ol>
+     *   <li>原始文本子串（状态 + 文件名 + 完整路径，大小写不敏感）</li>
+     *   <li>拼音全拼或拼音首字母匹配（中文路径专用）</li>
+     * </ol>
      */
     private List<FileEntry> filterFileEntries(String keyword) {
         if (keyword == null || keyword.isEmpty()) {
@@ -608,13 +733,11 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         for (FileEntry entry : allFileEntries) {
             String searchable = (entry.status + " " + entry.fileName + " " + entry.fullPath)
                     .toLowerCase(Locale.ROOT);
-            String compactSearchable = compactSearchText(searchable);
+            String pinyinCandidate = entry.status + " " + entry.fileName + " " + entry.fullPath;
             boolean matched = true;
             for (String term : terms) {
-                String compactTerm = compactSearchText(term);
                 if (!searchable.contains(term)
-                        && (compactTerm.length() < 2
-                        || !isSubsequence(compactTerm, compactSearchable))) {
+                        && !com.flux.deploy.plugin.util.PinyinMatcher.matches(pinyinCandidate, term)) {
                     matched = false;
                     break;
                 }
@@ -624,22 +747,6 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             }
         }
         return result;
-    }
-
-    /** 将搜索文本压缩为适合缩写匹配的形式。 */
-    private static String compactSearchText(String text) {
-        return text == null ? "" : text.replaceAll("[^a-z0-9\\u4e00-\\u9fa5]", "");
-    }
-
-    /** 判断 pattern 是否按顺序出现在 text 中，用于宽松缩写匹配。 */
-    private static boolean isSubsequence(String pattern, String text) {
-        int j = 0;
-        for (int i = 0; i < text.length() && j < pattern.length(); i++) {
-            if (text.charAt(i) == pattern.charAt(j)) {
-                j++;
-            }
-        }
-        return j == pattern.length();
     }
 
     /**
@@ -724,19 +831,19 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         dirTreeNode.setChecked(fileCount > 0
                 && countCheckedFiles(dirNode, checkedPaths) == fileCount);
 
-        // 添加本目录下的文件
+        // 先递归子目录（目录排在文件之前，符合常见文件浏览器交互习惯）
+        for (Map.Entry<String, DirNode> child : dirNode.children.entrySet()) {
+            buildCompressedNode(dirTreeNode, child.getValue(),
+                    child.getKey(), checkedPaths);
+        }
+
+        // 再添加本目录下的文件
         for (FileEntry fe : dirNode.files) {
             String fileName = fe.fullPath.substring(fe.fullPath.lastIndexOf('/') + 1);
             FileEntry display = new FileEntry(fe.rawPath, fe.status, fileName, fe.fullPath);
             CheckedTreeNode fileNode = new CheckedTreeNode(display);
             fileNode.setChecked(checkedPaths.contains(fe.fullPath));
             dirTreeNode.add(fileNode);
-        }
-
-        // 递归子目录
-        for (Map.Entry<String, DirNode> child : dirNode.children.entrySet()) {
-            buildCompressedNode(dirTreeNode, child.getValue(),
-                    child.getKey(), checkedPaths);
         }
 
         parent.add(dirTreeNode);
@@ -787,7 +894,12 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         return selected;
     }
 
-    /** 更新文件数量标签：已选 / 总数 */
+    /**
+     * 更新底部状态条：合并展示"已选 X / Y 个文件"与编译策略片段。
+     *
+     * <p>计数部分沿用 label 默认 disabledForeground；编译策略片段用 html span 单独着色。
+     * 无文件时清空文本（dynamicContent 在外层负责整体显隐）。</p>
+     */
     private void updateFileCountLabel() {
         int total = rawFiles.size();
         if (total == 0) {
@@ -796,13 +908,20 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         }
         int checked = getSelectedFiles().size();
         String keyword = fileSearchField.getText().trim();
+        String count;
         if (keyword.isEmpty()) {
-            fileCountLabel.setText("已选 " + checked + " / " + total + " 个文件");
+            count = "已选 " + checked + " / " + total + " 个文件";
         } else if (filteredFileCount == 0) {
-            fileCountLabel.setText("未找到匹配文件，已选 " + checked + " / " + total + " 个文件");
+            count = "未找到匹配文件，已选 " + checked + " / " + total + " 个文件";
         } else {
-            fileCountLabel.setText("已选 " + checked + " / " + total
-                    + " 个文件，筛选 " + filteredFileCount + " 个");
+            count = "已选 " + checked + " / " + total
+                    + " 个文件，筛选 " + filteredFileCount + " 个";
+        }
+        String compile = computeCompileStatusFragment();
+        if (compile.isEmpty()) {
+            fileCountLabel.setText(count);
+        } else {
+            fileCountLabel.setText("<html>" + count + " · " + compile + "</html>");
         }
     }
 
@@ -969,7 +1088,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         javax.swing.JTextField searchField = new javax.swing.JTextField();
         searchField.putClientProperty("JTextField.placeholderText", "搜索模块（artifactId 或父目录名）...");
 
-        Window owner = SwingUtilities.getWindowAncestor(moduleButton);
+        Window owner = SwingUtilities.getWindowAncestor(moduleCombo);
         JDialog dialog = new JDialog(owner);
         dialog.setUndecorated(true);
         // 不要 setAlwaysOnTop(true)：会让弹窗浮在其他应用之上，切到其他应用时弹窗仍可见。
@@ -1021,14 +1140,14 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             private void refresh() {
-                String kw = searchField.getText().trim().toLowerCase();
+                String kw = searchField.getText().trim();
                 if (kw.isEmpty()) {
                     cards.show(contentPanel, "tree");
                 } else {
                     listModel.clear();
                     for (ModuleLeafEntry entry : allLeaves) {
-                        if (entry.displayName.toLowerCase().contains(kw)
-                                || entry.parentPath.toLowerCase().contains(kw)) {
+                        if (com.flux.deploy.plugin.util.PinyinMatcher.matches(entry.displayName, kw)
+                                || com.flux.deploy.plugin.util.PinyinMatcher.matches(entry.parentPath, kw)) {
                             listModel.addElement(entry);
                         }
                     }
@@ -1064,8 +1183,8 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                 JComponent.WHEN_IN_FOCUSED_WINDOW);
 
         dialog.pack();
-        Point loc = moduleButton.getLocationOnScreen();
-        dialog.setLocation(loc.x, loc.y + moduleButton.getHeight());
+        Point loc = moduleCombo.getLocationOnScreen();
+        dialog.setLocation(loc.x, loc.y + moduleCombo.getHeight());
         dialog.setVisible(true);
         searchField.requestFocusInWindow();
 
@@ -1078,8 +1197,8 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                             Point click = me.getLocationOnScreen();
                             Rectangle bounds = moduleDialog.getBounds();
                             // 也排除按钮区域（防止关闭后立即重新打开）
-                            Rectangle btnBounds = moduleButton.getBounds();
-                            Point btnLoc = moduleButton.getLocationOnScreen();
+                            Rectangle btnBounds = moduleCombo.getBounds();
+                            Point btnLoc = moduleCombo.getLocationOnScreen();
                             Rectangle btnScreen = new Rectangle(btnLoc.x, btnLoc.y,
                                     btnBounds.width, btnBounds.height);
                             if (!bounds.contains(click) && !btnScreen.contains(click)) {
