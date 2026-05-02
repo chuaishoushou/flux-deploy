@@ -467,6 +467,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             if (proj != null && sys != null && browseService != null) {
                 loadTargetPackages(proj, sys);
             }
+            fireContextChange();
         });
 
         // 刷新按钮：重连 FTP + 刷新项目/系统/目标包列表
@@ -540,6 +541,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
 
                         refreshing = false;
                         refreshButton.setEnabled(true);
+                        fireContextChange();
                     });
                     } // end synchronized(ftpLock)
                 } catch (Exception ex) {
@@ -1013,6 +1015,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 projectCombo.setText(sel);
                 forceCloseProjectPopup();
                 if (browseService != null) loadSystems(sel);
+                fireContextChange();
             }
         };
 
@@ -1120,6 +1123,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         clearExtraLevels();
         refreshing = false;
         clearPackages();
+        fireContextChange();
     }
 
     /** 账号行行高 */
@@ -1510,6 +1514,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         allProjects = new ArrayList<>(projects);
                         selectedProject = null;
                         projectCombo.setText("请选择项目");
+                        fireContextChange();
                     });
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
@@ -1549,6 +1554,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         allProjects = new ArrayList<>(projects);
                         selectedProject = null;
                         projectCombo.setText("请选择项目");
+                        fireContextChange();
                     });
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
@@ -1894,6 +1900,64 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
      * @date 2026-03-27
      */
     public boolean isFtpConnected() { return browseService != null && browseService.isConnected(); }
+
+    /**
+     * 获取当前 FTP 上下文路径
+     *
+     * <p>用于 {@code BackupLocationDialog} 与 customBackupRoots 的 key 计算。
+     * 不复用 {@link com.flux.deploy.plugin.model.FtpTargetSelection#getRemoteDir()}，
+     * 后者强假设 system 非空。</p>
+     *
+     * <p>返回值规则（按优先级）：</p>
+     * <ul>
+     *   <li>项目 + 系统都已选：{@code /开发/{project}/{system}/}</li>
+     *   <li>仅项目已选：{@code /开发/{project}/}</li>
+     *   <li>项目未选：返回 null</li>
+     * </ul>
+     *
+     * @return 当前 FTP 上下文目录（含尾部 /），项目未选时返回 null
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public String getCurrentContextDir() {
+        if (selectedProject == null || selectedProject.isBlank()) {
+            return null;
+        }
+        Object sys = systemCombo.getSelectedItem();
+        if (sys != null && !((String) sys).isBlank()) {
+            return "/开发/" + selectedProject + "/" + sys + "/";
+        }
+        return "/开发/" + selectedProject + "/";
+    }
+
+    /**
+     * 注册当前 FTP 上下文（项目 / 系统 / 连接态）变化的回调。
+     *
+     * <p>{@code InfoSectionPanel} 用此回调刷新"备份至"行。
+     * 多次调用会替换原回调（仅一个监听者）。</p>
+     *
+     * @param callback 回调函数；可为 null 表示清除监听
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public void setContextChangeCallback(Runnable callback) {
+        this.contextChangeCallback = callback;
+    }
+
+    /** 上下文（项目 / 系统 / 连接）变化的回调，由 {@link InfoSectionPanel} 注册 */
+    private Runnable contextChangeCallback;
+
+    /**
+     * 触发上下文变化回调（内部调用）
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private void fireContextChange() {
+        if (contextChangeCallback != null) {
+            contextChangeCallback.run();
+        }
+    }
 
     // ==================== 内部类 ====================
 
