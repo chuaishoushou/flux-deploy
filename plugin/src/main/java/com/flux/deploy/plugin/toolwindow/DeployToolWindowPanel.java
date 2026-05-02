@@ -174,6 +174,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             @Override public String getUsername() { return targetSection.getConnectedUsername(); }
             @Override public String getPassword() { return targetSection.getConnectedPassword(); }
             @Override public String getContextDir() { return targetSection.getCurrentContextDir(); }
+            @Override public String getProjectDir() { return targetSection.getCurrentProjectDir(); }
             @Override public String getFirstTargetRemoteDir() {
                 java.util.List<com.flux.deploy.plugin.model.FtpTargetSelection> mts = targetSection.getMainTargets();
                 if (mts != null && !mts.isEmpty()) {

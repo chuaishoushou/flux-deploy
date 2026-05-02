@@ -1931,6 +1931,20 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     }
 
     /**
+     * 获取当前项目根目录（不含系统），用于 BackupLocationDialog 限制目录树根范围。
+     *
+     * @return 项目根（含尾部 /）；项目未选时返回 null
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public String getCurrentProjectDir() {
+        if (selectedProject == null || selectedProject.isBlank()) {
+            return null;
+        }
+        return "/开发/" + selectedProject + "/";
+    }
+
+    /**
      * 注册当前 FTP 上下文（项目 / 系统 / 连接态）变化的回调。
      *
      * <p>{@code InfoSectionPanel} 用此回调刷新"备份至"行。

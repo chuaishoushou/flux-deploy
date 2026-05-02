@@ -10,13 +10,16 @@ import javax.swing.*;
 import java.awt.*;
 
 /**
- * 信息 Section 面板：版本记录开关 + 任务号 + 客服号 + 操作人
+ * 信息 Section 面板：版本记录开关 + 任务号 + 客服号 + 操作人 + 备份位置
  *
  * <p>操作人从 {@link PluginSettingsService} 缓存中恢复（上次填写值），
  * 无缓存时为空，不提供硬编码默认值。</p>
  *
  * <p>勾选"更新版本记录"后显示任务号和客服号输入框，
  * 取消勾选时隐藏并清空（操作人保留缓存值）。</p>
+ *
+ * <p>勾选"执行备份"后显示"备份至"行：路径 + [更改] [✕] 按钮组。
+ * ✕ 仅在已自定义 customBackupRoot 时显示，点击后二次确认清除。</p>
  *
  * @author xumanyi
  * @date 2026-03-27
@@ -25,7 +28,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
 
     /**
      * FTP 上下文供给接口，由 {@link DeployToolWindowPanel} 桥接
-     * {@code TargetSectionPanel.getCurrentContextDir()} 等方法供给
+     * {@code TargetSectionPanel} 的当前选择状态供给
      *
      * @author xumanyi
      * @date 2026-05-02
@@ -43,6 +46,8 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         String getPassword();
         /** @return 当前上下文目录（项目+系统 或 仅项目）；项目未选时返回 null */
         String getContextDir();
+        /** @return 当前项目根目录（仅项目，不含系统）；项目未选时返回 null */
+        String getProjectDir();
         /** @return 第一个目标的 remoteDir，用于显示默认派生路径；无目标时返回 null */
         String getFirstTargetRemoteDir();
     }
@@ -63,6 +68,8 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
     private JBLabel backupLocationLabel;
     /** "更改" 按钮 */
     private JButton backupLocationChangeButton;
+    /** "✕ 恢复默认" 小按钮（仅自定义时显示） */
+    private JButton backupLocationResetButton;
 
     /**
      * 构造信息面板
@@ -108,10 +115,6 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         restoreFromCache();
 
         // 统一单网格：所有 label + field 共享同一列宽，确保视觉对齐
-        //   行 0：☑版本记录  ☑执行备份
-        //   行 1：开发： [________________]
-        //   行 2：任务： [________________]   （勾选版本记录后显示）
-        //   行 3：客服： [________________]   （同上）
         JPanel container = new JPanel(new GridBagLayout());
         GridBagConstraints g = new GridBagConstraints();
         g.anchor = GridBagConstraints.WEST;
@@ -141,13 +144,26 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         backupLocationChangeButton.setMargin(new Insets(2, 8, 2, 8));
         backupLocationChangeButton.addActionListener(e -> openBackupLocationDialog());
 
+        // ✕ 小按钮：仅已自定义时显示，点击二次确认后清除该 key
+        backupLocationResetButton = new JButton("✕");
+        backupLocationResetButton.setMargin(new Insets(2, 4, 2, 4));
+        backupLocationResetButton.setToolTipText("恢复默认（清除当前自定义的备份位置）");
+        backupLocationResetButton.setVisible(false);
+        backupLocationResetButton.addActionListener(e -> onResetCustomBackupRoot());
+
         backupLocationRow = new JPanel(new BorderLayout(8, 0));
         JPanel pathPanel = new JPanel(new BorderLayout());
         JBLabel prefix = new JBLabel("备份至：");
         pathPanel.add(prefix, BorderLayout.WEST);
         pathPanel.add(backupLocationLabel, BorderLayout.CENTER);
+
+        // 右侧按钮组：[更改] [✕] 横向排列
+        JPanel rightButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        rightButtons.add(backupLocationChangeButton);
+        rightButtons.add(backupLocationResetButton);
+
         backupLocationRow.add(pathPanel, BorderLayout.CENTER);
-        backupLocationRow.add(backupLocationChangeButton, BorderLayout.EAST);
+        backupLocationRow.add(rightButtons, BorderLayout.EAST);
 
         g.gridy = 1; g.gridx = 0; g.gridwidth = 2;
         g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
@@ -178,8 +194,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
         container.add(customerIdField, g);
 
-        // fieldsPanel 不再作为容器使用，但保留字段以兼容既有 reset() 逻辑；
-        // 改为持有"行 2/3 需要显隐的组件集合"
+        // fieldsPanel 不再作为容器使用，但保留字段以兼容既有 reset() 逻辑
         fieldsPanel = new JPanel();
         fieldsPanel.setVisible(true);
 
@@ -227,7 +242,6 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
             if (state.lastOperator != null && !state.lastOperator.isBlank()) {
                 operatorField.setText(state.lastOperator);
             }
-            // 任务号和客服号不缓存（每次不同）
         }
     }
 
@@ -240,7 +254,6 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
             PluginSettingsService.State state = settings.getState();
             String op = operatorField.getText().trim();
             if (!op.isEmpty()) state.lastOperator = op;
-            // 任务号和客服号不缓存（每次不同）
         }
     }
 
@@ -251,12 +264,10 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         updateNoteCheckBox.setSelected(false);
         taskIdField.setText("");
         customerIdField.setText("");
-        // 触发监听器以同步任务/客服行显隐
         for (java.awt.event.ActionListener l : updateNoteCheckBox.getActionListeners()) {
             l.actionPerformed(new java.awt.event.ActionEvent(
                     updateNoteCheckBox, java.awt.event.ActionEvent.ACTION_PERFORMED, null));
         }
-        // 操作人保留缓存值
         restoreFromCache();
         revalidate();
         repaint();
@@ -298,11 +309,11 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
     }
 
     /**
-     * 刷新"备份至"行的显示路径与"更改"按钮启用态
+     * 刷新"备份至"行的显示路径与"更改" / ✕ 按钮启用态
      *
-     * <p>FTP 未连接 / 项目未选 → 按钮禁用 + tooltip 解释；
-     * 已配置 customBackupRoot → 显示该路径；
-     * 否则显示默认派生路径（灰色 + (默认) 标签）。</p>
+     * <p>FTP 未连接 / 项目未选 → 按钮禁用 + tooltip 解释，✕ 隐藏；
+     * 已配置 customBackupRoot → 显示该路径，✕ 显示；
+     * 否则显示默认派生路径，✕ 隐藏。</p>
      *
      * @author xumanyi
      * @date 2026-05-02
@@ -314,6 +325,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
             backupLocationChangeButton.setToolTipText("请先连接 FTP");
             backupLocationLabel.setText("（请先连接 FTP）");
             backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+            backupLocationResetButton.setVisible(false);
             return;
         }
         String contextDir = ftpContextSupplier.getContextDir();
@@ -322,6 +334,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
             backupLocationChangeButton.setToolTipText("请先选择项目");
             backupLocationLabel.setText("（请先选择项目）");
             backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+            backupLocationResetButton.setVisible(false);
             return;
         }
 
@@ -330,16 +343,42 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
 
         String custom = readCustomBackupRoot(contextDir);
         if (custom != null && !custom.isBlank()) {
+            // 已自定义：常规色文字 + 显示 ✕ 按钮
             backupLocationLabel.setText(ellipsizePath(custom));
             backupLocationLabel.setToolTipText(custom);
             backupLocationLabel.setForeground(UIManager.getColor("Label.foreground"));
+            backupLocationResetButton.setVisible(true);
         } else {
+            // 默认派生路径：灰色文字，无后缀；隐藏 ✕ 按钮
             String defaultPath = computeDefaultBackupRoot();
-            String display = defaultPath + " (默认)";
-            backupLocationLabel.setText(ellipsizePath(display));
+            backupLocationLabel.setText(ellipsizePath(defaultPath));
             backupLocationLabel.setToolTipText(defaultPath);
             backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+            backupLocationResetButton.setVisible(false);
         }
+    }
+
+    /**
+     * 处理 ✕ 按钮点击：二次确认后清除当前 (host, contextDir) 的自定义备份位置
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private void onResetCustomBackupRoot() {
+        if (ftpContextSupplier == null) return;
+        String contextDir = ftpContextSupplier.getContextDir();
+        if (contextDir == null) return;
+        int choice = JOptionPane.showConfirmDialog(this,
+                "确认清除当前自定义备份位置，恢复到默认派生路径？",
+                "恢复默认", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+
+        PluginSettingsService settings = project.getService(PluginSettingsService.class);
+        if (settings == null || settings.getState() == null) return;
+        String key = backupKey(contextDir);
+        if (key == null) return;
+        settings.getState().customBackupRoots.remove(key);
+        refreshBackupLocationLabel();
     }
 
     /**
@@ -424,13 +463,15 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         if (ftpContextSupplier == null || !ftpContextSupplier.isFtpConnected()) return;
         String contextDir = ftpContextSupplier.getContextDir();
         if (contextDir == null) return;
+        String projectDir = ftpContextSupplier.getProjectDir();
+        if (projectDir == null) return;
 
         String currentCustom = readCustomBackupRoot(contextDir);
         BackupLocationDialog dialog = new BackupLocationDialog(
                 project,
                 ftpContextSupplier.getHost(), ftpContextSupplier.getPort(),
                 ftpContextSupplier.getUsername(), ftpContextSupplier.getPassword(),
-                contextDir, currentCustom);
+                projectDir, contextDir, currentCustom);
         if (!dialog.showAndGet()) return; // 用户取消
 
         PluginSettingsService settings = project.getService(PluginSettingsService.class);
@@ -438,13 +479,9 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         String key = backupKey(contextDir);
         if (key == null) return;
 
-        if (dialog.isRestoreDefault()) {
-            settings.getState().customBackupRoots.remove(key);
-        } else {
-            String picked = dialog.getResultBackupRoot();
-            if (picked != null && !picked.isBlank()) {
-                settings.getState().customBackupRoots.put(key, picked);
-            }
+        String picked = dialog.getResultBackupRoot();
+        if (picked != null && !picked.isBlank()) {
+            settings.getState().customBackupRoots.put(key, picked);
         }
         refreshBackupLocationLabel();
     }
