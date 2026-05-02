@@ -2273,11 +2273,10 @@ public class DeployExecutionService {
             session.connect(user, pass);
             FtpOperations ops = new FtpOperations(session);
 
-            // 解析子系统根目录（取第 3 级）
+            // 解析备份父目录：优先用户自定义；否则按前 3 级派生
             FtpTargetSelection firstTarget = allTargets.get(0);
             String remoteDir = firstTarget.getRemoteDir();
-            String systemRoot = resolveSystemRoot(remoteDir);
-            String backupParent = systemRoot + "backup/";
+            String backupParent = resolveBackupRoot(pluginConfig, remoteDir);
 
             // 确保 backup/ 目录存在
             ops.mkdirIfAbsent(backupParent);
@@ -2802,6 +2801,25 @@ public class DeployExecutionService {
             String host, int port, String user, String pass,
             String operator, List<FtpTargetSelection> targets,
             Consumer<String> logCallback) throws java.io.IOException {
+        return detectExistingBackups(host, port, user, pass, operator, targets, null, logCallback);
+    }
+
+    /**
+     * 同 {@link #detectExistingBackups(String, int, String, String, String, List, Consumer)}，
+     * 但允许传入 customBackupRoot 覆盖默认备份父目录。
+     *
+     * @param customBackupRoot 用户自定义备份根；null/空则走默认派生
+     * @param logCallback      日志回调；可为 null
+     * @return 已存在备份的目标名列表；无冲突时返回空列表
+     * @throws java.io.IOException FTP 连接或查询失败
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public static List<String> detectExistingBackups(
+            String host, int port, String user, String pass,
+            String operator, List<FtpTargetSelection> targets,
+            String customBackupRoot,
+            Consumer<String> logCallback) throws java.io.IOException {
         List<String> conflicts = new ArrayList<>();
         if (targets == null || targets.isEmpty()) {
             if (logCallback != null) logCallback.accept("[备份检查] 无目标，跳过");
@@ -2820,9 +2838,14 @@ public class DeployExecutionService {
             String dateStr = LocalDate.now().format(dateFmt);
 
             for (FtpTargetSelection t : targets) {
-                String systemRoot = resolveSystemRoot(t.getRemoteDir());
+                String backupParent;
+                if (customBackupRoot != null && !customBackupRoot.isBlank()) {
+                    backupParent = customBackupRoot.endsWith("/") ? customBackupRoot : customBackupRoot + "/";
+                } else {
+                    backupParent = resolveSystemRoot(t.getRemoteDir()) + "backup/";
+                }
                 String subDir = backupSubDirFor(t);
-                String backupPath = systemRoot + "backup/" + dateStr + "_" + operator
+                String backupPath = backupParent + dateStr + "_" + operator
                         + "/" + subDir + t.getTargetName();
                 boolean exists = ops.exists(backupPath);
                 if (logCallback != null) {
@@ -2932,6 +2955,28 @@ public class DeployExecutionService {
     }
 
     /**
+     * 计算备份根目录
+     *
+     * <p>优先返回 {@code pluginConfig.customBackupRoot}（用户自定义）；为空时
+     * 回退到 {@code resolveSystemRoot(remoteDir) + "backup/"} 默认派生路径。</p>
+     *
+     * <p>返回值统一以 / 结尾，便于下游拼接 {@code yyyyMMdd_{operator}/}。</p>
+     *
+     * @param pluginConfig 插件部署配置（取 customBackupRoot）
+     * @param remoteDir    第一个目标的 remoteDir（用于默认派生 fallback）
+     * @return 备份根目录（FTP 绝对路径，以 / 结尾）
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private static String resolveBackupRoot(PluginDeployConfig pluginConfig, String remoteDir) {
+        String custom = pluginConfig == null ? null : pluginConfig.getCustomBackupRoot();
+        if (custom != null && !custom.isBlank()) {
+            return custom.endsWith("/") ? custom : custom + "/";
+        }
+        return resolveSystemRoot(remoteDir) + "backup/";
+    }
+
+    /**
      * 确定备份目录名
      *
      * <p>默认行为（OVERWRITE / USE_EXISTING 策略）：直接复用当天同开发的备份目录，
@@ -2976,9 +3021,9 @@ public class DeployExecutionService {
     private static String computeExistingBackupDir(PluginDeployConfig pluginConfig,
                                                     List<FtpTargetSelection> allTargets) {
         if (allTargets.isEmpty()) return "";
-        String systemRoot = resolveSystemRoot(allTargets.get(0).getRemoteDir());
+        String backupParent = resolveBackupRoot(pluginConfig, allTargets.get(0).getRemoteDir());
         String dateStr = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
-        return systemRoot + "backup/" + dateStr + "_" + pluginConfig.getOperator() + "/";
+        return backupParent + dateStr + "_" + pluginConfig.getOperator() + "/";
     }
 
     /** 检查目录列表中是否存在指定名称的目录 */
