@@ -36,6 +36,23 @@ public final class PluginSettingsService implements PersistentStateComponent<Plu
         public String lastTaskId;
         /** 上次填写的客服号 */
         public String lastCustomerId;
+
+        /**
+         * 自定义备份位置缓存。
+         *
+         * <p>key 格式：{@code host:port|contextDir}，contextDir 为
+         * 已选项目+系统的 FTP 路径（如 {@code /开发/客户A/系统B/}）或
+         * 仅项目（如 {@code /开发/客户A/}）。value 为用户在
+         * {@code BackupLocationDialog} 中选定的备份根目录绝对路径，
+         * 直接作为备份根使用，下游不再做拼接。</p>
+         *
+         * <p>用户出问题时可手动编辑 {@code .idea/fluxDeploySettings.xml}
+         * 删指定 entry，或整删该文件由 IDE 重置。</p>
+         *
+         * @author xumanyi
+         * @date 2026-05-02
+         */
+        public java.util.Map<String, String> customBackupRoots = new java.util.HashMap<>();
     }
 
     /**
