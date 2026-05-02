@@ -23,6 +23,30 @@ import java.awt.*;
  */
 public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
 
+    /**
+     * FTP 上下文供给接口，由 {@link DeployToolWindowPanel} 桥接
+     * {@code TargetSectionPanel.getCurrentContextDir()} 等方法供给
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public interface FtpContextSupplier {
+        /** @return FTP 是否已连接 */
+        boolean isFtpConnected();
+        /** @return FTP 主机；未连接时返回 null */
+        String getHost();
+        /** @return FTP 端口；未连接时返回 0 */
+        int getPort();
+        /** @return FTP 用户名；未连接时返回 null */
+        String getUsername();
+        /** @return FTP 密码；未连接时返回 null */
+        String getPassword();
+        /** @return 当前上下文目录（项目+系统 或 仅项目）；项目未选时返回 null */
+        String getContextDir();
+        /** @return 第一个目标的 remoteDir，用于显示默认派生路径；无目标时返回 null */
+        String getFirstTargetRemoteDir();
+    }
+
     private final Project project;
     private final JCheckBox updateNoteCheckBox;
     private final JCheckBox backupCheckBox;
@@ -30,6 +54,15 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
     private final JBTextField taskIdField;
     private final JBTextField customerIdField;
     private final JBTextField operatorField;
+
+    /** FTP 上下文供给器（可空，未注入时按未连接处理） */
+    private FtpContextSupplier ftpContextSupplier;
+    /** "备份至" 行容器 */
+    private JPanel backupLocationRow;
+    /** "备份至" 路径标签 */
+    private JBLabel backupLocationLabel;
+    /** "更改" 按钮 */
+    private JButton backupLocationChangeButton;
 
     /**
      * 构造信息面板
@@ -101,25 +134,45 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         container.add(checkRow, g);
         g.weightx = 0; g.fill = GridBagConstraints.NONE;
 
-        // 行 1：开发（仅在需要时显示：勾选了版本记录或执行备份）
+        // 行 1：备份至（仅勾"执行备份"时显示）
+        backupLocationLabel = new JBLabel(" ");
+        backupLocationLabel.setToolTipText("当前生效的备份根目录");
+        backupLocationChangeButton = new JButton("更改");
+        backupLocationChangeButton.setMargin(new Insets(2, 8, 2, 8));
+        backupLocationChangeButton.addActionListener(e -> openBackupLocationDialog());
+
+        backupLocationRow = new JPanel(new BorderLayout(8, 0));
+        JPanel pathPanel = new JPanel(new BorderLayout());
+        JBLabel prefix = new JBLabel("备份至：");
+        pathPanel.add(prefix, BorderLayout.WEST);
+        pathPanel.add(backupLocationLabel, BorderLayout.CENTER);
+        backupLocationRow.add(pathPanel, BorderLayout.CENTER);
+        backupLocationRow.add(backupLocationChangeButton, BorderLayout.EAST);
+
+        g.gridy = 1; g.gridx = 0; g.gridwidth = 2;
+        g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        container.add(backupLocationRow, g);
+        g.gridwidth = 1; g.weightx = 0; g.fill = GridBagConstraints.NONE;
+
+        // 行 2：开发（仅在需要时显示：勾选了版本记录或执行备份）
         JBLabel operatorLabel = new JBLabel("开发：");
-        g.gridy = 1; g.gridwidth = 1;
+        g.gridy = 2; g.gridwidth = 1;
         g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
         container.add(operatorLabel, g);
         g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
         container.add(operatorField, g);
 
-        // 行 2 + 3：任务 / 客服，单独记录引用以便整体显隐
+        // 行 3 + 4：任务 / 客服，单独记录引用以便整体显隐
         JBLabel taskLabel = new JBLabel("任务：");
         JBLabel customerLabel = new JBLabel("客服：");
 
-        g.gridy = 2;
+        g.gridy = 3;
         g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
         container.add(taskLabel, g);
         g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
         container.add(taskIdField, g);
 
-        g.gridy = 3;
+        g.gridy = 4;
         g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
         container.add(customerLabel, g);
         g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
@@ -149,6 +202,11 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
             boolean showOperator = note || backup;
             operatorLabel.setVisible(showOperator);
             operatorField.setVisible(showOperator);
+            // 备份至：仅"执行备份"勾选时显示
+            backupLocationRow.setVisible(backup);
+            if (backup) {
+                refreshBackupLocationLabel();
+            }
             revalidate();
             repaint();
         };
@@ -224,4 +282,170 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
      * @date 2026-03-27
      */
     public String getOperator() { return operatorField.getText().trim(); }
+
+    // ==================== 备份位置自定义 ====================
+
+    /**
+     * 设置 FTP 上下文供给器（由 {@link DeployToolWindowPanel} 在初始化时调用）
+     *
+     * @param supplier 供给器
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public void setFtpContextSupplier(FtpContextSupplier supplier) {
+        this.ftpContextSupplier = supplier;
+        refreshBackupLocationLabel();
+    }
+
+    /**
+     * 刷新"备份至"行的显示路径与"更改"按钮启用态
+     *
+     * <p>FTP 未连接 / 项目未选 → 按钮禁用 + tooltip 解释；
+     * 已配置 customBackupRoot → 显示该路径；
+     * 否则显示默认派生路径（灰色 + (默认) 标签）。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public void refreshBackupLocationLabel() {
+        if (backupLocationRow == null) return; // 构造期间被调用时
+        if (ftpContextSupplier == null || !ftpContextSupplier.isFtpConnected()) {
+            backupLocationChangeButton.setEnabled(false);
+            backupLocationChangeButton.setToolTipText("请先连接 FTP");
+            backupLocationLabel.setText("（请先连接 FTP）");
+            backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+            return;
+        }
+        String contextDir = ftpContextSupplier.getContextDir();
+        if (contextDir == null || contextDir.isBlank()) {
+            backupLocationChangeButton.setEnabled(false);
+            backupLocationChangeButton.setToolTipText("请先选择项目");
+            backupLocationLabel.setText("（请先选择项目）");
+            backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+            return;
+        }
+
+        backupLocationChangeButton.setEnabled(true);
+        backupLocationChangeButton.setToolTipText(null);
+
+        String custom = readCustomBackupRoot(contextDir);
+        if (custom != null && !custom.isBlank()) {
+            backupLocationLabel.setText(ellipsizePath(custom));
+            backupLocationLabel.setToolTipText(custom);
+            backupLocationLabel.setForeground(UIManager.getColor("Label.foreground"));
+        } else {
+            String defaultPath = computeDefaultBackupRoot();
+            String display = defaultPath + " (默认)";
+            backupLocationLabel.setText(ellipsizePath(display));
+            backupLocationLabel.setToolTipText(defaultPath);
+            backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+        }
+    }
+
+    /**
+     * 计算默认派生备份路径
+     *
+     * <p>取第一个目标的 remoteDir 走 resolveSystemRoot 前 3 级 + backup/。
+     * 无目标时回落到 contextDir + backup/。</p>
+     *
+     * @return 默认派生备份路径
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private String computeDefaultBackupRoot() {
+        String first = ftpContextSupplier.getFirstTargetRemoteDir();
+        String basePath = (first != null && !first.isBlank())
+                ? first
+                : ftpContextSupplier.getContextDir();
+        // 复用与 DeployExecutionService 一致的前 3 级规则
+        String trimmed = basePath.replaceAll("^/+", "").replaceAll("/+$", "");
+        String[] parts = trimmed.split("/");
+        String systemRoot;
+        if (parts.length >= 3) {
+            systemRoot = "/" + parts[0] + "/" + parts[1] + "/" + parts[2] + "/";
+        } else {
+            systemRoot = "/" + trimmed + "/";
+        }
+        return systemRoot + "backup/";
+    }
+
+    /**
+     * 读取当前 (host, contextDir) 对应的 customBackupRoot
+     *
+     * @param contextDir 当前上下文路径
+     * @return customBackupRoot；未配置时返回 null
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private String readCustomBackupRoot(String contextDir) {
+        PluginSettingsService settings = project.getService(PluginSettingsService.class);
+        if (settings == null || settings.getState() == null) return null;
+        String key = backupKey(contextDir);
+        if (key == null) return null;
+        return settings.getState().customBackupRoots.get(key);
+    }
+
+    /**
+     * 构造 customBackupRoots 的 key
+     *
+     * @param contextDir 当前上下文路径
+     * @return key 字符串；无 host 时返回 null
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private String backupKey(String contextDir) {
+        if (ftpContextSupplier == null) return null;
+        String host = ftpContextSupplier.getHost();
+        if (host == null || host.isBlank()) return null;
+        return host + ":" + ftpContextSupplier.getPort() + "|" + contextDir;
+    }
+
+    /**
+     * 路径过长时居中省略
+     *
+     * @param path 原始路径
+     * @return 截断后的路径
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private static String ellipsizePath(String path) {
+        if (path == null) return "";
+        if (path.length() <= 60) return path;
+        return path.substring(0, 28) + " ... " + path.substring(path.length() - 28);
+    }
+
+    /**
+     * 打开备份位置选择对话框
+     *
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    private void openBackupLocationDialog() {
+        if (ftpContextSupplier == null || !ftpContextSupplier.isFtpConnected()) return;
+        String contextDir = ftpContextSupplier.getContextDir();
+        if (contextDir == null) return;
+
+        String currentCustom = readCustomBackupRoot(contextDir);
+        BackupLocationDialog dialog = new BackupLocationDialog(
+                project,
+                ftpContextSupplier.getHost(), ftpContextSupplier.getPort(),
+                ftpContextSupplier.getUsername(), ftpContextSupplier.getPassword(),
+                contextDir, currentCustom);
+        if (!dialog.showAndGet()) return; // 用户取消
+
+        PluginSettingsService settings = project.getService(PluginSettingsService.class);
+        if (settings == null || settings.getState() == null) return;
+        String key = backupKey(contextDir);
+        if (key == null) return;
+
+        if (dialog.isRestoreDefault()) {
+            settings.getState().customBackupRoots.remove(key);
+        } else {
+            String picked = dialog.getResultBackupRoot();
+            if (picked != null && !picked.isBlank()) {
+                settings.getState().customBackupRoots.put(key, picked);
+            }
+        }
+        refreshBackupLocationLabel();
+    }
 }

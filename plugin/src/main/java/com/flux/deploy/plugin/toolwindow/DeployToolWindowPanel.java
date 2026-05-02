@@ -166,6 +166,26 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         targetContainer.getLocalPanel().setFileCountSupplier(
                 () -> sourceSection.getSelectedFiles().size());
 
+        // 桥接 InfoSectionPanel 与 TargetSectionPanel 之间的 FTP 上下文（用于"备份至"行）
+        this.infoSection.setFtpContextSupplier(new InfoSectionPanel.FtpContextSupplier() {
+            @Override public boolean isFtpConnected() { return targetSection.isFtpConnected(); }
+            @Override public String getHost() { return targetSection.getConnectedHost(); }
+            @Override public int getPort() { return targetSection.getConnectedPort(); }
+            @Override public String getUsername() { return targetSection.getConnectedUsername(); }
+            @Override public String getPassword() { return targetSection.getConnectedPassword(); }
+            @Override public String getContextDir() { return targetSection.getCurrentContextDir(); }
+            @Override public String getFirstTargetRemoteDir() {
+                java.util.List<com.flux.deploy.plugin.model.FtpTargetSelection> mts = targetSection.getMainTargets();
+                if (mts != null && !mts.isEmpty()) {
+                    return mts.get(0).getRemoteDir();
+                }
+                return null;
+            }
+        });
+        // 项目/系统/连接变化时刷新"备份至"行
+        this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(
+                this.infoSection::refreshBackupLocationLabel));
+
         initUI();
         initListeners();
 
@@ -764,8 +784,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 .executeOnPooledThread(() -> {
             java.util.List<String> conflicts;
             try {
+                String detectContextDir = targetSection.getCurrentContextDir();
+                String detectCustomRoot = null;
+                if (detectContextDir != null) {
+                    String detectKey = host + ":" + port + "|" + detectContextDir;
+                    com.flux.deploy.plugin.service.PluginSettingsService detectSettings =
+                            project.getService(com.flux.deploy.plugin.service.PluginSettingsService.class);
+                    if (detectSettings != null && detectSettings.getState() != null) {
+                        detectCustomRoot = detectSettings.getState().customBackupRoots.get(detectKey);
+                    }
+                }
                 conflicts = DeployExecutionService.detectExistingBackups(
-                        host, port, user, pass, operator, allTargets,
+                        host, port, user, pass, operator, allTargets, detectCustomRoot,
                         msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
@@ -1028,6 +1058,21 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         pluginConfig.setLocalOnly(localOnly);
         pluginConfig.setSkipBackup(!backupCheckBox.isSelected());
         pluginConfig.setSkipCompile(!sourceSection.needsCompile());
+
+        // 注入用户自定义备份根（若已配置）
+        String contextDir = targetSection.getCurrentContextDir();
+        if (contextDir != null) {
+            String customKey = targetSection.getConnectedHost() + ":"
+                    + targetSection.getConnectedPort() + "|" + contextDir;
+            com.flux.deploy.plugin.service.PluginSettingsService settings =
+                    project.getService(com.flux.deploy.plugin.service.PluginSettingsService.class);
+            if (settings != null && settings.getState() != null) {
+                String custom = settings.getState().customBackupRoots.get(customKey);
+                if (custom != null && !custom.isBlank()) {
+                    pluginConfig.setCustomBackupRoot(custom);
+                }
+            }
+        }
 
         if (selectedFiles != null) {
             pluginConfig.setChangedFiles(selectedFiles);
