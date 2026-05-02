@@ -388,4 +388,36 @@ public class PluginDeployConfig {
     public void setBackupConflictStrategy(BackupConflictStrategy strategy) {
         this.backupConflictStrategy = strategy == null ? BackupConflictStrategy.OVERWRITE : strategy;
     }
+
+    /**
+     * 自定义备份根目录（FTP 绝对路径）。
+     *
+     * <p>用户在 {@code BackupLocationDialog} 中选定的目录原样保存，
+     * 不含日期/操作人子目录后缀。{@code DeployExecutionService.preBackupAll}
+     * 会基于此路径计算最终备份目录 {@code customBackupRoot/yyyyMMdd_{operator}/}。</p>
+     *
+     * <p>为 null 或空字符串时表示用户未自定义，按 {@code resolveSystemRoot} 默认派生
+     * （{前3级}/backup/）。</p>
+     */
+    private String customBackupRoot;
+
+    /**
+     * 获取自定义备份根目录
+     *
+     * @return 自定义备份根；未设置时返回 null
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public String getCustomBackupRoot() { return customBackupRoot; }
+
+    /**
+     * 设置自定义备份根目录
+     *
+     * @param customBackupRoot 自定义备份根（FTP 绝对路径，含尾部 /）；null 表示走默认派生
+     * @author xumanyi
+     * @date 2026-05-02
+     */
+    public void setCustomBackupRoot(String customBackupRoot) {
+        this.customBackupRoot = customBackupRoot;
+    }
 }
