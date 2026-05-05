@@ -4,6 +4,25 @@
     <vendor>FLUX</vendor>
     <description>FLUX Customer Service Deploy plugin for IntelliJ IDEA. Right-click on project modules to deploy files to FTP servers with one click. Supports full package deployment, Git-based auto-detection of modified files, and selective file deployment.</description>
 
+    <change-notes><![CDATA[
+        <h3>1.2.7</h3>
+        <ul>
+            <li>项目备份文件夹支持自定义选择</li>
+            <li>源工程、部署目标列表新增搜索框</li>
+            <li>目标 / 系统支持动态多级下拉筛选</li>
+            <li>批量更新并行化（默认线程 3，单包失败重试 3 次），配置文件 ~/.flux-deploy/config.toml</li>
+            <li>批量遇错跳过并回滚问题包，其他包继续，全程日志</li>
+            <li>含 .java 改动强制编译，纯静态资源跳过编译</li>
+            <li>JDK 取 pom（含父级继承），Maven 用 IDEA 配置；不再依赖环境变量；Windows / macOS 兼容</li>
+            <li>日志增加阶段耗时、状态、原因、建议、清单；取消强制预检</li>
+            <li>中途手动停止弹三选项：继续 / 保留已完成包并停止 / 全部回滚并停止</li>
+            <li>FTP 无感重连 + 断点续传，预算耗尽后弹窗让用户决定重试 / 结束</li>
+            <li>版本记录文件兼容 xxx.war_update_note.txt / xxx_update_note.txt</li>
+            <li>取消隐藏备份目录，自由勾选所有包</li>
+            <li>修复：串行嵌入路径未遵循 ISOLATED 策略；嵌入失败提示按根因区分</li>
+        </ul>
+    ]]></change-notes>
+
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
     <depends>Git4Idea</depends>

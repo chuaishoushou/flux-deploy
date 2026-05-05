@@ -31,6 +31,11 @@ public class FtpSession implements Closeable {
     private final int port;
     private boolean connected;
 
+    // 缓存最近一次 connect() 用的凭证，供 reconnect() 使用。
+    // 仅在内存中保留，对象销毁后即随 GC 释放，不落盘、不打日志、不出 toString。
+    private String lastUsername;
+    private String lastPassword;
+
     /**
      * 创建 FTP 会话实例
      *
@@ -56,6 +61,9 @@ public class FtpSession implements Closeable {
      * @date 2026-03-26
      */
     public void connect(String username, String password) throws IOException {
+        // 缓存凭证供 reconnect() 复用；后续即便 connect 抛错也不清，留给 reconnect 自己再失败一次
+        this.lastUsername = username;
+        this.lastPassword = password;
         ftpClient.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
         ftpClient.setDefaultTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
         ftpClient.setControlEncoding(StandardCharsets.UTF_8.name());
@@ -88,6 +96,35 @@ public class FtpSession implements Closeable {
         ftpClient.setBufferSize(BUFFER_SIZE);
 
         this.connected = true;
+    }
+
+    /**
+     * 断线重连：先 disconnect 当前 socket，再用上次成功的凭证 connect 一次。
+     *
+     * <p>用于 NETWORK 类错误后的重试场景：旧的控制连接 socket 多半已经半死状态
+     * （RST / FIN_WAIT），继续复用会触发同样的 IOException。必须显式销毁
+     * {@link FTPClient} 内部 socket 后重建。</p>
+     *
+     * <p>未曾成功 connect 过的实例调用本方法直接抛 {@link IOException}，避免误用。</p>
+     *
+     * @throws IOException 重连失败（凭证还没设、目标主机彻底不可达等）
+     * @author claude
+     * @date 2026-05-03
+     */
+    public void reconnect() throws IOException {
+        if (lastUsername == null) {
+            throw new IOException("FtpSession 从未成功 connect 过，无法 reconnect");
+        }
+        try {
+            if (ftpClient.isConnected()) {
+                try { ftpClient.disconnect(); } catch (IOException ignored) {
+                    // disconnect 自身异常不影响重连流程，旧 socket 状态本就不可信
+                }
+            }
+        } finally {
+            connected = false;
+        }
+        connect(lastUsername, lastPassword);
     }
 
     /**

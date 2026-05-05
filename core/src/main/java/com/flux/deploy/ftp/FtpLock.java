@@ -23,6 +23,17 @@ public class FtpLock {
     private static final String LOCK_SEPARATOR = "__LOCK__";
     private static final DateTimeFormatter LOCK_TIME_FMT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
 
+    /**
+     * 默认锁 TTL（分钟）。
+     *
+     * <p>10 分钟覆盖典型部署单包耗时（&lt; 5 分钟）+ 一档余量。
+     * 实际部署完成 / 失败回滚都会主动 unlock，不依赖 TTL；TTL 只用于异常退出场景的兜底清理。</p>
+     */
+    public static final int DEFAULT_TTL_MIN = 10;
+
+    /** TTL 后缀标记，写在锁文件名末尾如 "_TTL10"，为锁加上过期时间 */
+    private static final String TTL_PREFIX = "_TTL";
+
     private final FtpOperations ops;
 
     /**
@@ -46,8 +57,27 @@ public class FtpLock {
      * @date 2026-03-26
      */
     public static String buildLockName(String packageName, String operator) {
+        return buildLockName(packageName, operator, DEFAULT_TTL_MIN);
+    }
+
+    /**
+     * 生成带 TTL 后缀的锁文件名。
+     *
+     * <p>格式：{@code <package>__LOCK__<operator>_<yyyyMMdd_HHmmss>_TTL<minutes>}。
+     * TTL 后缀供 {@link #parseExpireAt(String)} 在 Stage 0 自检时识别已过期的滞留锁，
+     * 自动清理而不要求人工介入。</p>
+     *
+     * @param packageName 原始包文件名
+     * @param operator    操作人英文 id
+     * @param ttlMinutes  TTL 分钟数（&gt; 0）
+     * @return 锁文件名
+     * @author claude
+     * @date 2026-05-03
+     */
+    public static String buildLockName(String packageName, String operator, int ttlMinutes) {
+        if (ttlMinutes <= 0) throw new IllegalArgumentException("ttlMinutes 必须 > 0");
         String timestamp = LocalDateTime.now().format(LOCK_TIME_FMT);
-        return packageName + LOCK_SEPARATOR + operator + "_" + timestamp;
+        return packageName + LOCK_SEPARATOR + operator + "_" + timestamp + TTL_PREFIX + ttlMinutes;
     }
 
     /**
@@ -89,6 +119,16 @@ public class FtpLock {
             return null;
         }
         String suffix = lockFileName.substring(idx + LOCK_SEPARATOR.length());
+        // 先剥可选的 _TTL<n> 尾巴：buildLockName 新格式追加在末尾，
+        // 旧格式锁文件没这段，跳过即可
+        int ttlIdx = suffix.lastIndexOf(TTL_PREFIX);
+        if (ttlIdx > 0) {
+            String ttlPart = suffix.substring(ttlIdx + TTL_PREFIX.length());
+            // 验证 TTL 部分是纯数字，防止把业务名里碰巧出现的 _TTLxxx 误当 TTL 后缀剥掉
+            if (!ttlPart.isEmpty() && ttlPart.chars().allMatch(Character::isDigit)) {
+                suffix = suffix.substring(0, ttlIdx);
+            }
+        }
         // suffix 格式: operator_yyyyMMdd_HHmmss
         int lastUnderscore = suffix.lastIndexOf('_');
         int secondLastUnderscore = suffix.lastIndexOf('_', lastUnderscore - 1);
@@ -98,6 +138,47 @@ public class FtpLock {
         String operator = suffix.substring(0, secondLastUnderscore);
         String time = suffix.substring(secondLastUnderscore + 1);
         return new String[]{operator, time};
+    }
+
+    /**
+     * 解析锁文件的过期时间戳。
+     *
+     * <p>新格式（{@code __LOCK__<op>_<ts>_TTL<n>}）按 {@code ts + n 分钟} 计算；
+     * 旧格式（无 TTL 后缀）按 {@link #DEFAULT_TTL_MIN} 兜底，保证向后兼容
+     * 旧版插件留下的滞留锁也能被新版自检清理。</p>
+     *
+     * @param lockFileName 锁文件名
+     * @return 过期时间；时间戳无法解析时返回 {@code null}
+     * @author claude
+     * @date 2026-05-03
+     */
+    public static LocalDateTime parseExpireAt(String lockFileName) {
+        if (lockFileName == null) return null;
+        int idx = lockFileName.indexOf(LOCK_SEPARATOR);
+        if (idx < 0) return null;
+        String suffix = lockFileName.substring(idx + LOCK_SEPARATOR.length());
+
+        int ttlMinutes = DEFAULT_TTL_MIN;
+        int ttlIdx = suffix.lastIndexOf(TTL_PREFIX);
+        if (ttlIdx > 0) {
+            String ttlPart = suffix.substring(ttlIdx + TTL_PREFIX.length());
+            if (!ttlPart.isEmpty() && ttlPart.chars().allMatch(Character::isDigit)) {
+                try {
+                    ttlMinutes = Integer.parseInt(ttlPart);
+                } catch (NumberFormatException ignored) {
+                    // chars().allMatch(isDigit) 已保证不会抛，这里只是防御
+                }
+                suffix = suffix.substring(0, ttlIdx);
+            }
+        }
+
+        String[] info = parseLockInfo(lockFileName);
+        if (info == null || info[1] == null || info[1].isEmpty()) return null;
+        try {
+            return LocalDateTime.parse(info[1], LOCK_TIME_FMT).plusMinutes(ttlMinutes);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

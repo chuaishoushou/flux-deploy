@@ -96,7 +96,7 @@ public class DeployPipeline {
             if (!config.isSkipLock()) {
                 gates.add(new LockGate(ftpLock, config));
             }
-            gates.add(new UploadGate(ops));
+            gates.add(new UploadGate(ops, config.getUploadRetryPolicy(), config.getRetryPrompter()));
             gates.add(new VerifyGate(ops));
             if (!config.isSkipNote()) {
                 gates.add(new NoteGate(ops, config));
@@ -147,6 +147,29 @@ public class DeployPipeline {
                               List<TargetPackage> targets, DeployResult result) {
         ResidualLockResolver resolver = new ResidualLockResolver(
                 ResidualLockResolver.wrap(ops, ftpLock), config.getOperator());
+
+        // Stage 0a：清理上次部署中断遗留的 .__UPLOADING__ 临时文件。
+        // 必须在锁诊断之前执行：临时文件本身可能让断点续传读到错误的 offset，
+        // 而且这类滞留物没有所有权概念，无脑清理即可，不需要人工介入。
+        java.util.Set<String> dirsScanned = new java.util.LinkedHashSet<>();
+        for (TargetPackage t : targets) {
+            String dir = t.getRemoteDir();
+            if (dir == null || !dirsScanned.add(dir)) continue;
+            try {
+                List<String> cleaned = resolver.cleanupResidualUploads(dir);
+                if (!cleaned.isEmpty()) {
+                    System.out.println("[stage0] 清理上次中断遗留的临时文件 "
+                            + cleaned.size() + " 个 @ " + dir);
+                    for (String p : cleaned) {
+                        System.out.println("         - " + p);
+                    }
+                }
+            } catch (IOException e) {
+                // 残留扫描失败不致命，仅记日志：后续 upload 自身的幂等检测兜底
+                System.err.println("[stage0] 临时文件扫描失败 @ " + dir + ": " + e.getMessage());
+            }
+        }
+
         List<ResidualLockDiagnosis> all = new ArrayList<>();
         String currentTarget = "";
         try {

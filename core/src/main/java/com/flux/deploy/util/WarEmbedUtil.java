@@ -112,7 +112,7 @@ public final class WarEmbedUtil {
             }
 
             if (matchedJarName == null) {
-                throw new IOException("WAR 的 WEB-INF/lib 中未找到匹配 [" + jarArtifactId + "] 的 JAR");
+                throw new IOException("目标 WAR 内不存在 " + jarArtifactId + " 的 JAR 文件");
             }
 
             System.out.println("  [嵌入] 匹配到: WEB-INF/lib/" + matchedJarName);

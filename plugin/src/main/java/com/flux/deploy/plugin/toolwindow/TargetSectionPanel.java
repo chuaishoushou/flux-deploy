@@ -68,6 +68,8 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     private CheckboxTree packageTree;
     private CheckedTreeNode packageTreeRoot;
     private JBLabel selectionSummary;
+    /** 包数量统计标签：显示当前系统下"共 X 个 / 已勾 Y 个"，与 selectionSummary 同列南侧 */
+    private JBLabel packageCountLabel;
     /** 目标包区域容器（树 + 全选按钮），无数据时隐藏 */
     private JPanel packagePanel;
     private JBScrollPane treeScroll;
@@ -171,6 +173,11 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         refreshButton.setFocusPainted(false);
         refreshButton.setVisible(false);
         this.systemCombo = new JComboBox<>();
+        // 长系统名（如 "深圳-中外运 成都宝洁WMS V6.21 P6共享jar-升级"）不应撑大
+        // combo 自身的 preferred / minimum 宽度——否则右列 preferredSize 会传到
+        // OnePixelSplitter 影响主分割条比例，并把项目/系统下拉框挤窄。
+        // 用极短原型参与尺寸计算，实际渲染宽度由 GridBag (weightx=1.0 + fill=HORIZONTAL) 决定。
+        systemCombo.setPrototypeDisplayValue("XXXXXXXXXX");
         systemCombo.setToolTipText("选择系统，对应 /开发/{项目}/{系统}/ 下的目标包");
 
         this.packageTreeRoot = new CheckedTreeNode("目标包");
@@ -227,6 +234,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         });
 
         this.selectionSummary = new JBLabel("请选择项目和系统");
+        this.packageCountLabel = new JBLabel(" ");
 
         // SearchTextField 与左侧源工程文件搜索保持一致：常驻显示，× 清空，零 toggle
         this.packageSearchField = new SearchTextField(false);
@@ -322,6 +330,9 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         topPanel.add(new JBLabel("项目："), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
         projectCombo = new PickerComboBox("请选择项目", this::showProjectSearchPopup);
+        // 同 systemCombo：长项目名不应撑大首选/最小宽度（防御）。
+        // PickerComboBox 模型只有 1 个元素（当前显示文本），prototype 优先于模型项参与尺寸计算。
+        projectCombo.setPrototypeDisplayValue("XXXXXXXXXX");
         projectCombo.setToolTipText("选择客户项目（对应 FTP 根目录下 /开发/{项目}/），支持搜索");
         topPanel.add(projectCombo, gbc);
 
@@ -361,9 +372,16 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         packagePanel.add(packageSearchField, BorderLayout.NORTH);
         packagePanel.add(treeScroll, BorderLayout.CENTER);
 
+        // 南侧统计行：左边 packageCountLabel（共/已勾），右边 selectionSummary（已选明细）
         selectionSummary.setForeground(Color.GRAY);
         selectionSummary.setBorder(JBUI.Borders.emptyTop(2));
-        packagePanel.add(selectionSummary, BorderLayout.SOUTH);
+        packageCountLabel.setForeground(Color.GRAY);
+        packageCountLabel.setBorder(JBUI.Borders.emptyTop(2));
+        JPanel summaryRow = new JPanel(new BorderLayout(8, 0));
+        summaryRow.setOpaque(false);
+        summaryRow.add(packageCountLabel, BorderLayout.WEST);
+        summaryRow.add(selectionSummary, BorderLayout.EAST);
+        packagePanel.add(summaryRow, BorderLayout.SOUTH);
 
         // 初始隐藏
         packagePanel.setVisible(false);
@@ -486,6 +504,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             currentPackages = List.of();
             rebuildPackageTree();
             selectionSummary.setText("正在刷新...");
+            packageCountLabel.setText(" ");
 
             showLoading("刷新项目 / 系统 / 目标包...");
             ApplicationManager.getApplication().executeOnPooledThread(() -> {
@@ -771,7 +790,10 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     }
 
     /**
-     * 更新选择摘要
+     * 更新选择摘要 + 包数量统计（共 X 个 / 已勾 Y 个）。
+     *
+     * <p>总数 = {@code packageDataByKey.size()}（当前系统下、按源产物类型过滤后剩下的全量），
+     * 已勾 = {@code userCheckedKeys.size()}（与树视图过滤无关，即被搜索隐藏但仍勾选的包也算）。</p>
      */
     private void updateSelectionSummary() {
         List<PackageNodeData> selected = getSelectedPackages();
@@ -787,6 +809,13 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             selectionSummary.setText("已选：" + direct + " 个主目标 + " + embed + " 个 WAR 嵌入");
         } else {
             selectionSummary.setText("已选：" + direct + " 个主目标");
+        }
+
+        int total = packageDataByKey.size();
+        if (total == 0) {
+            packageCountLabel.setText(" ");
+        } else {
+            packageCountLabel.setText("共 " + total + " 个 / 已勾 " + selected.size() + " 个");
         }
     }
 
@@ -1904,8 +1933,8 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     /**
      * 获取当前 FTP 上下文路径
      *
-     * <p>用于 {@code BackupLocationDialog} 与 customBackupRoots 的 key 计算。
-     * 不复用 {@link com.flux.deploy.plugin.model.FtpTargetSelection#getRemoteDir()}，
+     * <p>供 {@code BackupLocationDialog} 与 {@code InfoSectionPanel} 计算默认派生
+     * 备份路径用。不复用 {@link com.flux.deploy.plugin.model.FtpTargetSelection#getRemoteDir()}，
      * 后者强假设 system 非空。</p>
      *
      * <p>返回值规则（按优先级）：</p>

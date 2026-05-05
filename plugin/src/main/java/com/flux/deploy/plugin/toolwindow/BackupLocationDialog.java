@@ -7,6 +7,8 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.icons.AllIcons;
+import com.intellij.ui.ToolbarDecorator;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.treeStructure.Tree;
@@ -33,8 +35,10 @@ import java.util.List;
  *
  * <p>默认选中策略（按优先级）：已存自定义 → contextDir/backup/ 已存在 → contextDir。</p>
  *
- * <p>UI 极简：1 行提示 + 树 + 确认/取消。新建子目录通过树节点右键菜单触发。
- * 恢复默认通过外部主面板 ✕ 小按钮触发，不在本对话框内。</p>
+ * <p>UI 极简：1 行提示 + 树 + 确认/取消 + 左下角"恢复默认"链接。
+ * 新建子目录通过树节点右键菜单触发。
+ * "恢复默认"会把 {@link #resetRequested} 置 true 并 OK 关闭，
+ * 调用方据此把 sessionBackupRoot 清空，回到默认派生路径。</p>
  *
  * @author xumanyi
  * @date 2026-05-02
@@ -65,6 +69,8 @@ public class BackupLocationDialog extends DialogWrapper {
 
     /** 用户最终选定的备份根；点取消时为 null */
     private String resultBackupRoot;
+    /** 是否点击了"恢复默认"按钮（true → 调用方清空 sessionBackupRoot） */
+    private boolean resetRequested;
 
     /**
      * 创建备份位置选择对话框
@@ -113,9 +119,8 @@ public class BackupLocationDialog extends DialogWrapper {
         root.setBorder(JBUI.Borders.empty(10, 14));
         root.setPreferredSize(new Dimension(520, 420));
 
-        JBLabel hint = new JBLabel("选定目录将作为备份根");
+        JBLabel hint = new JBLabel("选定目录将作为备份根（备份按 yyyyMMdd_{开发}/ 子目录写入）");
         hint.setForeground(UIManager.getColor("Label.disabledForeground"));
-        hint.setToolTipText("备份按 yyyyMMdd_{开发}/ 子目录写入选定目录。右键节点可新建子目录。");
         root.add(hint, BorderLayout.NORTH);
 
         // 目录树根 = 项目根，不再从 / 起遍历
@@ -143,11 +148,19 @@ public class BackupLocationDialog extends DialogWrapper {
             @Override public void treeWillCollapse(javax.swing.event.TreeExpansionEvent event) { }
         });
 
-        // 右键菜单：新建子目录
+        // 右键菜单：新建子目录（保留作为快捷操作，与工具栏按钮等价）
         installRightClickMenu();
 
-        JBScrollPane treeScroll = new JBScrollPane(tree);
-        root.add(treeScroll, BorderLayout.CENTER);
+        // 工具栏按钮：显式提供"新建子目录"入口，避免功能仅藏在右键菜单里不可发现。
+        // 使用 IDEA 标准 ToolbarDecorator 风格，用户一眼能识别 + 图标按钮。
+        ToolbarDecorator decorator = ToolbarDecorator.createDecorator(tree)
+                .disableUpDownActions()
+                .disableRemoveAction()
+                .setAddIcon(AllIcons.General.Add)
+                .setAddActionName("新建子目录")
+                .setAddAction(button -> onNewFolder());
+        JPanel decoratedTree = decorator.createPanel();
+        root.add(decoratedTree, BorderLayout.CENTER);
 
         // 异步执行默认展开 + 选中策略，不阻塞 UI 渲染
         SwingUtilities.invokeLater(this::applyDefaultSelection);
@@ -616,6 +629,39 @@ public class BackupLocationDialog extends DialogWrapper {
      */
     @Nullable
     public String getResultBackupRoot() { return resultBackupRoot; }
+
+    /**
+     * @return 用户是否点击了"恢复默认"按钮；true 时调用方应清空 sessionBackupRoot
+     * @author xumanyi
+     * @date 2026-05-03
+     */
+    public boolean isResetRequested() { return resetRequested; }
+
+    /**
+     * 在弹窗左下角加一个"恢复默认"动作按钮。
+     *
+     * <p>仅当当前已有自定义路径（{@link #currentCustomRoot} 非空）时显示，
+     * 否则没必要——已经在用默认了。点击后置位 {@link #resetRequested} 并以
+     * OK 状态关闭弹窗，调用方读 {@link #isResetRequested()} 决策清空 session。</p>
+     *
+     * @return 左下角动作数组；当前没有自定义时返回空
+     * @author xumanyi
+     * @date 2026-05-03
+     */
+    @Override
+    protected Action @org.jetbrains.annotations.NotNull [] createLeftSideActions() {
+        if (currentCustomRoot == null || currentCustomRoot.isBlank()) {
+            return new Action[0];
+        }
+        AbstractAction resetAction = new AbstractAction("恢复默认") {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                resetRequested = true;
+                close(OK_EXIT_CODE);
+            }
+        };
+        return new Action[]{resetAction};
+    }
 
     /**
      * 释放 FTP 浏览服务连接

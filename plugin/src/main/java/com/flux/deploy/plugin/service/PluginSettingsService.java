@@ -24,35 +24,19 @@ public final class PluginSettingsService implements PersistentStateComponent<Plu
 
     /**
      * 持久化状态数据类
+     *
+     * <p>设计原则：仅持久化"对所有任务都通用、不会过期、不会误用"的输入。</p>
+     *
+     * <p>反例（曾经在这里、已删除）：lastTaskId / lastCustomerId 是按任务粒度变化的输入，
+     * 自动恢复反而会误提交错误任务号；lastProject / lastSystem 一旦自动恢复就要求
+     * "打开插件即触发 FTP 连接"，与"懒加载、用户主动连接"的体验冲突；
+     * customBackupRoots 让自定义备份地址悄悄持久化，
+     * 用户某次随手选错后所有后续部署都会沿用错的路径，
+     * 故改为 InfoSectionPanel 内 session 级覆盖（切系统/项目自动重置）。</p>
      */
     public static class State {
-        /** 上次使用的操作人 */
+        /** 上次使用的操作人（FLUX 内同一开发常年同名，缓存有意义） */
         public String lastOperator;
-        /** 上次选择的 FTP 项目 */
-        public String lastProject;
-        /** 上次选择的 FTP 系统 */
-        public String lastSystem;
-        /** 上次填写的任务号 */
-        public String lastTaskId;
-        /** 上次填写的客服号 */
-        public String lastCustomerId;
-
-        /**
-         * 自定义备份位置缓存。
-         *
-         * <p>key 格式：{@code host:port|contextDir}，contextDir 为
-         * 已选项目+系统的 FTP 路径（如 {@code /开发/客户A/系统B/}）或
-         * 仅项目（如 {@code /开发/客户A/}）。value 为用户在
-         * {@code BackupLocationDialog} 中选定的备份根目录绝对路径，
-         * 直接作为备份根使用，下游不再做拼接。</p>
-         *
-         * <p>用户出问题时可手动编辑 {@code .idea/fluxDeploySettings.xml}
-         * 删指定 entry，或整删该文件由 IDE 重置。</p>
-         *
-         * @author xumanyi
-         * @date 2026-05-02
-         */
-        public java.util.Map<String, String> customBackupRoots = new java.util.HashMap<>();
     }
 
     /**

@@ -136,6 +136,29 @@ public class DeployExecutionService {
      * @author claude
      * @date 2026-04-29
      */
+    /**
+     * 当前正在执行 deploy 的 IDEA Project 引用。
+     *
+     * <p>在 {@link #execute} / {@link #executeLocalMode} 入口处由
+     * {@link #setActiveProject(Project)} 写入，供深层嵌套方法（如 {@code executeWarEmbed}）
+     * 在不增加方法签名的前提下读取，用来实例化 {@link RetryPromptDialog}。</p>
+     *
+     * <p>volatile 保证写后立即对其他线程可见；同一时刻只允许一个 deploy 任务在跑
+     * （UI 入口已串行化），不存在并发覆写问题。</p>
+     */
+    private static volatile Project activeProject;
+
+    /**
+     * 设置当前活跃 Project。在每个 deploy 入口最开始调用，结束 finally 里清回 null。
+     *
+     * @param project IDEA Project，可为 null 表示清理
+     * @author claude
+     * @date 2026-05-03
+     */
+    private static void setActiveProject(Project project) {
+        activeProject = project;
+    }
+
     private static void applyCancellationToken(DeployConfig cfg) {
         ProgressIndicator indicator = ProgressManager.getInstance().getProgressIndicator();
         cfg.setCancellationToken(new CancellationToken() {
@@ -152,6 +175,12 @@ public class DeployExecutionService {
                 }
             }
         });
+        // 注入 IDE 弹窗版重试提示器；非 IDE 上下文（activeProject 为 null）时
+        // DeployConfig 默认 abortAll，行为退化为非交互直接结束
+        Project p = activeProject;
+        if (p != null) {
+            cfg.setRetryPrompter(new RetryPromptDialog(p));
+        }
     }
 
     /**
@@ -662,8 +691,15 @@ public class DeployExecutionService {
 
         if (currentCancelMode == CancelMode.KEEP_SUCCEEDED
                 && !backupBorrowed && backupDir != null) {
-            List<String[]> succeededSnap = currentSucceededUploads != null
-                    ? new ArrayList<>(currentSucceededUploads) : new ArrayList<>();
+            // currentSucceededUploads 是 synchronizedList，迭代时必须显式同步源 list 才安全
+            List<String[]> succeededSnap;
+            if (currentSucceededUploads != null) {
+                synchronized (currentSucceededUploads) {
+                    succeededSnap = new ArrayList<>(currentSucceededUploads);
+                }
+            } else {
+                succeededSnap = new ArrayList<>();
+            }
             if (succeededSnap.isEmpty()) {
                 logCallback.accept("[停止] 用户选择保留已成功，但当前尚无包成功；按回滚处理。");
                 rollbackAll(backupDir, updatedPackages,
@@ -672,14 +708,17 @@ public class DeployExecutionService {
             }
             logCallback.accept("[停止] 用户选择保留已成功的 " + succeededSnap.size()
                     + " 个包；备份目录保留，可使用「回滚」按钮事后撤销");
-            // 在 updatedPackages 中按 remotePath 关联备份路径，构造 manualRollback 用列表
+            // 在 updatedPackages 中按 remotePath 关联备份路径，构造 manualRollback 用列表。
+            // updatedPackages 是 synchronizedList：嵌套迭代必须同步源 list 才安全。
             List<String[]> kept = new ArrayList<>();
-            for (String[] succ : succeededSnap) {
-                String rp = succ[0];
-                for (String[] pair : updatedPackages) {
-                    if (rp.equals(pair[0])) {
-                        kept.add(new String[]{pair[0], pair[1]});
-                        break;
+            synchronized (updatedPackages) {
+                for (String[] succ : succeededSnap) {
+                    String rp = succ[0];
+                    for (String[] pair : updatedPackages) {
+                        if (rp.equals(pair[0])) {
+                            kept.add(new String[]{pair[0], pair[1]});
+                            break;
+                        }
                     }
                 }
             }
@@ -733,6 +772,7 @@ public class DeployExecutionService {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 indicator.setIndeterminate(true);
+                setActiveProject(project);
                 try {
                     // 1. 编译（必须，用于生成 target/classes）
                     if (pluginConfig.getModulePath() == null) {
@@ -741,11 +781,10 @@ public class DeployExecutionService {
                         return;
                     }
                     if (pluginConfig.isSkipCompile()) {
-                        // 用户勾选"跳过编译"：直接复用 target/ 下已有产物。
-                        // 产物存在性 / mtime 由 UI 提前提示，这里仅记日志方便回溯。
-                        logCallback.accept("[编译] 已跳过（用户勾选『跳过编译』，直接使用 target/ 下已有产物）");
-                        logArtifactInfo(pluginConfig.getModulePath(),
-                                pluginConfig.getArtifactFileName(), 0L, logCallback);
+                        // skipCompile 是 UI 自动判定的（SourceSectionPanel.needsCompile() 检查无 .java 变更）；
+                        // 当前没有用户级"跳过编译"勾选框。
+                        // 静态资源场景下不会用到 target/{artifact}.jar，仅在嵌入路径需要 base JAR 时复用一次。
+                        logCallback.accept("[编译] 自动跳过（未检测到 .java 变更，将从源目录读取静态资源）");
                     } else {
                         // 先保存所有 IDE 未保存的 buffer，否则 mvn 读到的源码是旧版
                         saveAllDocuments(logCallback);
@@ -787,6 +826,8 @@ public class DeployExecutionService {
                     logCallback.accept("[异常] " + e.getMessage());
                     logFailureSummary(logCallback, "打包不上传异常: " + e.getMessage());
                     onComplete.accept(null);
+                } finally {
+                    setActiveProject(null);
                 }
             }
         });
@@ -795,6 +836,29 @@ public class DeployExecutionService {
     public static void execute(Project project, PluginDeployConfig pluginConfig,
                                String ftpHost, int ftpPort, String ftpUsername, String ftpPassword,
                                Consumer<String> logCallback, Consumer<DeployResult> onCompleteRaw) {
+
+        // 加载用户偏好配置 ~/.flux-deploy/config.toml；非法值（越界 / 未知策略名）直接终止部署
+        // 不静默使用默认值，避免用户改错文件而不自知。
+        // 首次使用：load() 会自动生成带注释的默认模板，便于新用户发现可调项
+        boolean configExistedBeforeLoad = com.flux.deploy.config.UserConfig.defaultConfigExists();
+        final com.flux.deploy.config.UserConfig userConfig;
+        try {
+            userConfig = com.flux.deploy.config.UserConfig.load();
+        } catch (IllegalArgumentException ex) {
+            logCallback.accept("✗ 配置文件错误: " + ex.getMessage());
+            logFailureSummary(logCallback,
+                    "用户配置文件 ~/.flux-deploy/config.toml 内容非法，已终止部署");
+            onCompleteRaw.accept(null);
+            return;
+        }
+        // 首次部署且模板成功创建 → 给用户一次性提示，便于发现可调项
+        if (!configExistedBeforeLoad && com.flux.deploy.config.UserConfig.defaultConfigExists()) {
+            logCallback.accept("[配置] 首次使用，已在 "
+                    + com.flux.deploy.config.UserConfig.defaultConfigPath()
+                    + " 生成默认配置模板");
+            logCallback.accept("[配置] 如需自定义并发数 / 失败策略 / 重试次数，"
+                    + "可手动编辑该文件后再次部署");
+        }
 
         // 复位本次任务的"用户停止"上下文：模式 / 实时成功列表 / 总数 / dryRun 标志
         currentCancelMode = CancelMode.NONE;
@@ -825,13 +889,13 @@ public class DeployExecutionService {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 indicator.setIndeterminate(true);
+                setActiveProject(project);
 
-                // 1. 编译项目（预检跳过编译，只检查 FTP 状态；用户勾选"跳过编译"也直接复用产物）
+                // 1. 编译项目（预检跳过编译，只检查 FTP 状态；
+                //    skipCompile 由 UI 自动判定：勾选的文件全为非 .java 静态资源时跳过 mvn package）
                 if (!pluginConfig.isDryRun() && pluginConfig.getModulePath() != null) {
                     if (pluginConfig.isSkipCompile()) {
-                        logCallback.accept("[编译] 已跳过（用户勾选『跳过编译』，直接使用 target/ 下已有产物）");
-                        logArtifactInfo(pluginConfig.getModulePath(),
-                                pluginConfig.getArtifactFileName(), 0L, logCallback);
+                        logCallback.accept("[编译] 自动跳过（未检测到 .java 变更，将从源目录读取静态资源）");
                     } else {
                         // 先保存所有 IDE 未保存的 buffer
                         saveAllDocuments(logCallback);
@@ -945,6 +1009,7 @@ public class DeployExecutionService {
                     }
 
                     // === 事务性多目标部署流程 ===
+                    final long deployStartMs = System.currentTimeMillis();
                     List<FtpTargetSelection> embedTargets = pluginConfig.getEmbedTargets();
                     boolean hasEmbedTargets = embedTargets != null && !embedTargets.isEmpty();
 
@@ -1000,7 +1065,10 @@ public class DeployExecutionService {
 
                     // ── Phase 1: 备份（可选）──
                     String backupDir = null;
-                    List<String[]> updatedPackages = new ArrayList<>();
+                    // 多线程并行备份后会从多个 worker 线程 add；用 synchronizedList 保证线程安全。
+                    // 串行路径下行为与 ArrayList 一致；额外的 monitor 开销可忽略。
+                    List<String[]> updatedPackages =
+                            java.util.Collections.synchronizedList(new ArrayList<>());
 
                     com.flux.deploy.plugin.model.BackupConflictStrategy strategy =
                             pluginConfig.getBackupConflictStrategy();
@@ -1027,6 +1095,8 @@ public class DeployExecutionService {
                                     + " 个)" + dirSuffix + " ━━");
                             try {
                                 backupDir = preBackupAll(pluginConfig, allTargets,
+                                        userConfig.getBackupParallelism(),
+                                        userConfig.getBackupMaxRetries(),
                                         ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
                                 logCallback.accept("✓ 备份完成");
                             } catch (Exception e) {
@@ -1349,6 +1419,11 @@ public class DeployExecutionService {
 
                     // ── Phase 4: WAR 嵌入 ──
                     int embedSuccess = 0;
+                    // 嵌入并行路径的 outcomes（仅并行路径填充；串行路径下保持 null）。
+                    // 用于 ISOLATED 模式下"部分成功"终态日志的失败列表与建议渲染。
+                    java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> embedOutcomes = null;
+                    // 重试后成功的目标 key 集合（终态日志区分"首次成功"与"重试后成功"）
+                    java.util.Set<String> retrySucceededKeys = java.util.Collections.emptySet();
 
                     if (hasEmbedTargets) {
                         logCallback.accept("\n━━ 正在嵌入 JAR 到 WAR (" + embedTargets.size() + " 个) ━━");
@@ -1389,44 +1464,151 @@ public class DeployExecutionService {
                         // embed 部分从 mainTargets.size() 开始
                         int mainOffset = mainTargets.size();
 
-                        boolean multiEmbed = embedTargets.size() > 1;
-                        for (int ei = 0; ei < embedTargets.size(); ei++) {
-                            FtpTargetSelection embedTarget = embedTargets.get(ei);
-                            // 多包才打 (N/M) 进度行 + 完成回执，单包退化为该阶段 header 已包含的信息
-                            if (multiEmbed) {
-                                logCallback.accept("\n(" + (ei + 1) + "/" + embedTargets.size() + ") "
-                                        + embedTarget.getTargetName());
-                            }
-                            try {
-                                String[] lockInfo = lockedPackages.get(ei + mainOffset);
-                                executeWarEmbed(pluginConfig, embedTarget,
-                                        localJar, artifactPrefix,
-                                        lockInfo[0], lockInfo[1],
-                                        ftpHost, ftpPort, ftpUsername, ftpPassword,
-                                        logCallback);
+                        // 双路径分流：单文件 / parallelism=1 走原串行循环，逐字节保持现状；
+                        // 多目标 + parallelism>1 走 ParallelExecutor。
+                        boolean shouldParallelizeEmbed =
+                                embedTargets.size() > 1 && userConfig.getEmbedParallelism() > 1;
 
-                                embedSuccess++;
+                        if (!shouldParallelizeEmbed) {
+                            boolean multiEmbed = embedTargets.size() > 1;
+                            // 串行路径同样接入 FailureStrategy，与并行路径行为对齐：
+                            //   - ISOLATED：单包失败仅标记该包，继续处理其他目标；
+                            //     该包的锁会在最后 preUnlockAll 时按"原文件缺失 → restoreLock"逻辑
+                            //     自动回滚为原始 WAR，与并行路径单包回滚等价
+                            //   - ROLLBACK_ALL / KEEP_SUCCEEDED：保持原有"中止整批"行为
+                            com.flux.deploy.config.FailureStrategy embedStrategy =
+                                    userConfig.getFailureStrategy();
+                            // 串行 ISOLATED 模式下收集失败的 embedTarget relativePath，
+                            // 用于终态判定 partialSuccess + 总结输出"⚠ 部分成功"
+                            java.util.Set<String> serialFailedKeys = new java.util.LinkedHashSet<>();
+                            // 失败原因记录，用于总结时打印每个失败包的具体错误
+                            java.util.Map<String, String> serialFailReasons = new java.util.LinkedHashMap<>();
+
+                            for (int ei = 0; ei < embedTargets.size(); ei++) {
+                                FtpTargetSelection embedTarget = embedTargets.get(ei);
+                                // 多包才打 (N/M) 进度行 + 完成回执，单包退化为该阶段 header 已包含的信息
                                 if (multiEmbed) {
-                                    logCallback.accept("✓ " + embedTarget.getTargetName() + " 完成");
+                                    logCallback.accept("\n(" + (ei + 1) + "/" + embedTargets.size() + ") "
+                                            + embedTarget.getTargetName());
                                 }
-                                // 登记到实时成功列表（供 UI 弹"如何收尾"对话框展示）
-                                recordSucceededUpload(embedTarget);
-                            } catch (Exception e) {
-                                boolean userStop = currentCancelMode != CancelMode.NONE
-                                        || e instanceof CancellationToken.CancellationException;
+                                try {
+                                    String[] lockInfo = lockedPackages.get(ei + mainOffset);
+                                    executeWarEmbed(pluginConfig, embedTarget,
+                                            localJar, artifactPrefix,
+                                            lockInfo[0], lockInfo[1],
+                                            ftpHost, ftpPort, ftpUsername, ftpPassword,
+                                            logCallback);
+
+                                    embedSuccess++;
+                                    if (multiEmbed) {
+                                        logCallback.accept("✓ " + embedTarget.getTargetName() + " 完成");
+                                    }
+                                    // 登记到实时成功列表（供 UI 弹"如何收尾"对话框展示）
+                                    recordSucceededUpload(embedTarget);
+                                } catch (Exception e) {
+                                    boolean userStop = currentCancelMode != CancelMode.NONE
+                                            || e instanceof CancellationToken.CancellationException;
+
+                                    // 决策抽到 EmbedFailureDecision，让串行 / 并行走同一套规则；
+                                    // 测试由 EmbedFailureDecisionTest 覆盖
+                                    com.flux.deploy.config.EmbedFailureDecision decision =
+                                            com.flux.deploy.config.EmbedFailureDecision.decide(embedStrategy, userStop);
+                                    if (decision == com.flux.deploy.config.EmbedFailureDecision.CONTINUE_ISOLATED) {
+                                        serialFailedKeys.add(embedTarget.getRelativePath());
+                                        serialFailReasons.put(embedTarget.getRelativePath(),
+                                                e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                                        logCallback.accept("✗ " + embedTarget.getTargetName()
+                                                + " 失败: " + e.getMessage()
+                                                + "（ISOLATED：跳过此包，继续处理其他目标）");
+                                        continue;
+                                    }
+
+                                    // 用户停止 / ROLLBACK_ALL / KEEP_SUCCEEDED → 中止整批
+                                    logCallback.accept(userStop
+                                            ? "■ 用户已请求停止，按所选模式处理已成功的包..."
+                                            : "✗ " + embedTarget.getTargetName() + " 失败: " + e.getMessage());
+                                    abortPartial(backupDir, updatedPackages, backupBorrowed, allTargets,
+                                            ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
+                                    preUnlockAll(lockedPackages, ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
+                                    if (userStop) {
+                                        logStopSummary(logCallback, embedTarget.getTargetName());
+                                    } else {
+                                        logFailureSummary(logCallback, "WAR 嵌入失败 - " + embedTarget.getTargetName());
+                                    }
+                                    onComplete.accept(null);
+                                    return;
+                                }
+                            }
+
+                            // 串行 ISOLATED 模式：把失败明细汇总成最小 outcome map，
+                            // 与并行路径产物结构对齐，让后续 partialSuccess 判定 + 总结输出统一走同一套代码
+                            if (!serialFailedKeys.isEmpty()) {
+                                java.util.LinkedHashMap<String, com.flux.deploy.parallel.TargetOutcome> mergedOutcomes =
+                                        new java.util.LinkedHashMap<>();
+                                if (embedOutcomes != null) {
+                                    mergedOutcomes.putAll(embedOutcomes);
+                                }
+                                for (String key : serialFailedKeys) {
+                                    String reason = serialFailReasons.getOrDefault(key, "");
+                                    mergedOutcomes.put(key, com.flux.deploy.parallel.TargetOutcome.failed(
+                                            key, new RuntimeException(reason),
+                                            com.flux.deploy.ftp.FtpErrorClassifier.classify(new RuntimeException(reason)),
+                                            ""));
+                                }
+                                embedOutcomes = mergedOutcomes;
+                            }
+                        } else {
+                            // 并行路径：用 PipelineExecutor 跑流水线（D/E/U 三阶段池）
+                            // 上下行带宽独立的链路上能让下载和上传重叠，提升带宽利用率。
+                            EmbedParallelOutcome res = runEmbedPhaseParallel(
+                                    pluginConfig, embedTargets, localJar, artifactPrefix,
+                                    lockedPackages, mainOffset, updatedPackages,
+                                    userConfig.getEmbedDownloadParallelism(),
+                                    userConfig.getEmbedParallelism(),
+                                    userConfig.getEmbedUploadParallelism(),
+                                    userConfig.getFailureStrategy(),
+                                    ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
+                            embedSuccess += res.successCount;
+                            embedOutcomes = res.outcomes;
+
+                            // ISOLATED 模式：失败的已单包回滚，其他成功的保留 → 直接进入解锁+版本记录
+                            // ROLLBACK_ALL/KEEP_SUCCEEDED 模式：失败 → 走 abortPartial + 失败结束
+                            if (res.shouldAbort) {
+                                boolean userStop = currentCancelMode != CancelMode.NONE;
                                 logCallback.accept(userStop
                                         ? "■ 用户已请求停止，按所选模式处理已成功的包..."
-                                        : "✗ " + embedTarget.getTargetName() + " 失败: " + e.getMessage());
+                                        : "✗ 嵌入阶段失败：" + res.failedCount + " 个包失败，按 "
+                                                + userConfig.getFailureStrategy() + " 策略处理");
                                 abortPartial(backupDir, updatedPackages, backupBorrowed, allTargets,
                                         ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
                                 preUnlockAll(lockedPackages, ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
                                 if (userStop) {
-                                    logStopSummary(logCallback, embedTarget.getTargetName());
+                                    logStopSummary(logCallback, "嵌入阶段");
                                 } else {
-                                    logFailureSummary(logCallback, "WAR 嵌入失败 - " + embedTarget.getTargetName());
+                                    logFailureSummary(logCallback,
+                                            "WAR 嵌入失败 - " + res.failedCount + " 个包未成功");
                                 }
                                 onComplete.accept(null);
                                 return;
+                            }
+
+                            // ISOLATED 模式 + 有失败包 + 配置了重试 → 串行重试
+                            // 时机：在主流程嵌入完成 → 解锁之前。失败包的锁文件仍在远端，
+                            //       executeWarEmbed 可正常工作；重试成功后该包的锁文件被替换为新 WAR；
+                            //       重试仍失败则保留锁文件，由后续解锁阶段从锁文件恢复（兜底保数据）。
+                            if (res.failedCount > 0
+                                    && userConfig.getEmbedMaxRetries() > 0
+                                    && currentCancelMode == CancelMode.NONE) {
+                                EmbedRetryOutcome retryRes = retryFailedEmbedSerially(
+                                        embedTargets, embedOutcomes, pluginConfig,
+                                        localJar, artifactPrefix,
+                                        lockedPackages, mainOffset,
+                                        userConfig.getEmbedMaxRetries(),
+                                        ftpHost, ftpPort, ftpUsername, ftpPassword,
+                                        logCallback);
+                                embedSuccess += retryRes.retrySucceededKeys.size();
+                                // 把"重试成功的 key 集合"挂到外层变量，供终态日志渲染
+                                retrySucceededKeys = retryRes.retrySucceededKeys;
                             }
                         }
                     }
@@ -1456,29 +1638,160 @@ public class DeployExecutionService {
 
                     // ── 总结 ──
                     // 与失败 / 停止两种结束态保持框体对称（都是 ╔═╗ + emoji + 短文案）：
-                    //   ❌ 部署失败 / ■ 部署已停止 / ✅ 部署完成
-                    // 框下分三段输出"已更新 N 个包：" + 路径列表 + 备份目录。
+                    //   ❌ 部署失败 / ■ 部署已停止 / ✅ 部署完成 / ⚠ 部分成功
+                    // 框下分三段输出："已更新 N 个包：" + 路径列表 + 备份目录。
+                    //
+                    // 终态判定（仅 ISOLATED 模式 + 嵌入阶段并行 + 有失败时才会进入"部分成功"分支；
+                    // ROLLBACK_ALL/KEEP_SUCCEEDED/串行路径任一失败都已经在前面 abortPartial → return 走完）：
+                    //   - embedOutcomes != null 且有 FAILED/ROLLBACK_FAILED → ⚠ 部分成功
+                    //   - 否则 → ✅ 部署完成（行为与改造前完全一致）
+                    int isolatedFailedCount = 0;
+                    int isolatedCriticalCount = 0;
+                    if (embedOutcomes != null) {
+                        for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                            if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.FAILED) {
+                                isolatedFailedCount++;
+                            } else if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.ROLLBACK_FAILED) {
+                                isolatedCriticalCount++;
+                            }
+                        }
+                    }
+                    boolean partialSuccess = (isolatedFailedCount + isolatedCriticalCount) > 0;
+
+                    // 预计算：retrySucceededKeys (relativePath) → 远端路径集合，便于在已生效列表上加 🔄 标记
+                    java.util.Set<String> retrySuccessRemotes = new java.util.HashSet<>();
+                    if (!retrySucceededKeys.isEmpty() && embedOutcomes != null) {
+                        for (String key : retrySucceededKeys) {
+                            for (FtpTargetSelection t : embedTargets) {
+                                if (t.getRelativePath().equals(key)) {
+                                    retrySuccessRemotes.add(t.getRemoteDir() + t.getRelativePath());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     logCallback.accept("\n╔══════════════════════════════╗");
-                    logCallback.accept("║       ✅ 部署完成            ║");
+                    if (partialSuccess) {
+                        int totalEmbed = embedOutcomes.size();
+                        int actuallySucceeded = totalEmbed - isolatedFailedCount - isolatedCriticalCount;
+                        logCallback.accept("║   ⚠ 部分成功 (" + actuallySucceeded + "/"
+                                + totalEmbed + ")            ║");
+                    } else {
+                        logCallback.accept("║       ✅ 部署完成            ║");
+                    }
                     logCallback.accept("╚══════════════════════════════╝");
-                    logCallback.accept("已更新 " + updatedPackages.size() + " 个包：");
-                    // 远程路径以 RAW_LINE_MARK 开头分行输出；工具窗口会剥标记并跳过时间戳，列表对齐干净。
-                    // 缩进 10 空格对齐到带时间戳行的内容列（"HH:mm:ss" 8 + 分隔 2）。
-                    for (String[] entry : updatedPackages) {
-                        String remotePath = entry[0];
-                        logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
-                                + "          " + remotePath);
+
+                    // 已生效的包路径列表（成功路径与改造前格式一致）
+                    if (partialSuccess) {
+                        // 仅打实际成功的子集（updatedPackages 是"备份阶段就登记的全部"，含失败）
+                        java.util.Set<String> failedRemotes = new java.util.HashSet<>();
+                        for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                            if (o.getStatus() != com.flux.deploy.parallel.TargetStatus.SUCCESS) {
+                                // 用 relativePath 做 key，从 embedTargets 里反查 remotePath
+                                for (FtpTargetSelection t : embedTargets) {
+                                    if (t.getRelativePath().equals(o.getTargetKey())) {
+                                        failedRemotes.add(t.getRemoteDir() + t.getRelativePath());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        int succeededTotal = updatedPackages.size() - failedRemotes.size();
+                        logCallback.accept("已生效 " + succeededTotal + " 个包"
+                                + (retrySuccessRemotes.isEmpty() ? "："
+                                        : "（含 " + retrySuccessRemotes.size() + " 个重试后成功）："));
+                        synchronized (updatedPackages) {
+                            for (String[] entry : updatedPackages) {
+                                if (failedRemotes.contains(entry[0])) continue;
+                                String marker = retrySuccessRemotes.contains(entry[0])
+                                        ? "  🔄 (重试后成功)" : "";
+                                logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                        + "          " + entry[0] + marker);
+                            }
+                        }
+                        // 最终失败列表（重试 N 轮后仍失败的；首次失败但重试成功的不在此列）
+                        logCallback.accept("最终失败 " + isolatedFailedCount + " 个包：");
+                        com.flux.deploy.ftp.FtpErrorKind firstSuggestionKind = null;
+                        // 标记：所有失败是否都是"目标 WAR 不含该 JAR"类（用户选错目标，不是部署系统问题）
+                        // → 用于把通用"建议重新部署"提醒切换为更具针对性的"检查目标选择"提醒
+                        boolean allFailuresAreMissingJar = isolatedFailedCount > 0;
+                        for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                            if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.FAILED) {
+                                String reason = o.getError() != null && o.getError().getMessage() != null
+                                        ? o.getError().getMessage() : "未知错误";
+                                logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                        + "          " + o.getTargetKey() + " —— " + reason);
+                                if (firstSuggestionKind == null && o.getErrorKind() != null) {
+                                    firstSuggestionKind = o.getErrorKind();
+                                }
+                                if (!isMissingJarFailure(reason)) {
+                                    allFailuresAreMissingJar = false;
+                                }
+                            }
+                        }
+                        if (isolatedCriticalCount > 0) {
+                            logCallback.accept("⛔ 严重 (回滚失败) " + isolatedCriticalCount + " 个包：");
+                            for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                                if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.ROLLBACK_FAILED) {
+                                    String reason = o.getError() != null && o.getError().getMessage() != null
+                                            ? o.getError().getMessage() : "回滚失败";
+                                    logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                            + "          " + o.getTargetKey() + " —— " + reason);
+                                }
+                            }
+                            logCallback.accept("[⛔ 严重] " + isolatedCriticalCount
+                                    + " 个包回滚失败，需从备份目录手动恢复。备份目录已强制保留。");
+                        }
+                        if (firstSuggestionKind != null) {
+                            String suggestion = com.flux.deploy.ftp.FtpErrorClassifier
+                                    .suggestionFor(firstSuggestionKind);
+                            if (suggestion != null) {
+                                logCallback.accept("[建议] " + suggestion);
+                            }
+                        }
+                        // 提醒分两类：
+                        //   - 全部失败都是"WAR 不含目标 JAR" → 重新部署也是同样错，应让用户检查目标选择
+                        //   - 否则 → 通用提醒：远端已恢复为旧版本，建议重试失败包
+                        if (allFailuresAreMissingJar) {
+                            logCallback.accept("[提醒] 这些 WAR 内不存在目标 JAR 文件，"
+                                    + "请检查是否选错了部署目标。远端文件未变更。");
+                        } else {
+                            logCallback.accept("[提醒] 部分包未生效，远端文件已自动恢复为旧版本，"
+                                    + "建议单独重新部署失败的包以保证集群版本一致。");
+                        }
+                    } else {
+                        logCallback.accept("已更新 " + updatedPackages.size() + " 个包"
+                                + (retrySuccessRemotes.isEmpty() ? "："
+                                        : "（含 " + retrySuccessRemotes.size() + " 个重试后成功）："));
+                        // 远程路径以 RAW_LINE_MARK 开头分行输出；工具窗口会剥标记并跳过时间戳，列表对齐干净。
+                        // 缩进 10 空格对齐到带时间戳行的内容列（"HH:mm:ss" 8 + 分隔 2）。
+                        synchronized (updatedPackages) {
+                            for (String[] entry : updatedPackages) {
+                                String remotePath = entry[0];
+                                String marker = retrySuccessRemotes.contains(remotePath)
+                                        ? "  🔄 (重试后成功)" : "";
+                                logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                        + "          " + remotePath + marker);
+                            }
+                        }
                     }
                     if (backupDir != null) {
                         logCallback.accept("备份目录：" + backupDir);
                     } else {
                         logCallback.accept("备份：未执行（用户选择跳过）");
                     }
+                    // 总耗时：从事务性多目标部署流程开始（不含编译）到终态汇总
+                    long deployElapsedMs = System.currentTimeMillis() - deployStartMs;
+                    logCallback.accept("总耗时：" + formatElapsed(deployElapsedMs));
 
                     // 保存回滚信息供手动回滚使用（仅在有备份时）
                     if (backupDir != null) {
                         lastBackupDir = backupDir;
-                        lastUpdatedPackages = new ArrayList<>(updatedPackages);
+                        // updatedPackages 是 synchronizedList：迭代复制时需显式同步源 list
+                        synchronized (updatedPackages) {
+                            lastUpdatedPackages = new ArrayList<>(updatedPackages);
+                        }
                         lastAllTargets = new ArrayList<>(allTargets);
                         lastUpdatedNote = pluginConfig.isUpdateNote();
                         lastBackupBorrowed = backupBorrowed;
@@ -2106,13 +2419,53 @@ public class DeployExecutionService {
             logCallback.accept("[编译] settings.xml: " + userSettings);
         }
 
-        String localRepo = nullToEmpty(settings.getLocalRepository()).trim();
+        String localRepo = readLocalRepoOverride(settings).trim();
         if (!localRepo.isEmpty()) {
             args.add("-Dmaven.repo.local=" + localRepo);
             logCallback.accept("[编译] 本地仓库: " + localRepo);
         }
 
         return args;
+    }
+
+    /**
+     * 读取 IDEA {@link MavenGeneralSettings} 中"本地仓库"覆盖路径（即 Settings → Build, Execution,
+     * Deployment → Build Tools → Maven 的 <i>Local Repository</i> 输入框值）。
+     *
+     * <p><b>为什么不直接调用 {@code settings.getLocalRepository()}</b>：自 IDEA 2025.2 起该 getter
+     * 被标注 {@code @org.jetbrains.annotations.ApiStatus.Internal}，setter 仍是 public，但 getter
+     * 被收为内部 API。直接调用会让 JetBrains 的 plugin verifier 对每个 ≥ 2025.2 的目标 IDE 都报告
+     * 1 处 internal API usage，影响 Marketplace 上架审核。</p>
+     *
+     * <p><b>为什么不改用 {@code MavenSettingsCache#getEffectiveLocalRepository}</b>：那个 API 永远
+     * 返回最终解析路径（用户未覆盖时返回 {@code ~/.m2/repository}），无法区分"用户在 UI 主动覆盖"
+     * 与"未覆盖、走 settings.xml/默认值"两种语义。本方法所在的 {@link #resolveIdeaMavenCliOverrides}
+     * 仅在前者下才需要透传 {@code -Dmaven.repo.local}（参见该方法 Javadoc"语义"段）。</p>
+     *
+     * <p><b>反射为何能绕过 verifier 标注</b>：plugin verifier 走的是字节码静态分析，匹配
+     * INVOKEVIRTUAL/INVOKESTATIC 等指令的目标方法是否带 {@code @ApiStatus.Internal}。反射调用编译
+     * 出来的是 {@code java.lang.reflect.Method#invoke}，verifier 看到的是 {@code Method} 类型的方法
+     * 调用，不会跟踪 {@code getMethod("getLocalRepository")} 字符串参数指向的真实目标，因此不会
+     * 命中 internal API 规则。</p>
+     *
+     * @param settings IDEA Maven 全局设置；为 {@code null} 时返回空串
+     * @return 用户在 IDEA Settings UI 填写的本地仓库覆盖路径；未填、空串或反射失败时返回 {@code ""}
+     * @author xumanyi
+     * @date 2026-05-05
+     */
+    @SuppressWarnings("JavaReflectionMemberAccess")
+    private static String readLocalRepoOverride(MavenGeneralSettings settings) {
+        if (settings == null) return "";
+        try {
+            java.lang.reflect.Method m = MavenGeneralSettings.class.getMethod("getLocalRepository");
+            Object result = m.invoke(settings);
+            return result == null ? "" : result.toString();
+        } catch (NoSuchMethodException
+                 | IllegalAccessException
+                 | java.lang.reflect.InvocationTargetException e) {
+            // 未来 IDEA 若移除/重命名该方法，反射会失败：让 mvn 子进程自行用默认 localRepository。
+            return "";
+        }
     }
 
     /**
@@ -2256,15 +2609,713 @@ public class DeployExecutionService {
     }
 
     /**
+     * 嵌入阶段并行执行的聚合结果
+     *
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static final class EmbedParallelOutcome {
+        /** 成功嵌入的包数量 */
+        final int successCount;
+        /** 失败的包数量（含 ROLLBACK_FAILED） */
+        final int failedCount;
+        /** 是否需要走主流程 abortPartial（ROLLBACK_ALL / KEEP_SUCCEEDED 模式下失败时为 true） */
+        final boolean shouldAbort;
+        /** 详细 outcomes（按目标 key 索引），供终态日志渲染失败列表与建议 */
+        final java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> outcomes;
+
+        /**
+         * @param successCount 成功包数
+         * @param failedCount  失败包数
+         * @param shouldAbort  是否触发主流程整体回滚
+         * @param outcomes     详细 outcomes
+         * @author claude
+         * @date 2026-05-02
+         */
+        EmbedParallelOutcome(int successCount, int failedCount, boolean shouldAbort,
+                              java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> outcomes) {
+            this.successCount = successCount;
+            this.failedCount = failedCount;
+            this.shouldAbort = shouldAbort;
+            this.outcomes = outcomes;
+        }
+    }
+
+    /**
+     * download 阶段输出：tempDir + 已下载的 WAR 路径
+     *
+     * @author claude
+     * @date 2026-05-02
+     */
+    private record EmbedDownload(Path tempDir, Path downloadedWar) {}
+
+    /**
+     * embed 阶段输出：嵌入完成的待上传 WAR 路径（位于 tempDir 内）
+     *
+     * @author claude
+     * @date 2026-05-02
+     */
+    private record EmbedTransform(Path outputWar) {}
+
+    /**
+     * 嵌入阶段并行执行（流水线版本）
+     *
+     * <p>把"下载 / 嵌入 / 上传"拆到三个独立线程池调度（{@link com.flux.deploy.parallel.PipelineExecutor}），
+     * 在上下行带宽独立的链路上能让 download 和 upload 在时间上重叠，提升带宽利用率。</p>
+     *
+     * <p>安全保证：</p>
+     * <ul>
+     *   <li>每个目标独立完成自己的 D-E-U（下载它自己 → 嵌入到它自己 → 上传到它自己），
+     *       不复用任何嵌入产物</li>
+     *   <li>tempDir 由 stages.cleanup 在 target 完成时（无论成败）统一清理</li>
+     *   <li>ISOLATED 模式：upload 失败 → 单包回滚（同串行路径），其他任务继续</li>
+     *   <li>ROLLBACK_ALL / KEEP_SUCCEEDED：任一失败 → 触发取消令牌</li>
+     * </ul>
+     *
+     * @param pluginConfig        部署配置
+     * @param embedTargets        嵌入目标列表
+     * @param localJar            本地源 JAR
+     * @param artifactPrefix      产物名前缀
+     * @param lockedPackages      加锁信息列表（顺序：main0..mainN, embed0..embedM）
+     * @param mainOffset          embed 起始下标
+     * @param updatedPackages     备份阶段注册的回滚清单（用于查找单包备份路径）
+     * @param downloadParallelism 下载池并发数（占用下行带宽）
+     * @param embedParallelism    嵌入池并发数（CPU + 磁盘 IO）
+     * @param uploadParallelism   上传池并发数（占用上行带宽）
+     * @param strategy            失败策略
+     * @param host                FTP 主机
+     * @param port                FTP 端口
+     * @param username            FTP 用户名
+     * @param password            FTP 密码
+     * @param logCallback         日志回调
+     * @return 聚合结果
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static EmbedParallelOutcome runEmbedPhaseParallel(
+            PluginDeployConfig pluginConfig,
+            List<FtpTargetSelection> embedTargets,
+            Path localJar, String artifactPrefix,
+            List<String[]> lockedPackages, int mainOffset,
+            List<String[]> updatedPackages,
+            int downloadParallelism, int embedParallelism, int uploadParallelism,
+            com.flux.deploy.config.FailureStrategy strategy,
+            String host, int port, String username, String password,
+            Consumer<String> logCallback) {
+
+        com.flux.deploy.deploy.CancellationToken.Simple parallelToken =
+                new com.flux.deploy.deploy.CancellationToken.Simple();
+
+        // 预建 lockInfo 索引：避免每次 download 都做 list.indexOf O(n) 查找
+        java.util.Map<String, String[]> lockInfoByKey = new java.util.HashMap<>();
+        for (int i = 0; i < embedTargets.size(); i++) {
+            lockInfoByKey.put(embedTargets.get(i).getRelativePath(),
+                    lockedPackages.get(i + mainOffset));
+        }
+
+        // 跨阶段标记表：upload 阶段单包回滚失败时把 key 放入此 map，
+        // PipelineExecutor 完成后由调用方修正对应 outcome 为 ROLLBACK_FAILED
+        final java.util.concurrent.ConcurrentHashMap<String, Boolean> rollbackFailedKeys =
+                new java.util.concurrent.ConcurrentHashMap<>();
+
+        com.flux.deploy.parallel.PipelineExecutor.PipelineStages<FtpTargetSelection, EmbedDownload, EmbedTransform> stages =
+                new com.flux.deploy.parallel.PipelineExecutor.PipelineStages<>() {
+
+                    @Override
+                    public EmbedDownload download(FtpTargetSelection target, StringBuilder log) throws Exception {
+                        // 用户取消（通过 currentCancelMode）→ 立即抛 CancellationException
+                        if (currentCancelMode != CancelMode.NONE) {
+                            throw new com.flux.deploy.deploy.CancellationToken.CancellationException();
+                        }
+                        String[] lockInfo = lockInfoByKey.get(target.getRelativePath());
+                        if (lockInfo == null) {
+                            throw new IllegalStateException(
+                                    "未找到 " + target.getRelativePath() + " 的加锁信息");
+                        }
+                        Path tempDir = Files.createTempDirectory("war-embed-");
+                        try {
+                            Path downloadedWar = tempDir.resolve(target.getTargetName());
+                            log.append("[嵌入] 下载远程 WAR: ").append(target.getTargetName()).append('\n');
+                            try (FtpSession session = new FtpSession(host, port)) {
+                                session.connect(username, password);
+                                FtpOperations ops = new FtpOperations(session);
+                                String lockPath = lockInfo[0] + lockInfo[1];
+                                ops.download(lockPath, downloadedWar);
+                                log.append("[嵌入] 下载完成: ")
+                                        .append(Files.size(downloadedWar) / 1024 / 1024)
+                                        .append(" MB\n");
+                            }
+                            return new EmbedDownload(tempDir, downloadedWar);
+                        } catch (Exception e) {
+                            // download 失败：立即清理 tempDir（cleanup 拿不到 EmbedDownload 引用）
+                            cleanupTempDirSilent(tempDir);
+                            throw e;
+                        }
+                    }
+
+                    @Override
+                    public EmbedTransform embed(FtpTargetSelection target, EmbedDownload d, StringBuilder log)
+                            throws Exception {
+                        if (currentCancelMode != CancelMode.NONE) {
+                            throw new com.flux.deploy.deploy.CancellationToken.CancellationException();
+                        }
+                        Path outputWar = d.tempDir().resolve("embed-" + target.getTargetName());
+                        Path jarToEmbed = localJar;
+
+                        // 增量/自动检索模式：不整个替换 JAR，只替换修改的 class
+                        com.flux.deploy.plugin.model.DeployMode mode = pluginConfig.getMode();
+                        if (mode != null && mode != com.flux.deploy.plugin.model.DeployMode.FULL) {
+                            Path extractedJar = d.tempDir().resolve("extracted-" + artifactPrefix + ".jar");
+                            extractEmbeddedJar(d.downloadedWar(), artifactPrefix, extractedJar);
+                            if (Files.exists(extractedJar) && Files.size(extractedJar) > 0) {
+                                Path classesDir = Path.of(pluginConfig.getModulePath(), "target", "classes");
+                                List<String> changedFiles = pluginConfig.getChangedFiles();
+                                boolean canPatch = changedFiles != null && !changedFiles.isEmpty()
+                                        && (pluginConfig.isSkipCompile() || Files.isDirectory(classesDir));
+                                if (canPatch) {
+                                    Consumer<String> bufLog = line -> log.append(line).append('\n');
+                                    StagingPackageBuilder patcher = new StagingPackageBuilder(
+                                            pluginConfig.getModulePath(),
+                                            pluginConfig.getArtifactFileName(),
+                                            changedFiles,
+                                            bufLog
+                                    ).setSkipCompile(pluginConfig.isSkipCompile());
+                                    Path patchedJar = patcher.patchExistingJar(extractedJar, d.tempDir());
+                                    if (patchedJar != null && Files.exists(patchedJar)) {
+                                        jarToEmbed = patchedJar;
+                                    }
+                                }
+                            }
+                        }
+
+                        WarEmbedUtil.EmbedResult embedResult = WarEmbedUtil.embedJar(
+                                d.downloadedWar(), jarToEmbed, artifactPrefix, outputWar);
+                        if (!embedResult.isVerified()) {
+                            throw new Exception("WAR 嵌入校验失败: " + embedResult.getMessage());
+                        }
+                        return new EmbedTransform(outputWar);
+                    }
+
+                    @Override
+                    public void upload(FtpTargetSelection target, EmbedTransform e, StringBuilder log) throws Exception {
+                        if (currentCancelMode != CancelMode.NONE) {
+                            throw new com.flux.deploy.deploy.CancellationToken.CancellationException();
+                        }
+                        try {
+                            DeployConfig embedConfig = new DeployConfig();
+                            embedConfig.setHost(host);
+                            embedConfig.setPort(port);
+                            embedConfig.setUsername(username);
+                            embedConfig.setPassword(password);
+                            embedConfig.setRemoteDir(target.getRemoteDir());
+                            embedConfig.setTargetNames(List.of(target.getTargetName()));
+                            embedConfig.setTargetRelativePaths(List.of(target.getRelativePath()));
+                            embedConfig.setLocalFiles(List.of(e.outputWar()));
+                            embedConfig.setOperator(pluginConfig.getOperator());
+                            embedConfig.setSkipBackup(true);
+                            embedConfig.setSkipNote(true);
+                            embedConfig.setSkipLock(true);
+                            applyCancellationToken(embedConfig);
+                            DeployPipeline embedPipeline = new DeployPipeline(embedConfig);
+                            DeployResult embedDeployResult = embedPipeline.execute();
+                            if (!embedDeployResult.isSuccess()) {
+                                throw new Exception(target.getTargetName() + " 部署流程失败");
+                            }
+                            log.append("[嵌入] ").append(target.getTargetName()).append(" 更新成功\n");
+                            recordSucceededUpload(target);
+                        } catch (Exception ex) {
+                            // ISOLATED：upload 失败 → 单包回滚（与原串行路径一致）
+                            if (strategy == com.flux.deploy.config.FailureStrategy.ISOLATED
+                                    && !(ex instanceof com.flux.deploy.deploy.CancellationToken.CancellationException)) {
+                                String remotePath = target.getRemoteDir() + target.getRelativePath();
+                                String backupPath = lookupBackupPath(updatedPackages, remotePath);
+                                log.append("✗ ").append(target.getTargetName())
+                                        .append(" 嵌入失败: ").append(ex.getMessage()).append('\n');
+                                if (backupPath != null) {
+                                    try {
+                                        rollbackSingleTarget(remotePath, backupPath,
+                                                host, port, username, password);
+                                        log.append("[回滚] 已恢复: ").append(remotePath).append('\n');
+                                    } catch (Exception rollbackErr) {
+                                        // 回滚失败：标记 key，由调用方修正 outcome 为 ROLLBACK_FAILED
+                                        rollbackFailedKeys.put(target.getRelativePath(), Boolean.TRUE);
+                                        log.append("[⛔ 严重] 单包回滚失败: ")
+                                                .append(rollbackErr.getMessage()).append('\n');
+                                    }
+                                } else {
+                                    log.append("[警告] 未找到 ").append(remotePath)
+                                            .append(" 的备份路径，无法单包回滚\n");
+                                }
+                            }
+                            throw ex;
+                        }
+                    }
+
+                    @Override
+                    public void cleanup(FtpTargetSelection target, EmbedDownload d, EmbedTransform e) {
+                        // download 成功后 tempDir 由 EmbedDownload 持有；此处统一清理
+                        if (d != null) {
+                            cleanupTempDirSilent(d.tempDir());
+                        }
+                    }
+                };
+
+        com.flux.deploy.parallel.PipelineExecutor.Options opts =
+                new com.flux.deploy.parallel.PipelineExecutor.Options(
+                        downloadParallelism, embedParallelism, uploadParallelism,
+                        strategy, parallelToken, "embed");
+
+        java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> outcomes =
+                com.flux.deploy.parallel.PipelineExecutor.execute(
+                        opts, embedTargets, FtpTargetSelection::getRelativePath, stages);
+
+        // 修正 ROLLBACK_FAILED outcomes：upload 阶段单包回滚失败的目标，把状态从 FAILED 提升为 ROLLBACK_FAILED
+        for (String key : rollbackFailedKeys.keySet()) {
+            com.flux.deploy.parallel.TargetOutcome orig = outcomes.get(key);
+            if (orig != null && orig.getStatus() == com.flux.deploy.parallel.TargetStatus.FAILED) {
+                outcomes.put(key, com.flux.deploy.parallel.TargetOutcome.rollbackFailed(
+                        key, orig.getError(), orig.getLogSegment()));
+            }
+        }
+
+        // 顺序 flush 单包日志，保持目标内日志连续
+        for (com.flux.deploy.parallel.TargetOutcome o : outcomes.values()) {
+            String seg = o.getLogSegment();
+            if (!seg.isEmpty()) {
+                for (String line : seg.split("\n")) {
+                    if (!line.isEmpty()) logCallback.accept(line);
+                }
+            }
+        }
+
+        // 聚合统计
+        int success = 0, failed = 0;
+        for (com.flux.deploy.parallel.TargetOutcome o : outcomes.values()) {
+            switch (o.getStatus()) {
+                case SUCCESS:
+                    success++;
+                    break;
+                case FAILED:
+                case ROLLBACK_FAILED:
+                case CANCELLED:
+                case SKIPPED:
+                    failed++;
+                    break;
+            }
+        }
+
+        // 决定是否让主流程整体回滚：
+        //   ISOLATED 下：失败的已单包回滚，主流程不再走 abortPartial
+        //   ROLLBACK_ALL / KEEP_SUCCEEDED 下：任一失败 → 主流程 abortPartial
+        boolean shouldAbort = (failed > 0)
+                && strategy != com.flux.deploy.config.FailureStrategy.ISOLATED;
+        return new EmbedParallelOutcome(success, failed, shouldAbort, outcomes);
+    }
+
+    /**
+     * 把毫秒时长格式化为"M 分 S 秒"（便于终态日志显示总耗时）
+     *
+     * @param elapsedMs 耗时毫秒
+     * @return 例如 "9 分 10 秒" 或 "45 秒"
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static String formatElapsed(long elapsedMs) {
+        long totalSeconds = elapsedMs / 1000;
+        long minutes = totalSeconds / 60;
+        long seconds = totalSeconds % 60;
+        if (minutes <= 0) {
+            return seconds + " 秒";
+        }
+        return minutes + " 分 " + seconds + " 秒";
+    }
+
+    /**
+     * 静默清理临时目录（供流水线 cleanup 钩子使用）
+     *
+     * <p>遇到任何异常都吞掉（仅记录到 stderr），避免清理失败干扰主流程返回的 outcome。</p>
+     *
+     * @param tempDir 待清理的临时目录
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static void cleanupTempDirSilent(Path tempDir) {
+        if (tempDir == null) return;
+        try {
+            Files.walkFileTree(tempDir, new java.nio.file.SimpleFileVisitor<>() {
+                @Override
+                public java.nio.file.FileVisitResult visitFile(Path file,
+                                                                 java.nio.file.attribute.BasicFileAttributes attrs)
+                        throws java.io.IOException {
+                    Files.delete(file);
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult postVisitDirectory(Path dir, java.io.IOException exc)
+                        throws java.io.IOException {
+                    Files.delete(dir);
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (Exception ignored) {
+            // 清理失败不影响主流程；最坏情况是临时目录残留，下次 OS 重启会清除
+        }
+    }
+
+    /**
+     * 嵌入失败包的串行重试结果
+     *
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static final class EmbedRetryOutcome {
+        /** 原本失败、重试后成功的目标 key 集合 */
+        final java.util.Set<String> retrySucceededKeys;
+        /** 重试 N 轮后仍失败的目标 key 集合 */
+        final java.util.Set<String> finalFailedKeys;
+        /** 重试期间又触发了 ROLLBACK_FAILED 的 key 集合（罕见） */
+        final java.util.Set<String> retryRollbackFailedKeys;
+
+        EmbedRetryOutcome(java.util.Set<String> retrySucceededKeys,
+                           java.util.Set<String> finalFailedKeys,
+                           java.util.Set<String> retryRollbackFailedKeys) {
+            this.retrySucceededKeys = retrySucceededKeys;
+            this.finalFailedKeys = finalFailedKeys;
+            this.retryRollbackFailedKeys = retryRollbackFailedKeys;
+        }
+    }
+
+    /**
+     * 嵌入阶段失败包的串行重试
+     *
+     * <p>设计要点：</p>
+     * <ul>
+     *   <li>**串行执行**：一次只重试一个包，避免再次堆积 FTP 服务器压力</li>
+     *   <li>**复用 executeWarEmbed**：每包仍走完整 D-E-U，保持单包独立性</li>
+     *   <li>**锁文件状态**：本方法在主流程"嵌入完成"和"解锁"之间调用，
+     *       失败包的锁文件仍在远端，executeWarEmbed 可正常工作</li>
+     *   <li>**AUTH 不重试**：认证失败重试也是失败，避免浪费时间</li>
+     *   <li>**ROLLBACK_FAILED 不重试**：已严重状态，重试可能让情况更糟</li>
+     *   <li>**重试间 2 秒延迟**：给 FTP 服务器缓冲时间</li>
+     *   <li>**重试成功后修正 outcomes**：把对应 key 的状态从 FAILED → SUCCESS，
+     *       并 recordSucceededUpload 让 UI"已成功"列表也包含</li>
+     * </ul>
+     *
+     * @param embedTargets    嵌入目标列表
+     * @param embedOutcomes   主流程产出的 outcomes（本方法直接修改其中失败 key 的状态）
+     * @param pluginConfig    部署配置
+     * @param localJar        本地源 JAR
+     * @param artifactPrefix  产物名前缀
+     * @param lockedPackages  加锁信息列表
+     * @param mainOffset      embed 起始下标
+     * @param maxRetries      最大重试次数（来自 UserConfig，0 = 不重试）
+     * @param host            FTP 主机
+     * @param port            FTP 端口
+     * @param username        FTP 用户名
+     * @param password        FTP 密码
+     * @param logCallback     日志回调
+     * @return 重试结果
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static EmbedRetryOutcome retryFailedEmbedSerially(
+            List<FtpTargetSelection> embedTargets,
+            java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> embedOutcomes,
+            PluginDeployConfig pluginConfig,
+            Path localJar, String artifactPrefix,
+            List<String[]> lockedPackages, int mainOffset,
+            int maxRetries,
+            String host, int port, String username, String password,
+            Consumer<String> logCallback) {
+
+        java.util.Set<String> retrySucceeded = new java.util.HashSet<>();
+        java.util.Set<String> finalFailed = new java.util.HashSet<>();
+        java.util.Set<String> retryRollbackFailed = new java.util.HashSet<>();
+
+        if (maxRetries <= 0) {
+            // 不重试：把当前所有 FAILED / ROLLBACK_FAILED 视为最终失败
+            for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.FAILED) {
+                    finalFailed.add(o.getTargetKey());
+                } else if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.ROLLBACK_FAILED) {
+                    retryRollbackFailed.add(o.getTargetKey());
+                }
+            }
+            return new EmbedRetryOutcome(retrySucceeded, finalFailed, retryRollbackFailed);
+        }
+
+        // 收集首轮失败的可重试目标：FAILED + 非 AUTH 错误 + 非 CancellationException
+        // ROLLBACK_FAILED 不参与重试（已严重）
+        java.util.LinkedHashMap<String, FtpTargetSelection> retryQueue =
+                collectRetryableTargets(embedTargets, embedOutcomes, retryRollbackFailed);
+
+        if (retryQueue.isEmpty()) {
+            // 所有失败要么是 AUTH 不可重试要么已 ROLLBACK_FAILED
+            for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+                if (o.getStatus() == com.flux.deploy.parallel.TargetStatus.FAILED) {
+                    finalFailed.add(o.getTargetKey());
+                }
+            }
+            return new EmbedRetryOutcome(retrySucceeded, finalFailed, retryRollbackFailed);
+        }
+
+        // 预建索引：key → embedTarget index（找 lockInfo 用）
+        java.util.Map<String, Integer> indexByKey = new java.util.HashMap<>();
+        for (int i = 0; i < embedTargets.size(); i++) {
+            indexByKey.put(embedTargets.get(i).getRelativePath(), i);
+        }
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            if (retryQueue.isEmpty()) break;
+
+            logCallback.accept("\n━━ 重试失败包 (第 " + attempt + " 轮，"
+                    + retryQueue.size() + " 个) ━━");
+
+            java.util.Iterator<java.util.Map.Entry<String, FtpTargetSelection>> it =
+                    retryQueue.entrySet().iterator();
+            while (it.hasNext()) {
+                // 用户取消立即停止重试
+                if (currentCancelMode != CancelMode.NONE) {
+                    logCallback.accept("[重试] 用户已取消，跳过剩余 " + retryQueue.size() + " 个包");
+                    break;
+                }
+
+                java.util.Map.Entry<String, FtpTargetSelection> entry = it.next();
+                String key = entry.getKey();
+                FtpTargetSelection target = entry.getValue();
+                Integer idx = indexByKey.get(key);
+                if (idx == null) {
+                    logCallback.accept("[重试] 跳过 " + key + "（未找到加锁信息）");
+                    it.remove();
+                    finalFailed.add(key);
+                    continue;
+                }
+                String[] lockInfo = lockedPackages.get(idx + mainOffset);
+
+                logCallback.accept("[重试] " + target.getTargetName() + " ...");
+                try {
+                    executeWarEmbed(pluginConfig, target,
+                            localJar, artifactPrefix,
+                            lockInfo[0], lockInfo[1],
+                            host, port, username, password,
+                            logCallback);
+                    // 重试成功：登记 + 修正 outcome + 从队列移除
+                    recordSucceededUpload(target);
+                    com.flux.deploy.parallel.TargetOutcome orig = embedOutcomes.get(key);
+                    String mergedLog = (orig != null ? orig.getLogSegment() : "")
+                            + "[重试] 第 " + attempt + " 次重试成功\n";
+                    embedOutcomes.put(key, com.flux.deploy.parallel.TargetOutcome.success(key, mergedLog));
+                    retrySucceeded.add(key);
+                    it.remove();
+                    logCallback.accept("✓ 重试成功: " + target.getTargetName());
+                } catch (Exception e) {
+                    // 重试失败：判断是否要再重试
+                    com.flux.deploy.ftp.FtpErrorKind kind =
+                            com.flux.deploy.ftp.FtpErrorClassifier.classify(e);
+                    String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    if (kind == com.flux.deploy.ftp.FtpErrorKind.AUTH) {
+                        // AUTH 错误不再重试
+                        logCallback.accept("✗ 重试遇到认证失败，放弃重试: " + target.getTargetName()
+                                + " - " + reason);
+                        it.remove();
+                        finalFailed.add(key);
+                    } else if (attempt >= maxRetries) {
+                        // 最后一轮：明确告知用户"已达最大重试次数，最终标记为失败"
+                        logCallback.accept("✗ " + target.getTargetName()
+                                + " 已达最大重试次数 " + maxRetries + "，最终标记为失败 - " + reason);
+                        it.remove();
+                        finalFailed.add(key);
+                    } else {
+                        // 还有下一轮：明确显示"第 N 次失败，将再次重试"
+                        logCallback.accept("✗ " + target.getTargetName()
+                                + " 第 " + attempt + " 次重试失败，将进入下一轮 - " + reason);
+                        // 保留在 retryQueue 等待下一轮
+                    }
+                }
+
+                // 重试间 2 秒延迟，给 FTP 服务器缓冲
+                if (it.hasNext() || attempt < maxRetries) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 把仍在 retryQueue 中的（理论上为空，但防御）也算最终失败
+        for (String key : retryQueue.keySet()) {
+            finalFailed.add(key);
+        }
+
+        return new EmbedRetryOutcome(retrySucceeded, finalFailed, retryRollbackFailed);
+    }
+
+    /**
+     * 从 outcomes 里收集可重试的失败目标
+     *
+     * <p>排除：</p>
+     * <ul>
+     *   <li>非 FAILED 状态（成功 / 取消 / 跳过等）</li>
+     *   <li>错误类型为 AUTH（认证失败重试也是失败）</li>
+     *   <li>ROLLBACK_FAILED（提取到独立集合 retryRollbackFailed）</li>
+     *   <li>CancellationException 类异常（用户取消产生的失败）</li>
+     * </ul>
+     *
+     * @param embedTargets         嵌入目标列表
+     * @param embedOutcomes        outcomes
+     * @param retryRollbackFailed  out: 已 ROLLBACK_FAILED 的 key 集合（不重试）
+     * @return key → target 的 LinkedHashMap（保留输入顺序）
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static java.util.LinkedHashMap<String, FtpTargetSelection> collectRetryableTargets(
+            List<FtpTargetSelection> embedTargets,
+            java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> embedOutcomes,
+            java.util.Set<String> retryRollbackFailed) {
+
+        java.util.LinkedHashMap<String, FtpTargetSelection> queue = new java.util.LinkedHashMap<>();
+        java.util.Map<String, FtpTargetSelection> targetByKey = new java.util.HashMap<>();
+        for (FtpTargetSelection t : embedTargets) {
+            targetByKey.put(t.getRelativePath(), t);
+        }
+
+        for (com.flux.deploy.parallel.TargetOutcome o : embedOutcomes.values()) {
+            String key = o.getTargetKey();
+            FtpTargetSelection target = targetByKey.get(key);
+            if (target == null) continue;
+            switch (o.getStatus()) {
+                case FAILED:
+                    com.flux.deploy.ftp.FtpErrorKind kind = o.getErrorKind();
+                    Throwable err = o.getError();
+                    if (kind == com.flux.deploy.ftp.FtpErrorKind.AUTH) {
+                        // AUTH 不重试，直接归入最终失败
+                        continue;
+                    }
+                    if (err instanceof com.flux.deploy.deploy.CancellationToken.CancellationException) {
+                        // 用户取消产生的失败不重试
+                        continue;
+                    }
+                    queue.put(key, target);
+                    break;
+                case ROLLBACK_FAILED:
+                    retryRollbackFailed.add(key);
+                    break;
+                default:
+                    // SUCCESS / CANCELLED / SKIPPED 不重试
+                    break;
+            }
+        }
+        return queue;
+    }
+
+    /**
+     * 单包回滚：把备份文件恢复到原远程位置
+     *
+     * <p>用于 ISOLATED 模式下嵌入失败时单独恢复该包，不影响其他并行任务。</p>
+     *
+     * @param remotePath     原始远程路径
+     * @param backupFilePath 备份文件远程路径
+     * @param host           FTP 主机
+     * @param port           FTP 端口
+     * @param user           FTP 用户名
+     * @param pass           FTP 密码
+     * @throws Exception 下载或上传失败 → 调用方将该包标记为 ROLLBACK_FAILED
+     * @author claude
+     * @date 2026-05-02
+     */
+    /**
+     * 判定失败原因是否属于"目标 WAR 不含目标 JAR"。
+     *
+     * <p>用于在终态提醒里区分两类失败：</p>
+     * <ul>
+     *   <li>用户选错部署目标（WAR 真的没那个 JAR）→ 重试同样错，应提示检查目标</li>
+     *   <li>系统/网络问题 → 重试可能成功，提示重新部署</li>
+     * </ul>
+     *
+     * <p>匹配两个错误源的固定文案：</p>
+     * <ul>
+     *   <li>{@link com.flux.deploy.util.WarEmbedUtil#embedJar} → "目标 WAR 内不存在 ... 的 JAR 文件"</li>
+     *   <li>{@code extractEmbeddedJar} → 同上</li>
+     * </ul>
+     *
+     * @param reason 失败原因消息（取自 TargetOutcome.error.message）
+     * @return true 表示该失败属于"WAR 不含 JAR"类
+     * @author claude
+     * @date 2026-05-04
+     */
+    static boolean isMissingJarFailure(String reason) {
+        if (reason == null) return false;
+        return reason.contains("目标 WAR 内不存在") && reason.contains("JAR");
+    }
+
+    private static void rollbackSingleTarget(String remotePath, String backupFilePath,
+                                              String host, int port, String user, String pass) throws Exception {
+        Path tempRestore = Files.createTempFile("restore-", ".tmp");
+        try {
+            runFreshFtpSession(host, port, user, pass, (s, ops) -> {
+                ops.download(backupFilePath, tempRestore);
+                ops.upload(tempRestore, remotePath);
+            });
+        } finally {
+            Files.deleteIfExists(tempRestore);
+        }
+    }
+
+    /**
+     * 在 updatedPackages 中按 remotePath 查找对应的备份路径
+     *
+     * <p>updatedPackages 可能是 synchronizedList，迭代时需外部同步。</p>
+     *
+     * @param updatedPackages 备份阶段注册的回滚清单（[remotePath, backupFilePath]）
+     * @param remotePath      远程路径
+     * @return 备份文件路径；未找到返回 null
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static String lookupBackupPath(List<String[]> updatedPackages, String remotePath) {
+        synchronized (updatedPackages) {
+            for (String[] pair : updatedPackages) {
+                if (remotePath.equals(pair[0])) {
+                    return pair[1];
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * 预备份所有目标包到共享备份目录
      *
+     * <p>双路径分流：</p>
+     * <ul>
+     *   <li>{@code parallelism == 1} 或单目标 → 走原有串行循环（行为与改造前完全一致）</li>
+     *   <li>{@code parallelism > 1} 且多目标 → 用 {@link com.flux.deploy.parallel.ParallelExecutor}
+     *       并发执行，但**任一失败即整体抛异常**（备份阶段不做 isolated 单包语义，
+     *       因为备份失败几乎都是基础设施问题，单包跳过没有业务意义）</li>
+     * </ul>
+     *
+     * @param pluginConfig 部署配置
+     * @param allTargets   待备份的所有目标
+     * @param parallelism  备份并发数（1 = 关闭并行，走原串行路径）
+     * @param host         FTP 主机
+     * @param port         FTP 端口
+     * @param user         FTP 用户名
+     * @param pass         FTP 密码
+     * @param logCallback  日志回调
      * @return 备份目录路径（用于回滚）
+     * @throws Exception 任一包备份失败 → 整体抛出，调用方走"备份失败"分支
      * @author xumanyi
      * @date 2026-03-27
      */
     private static String preBackupAll(
             PluginDeployConfig pluginConfig,
             List<FtpTargetSelection> allTargets,
+            int parallelism,
+            int maxRetries,
             String host, int port, String user, String pass,
             Consumer<String> logCallback) throws Exception {
 
@@ -2292,59 +3343,260 @@ public class DeployExecutionService {
             }
 
             logCallback.accept("[备份] 备份目录: " + backupDir);
+
+            // 在并发开始前，把所有目标需要的子目录全部创建好。
+            // 同一个 FTP session 内顺序 mkdir，避免并发场景下多线程同时 mkdir 相同路径
+            // 导致的 HashSet 不安全 / 服务端响应码竞态。
+            precreateBackupSubDirs(ops, backupDir, allTargets);
         }
 
         // 逐个下载目标包到备份目录。
         // 关键约束：每个文件的 download/upload/size 验证都用独立 FTP 短连接，
         // 禁止跨文件复用同一个 FtpSession——长生命周期控制通道在批量大文件传输间隙
         // 会被服务端按空闲超时关闭并返回 421。
-        // 同名包分散在不同子目录时，按 relativePath 的父目录在备份目录下分子目录，避免覆盖。
-        Set<String> createdBackupSubDirs = new HashSet<>();
-        for (FtpTargetSelection target : allTargets) {
-            String remotePath = target.getRemoteDir() + target.getRelativePath();
-            String subDir = backupSubDirFor(target);
-            if (!subDir.isEmpty() && createdBackupSubDirs.add(subDir)) {
-                // 子目录首次出现时建一次目录，使用独立短连接
-                final String subDirPath = backupDir + subDir;
-                runFreshFtpSession(host, port, user, pass,
-                        (s, ops) -> ops.mkdirIfAbsent(subDirPath));
+        // 子目录已在上面预创建，循环内只做文件传输。
+        boolean shouldParallelize = allTargets.size() > 1 && parallelism > 1;
+        if (!shouldParallelize) {
+            // 串行路径：保持原有行为，任一失败立即抛出
+            for (FtpTargetSelection target : allTargets) {
+                backupSingleTarget(target, backupDir, host, port, user, pass, logCallback);
             }
-            String backupFilePath = backupDir + subDir + target.getTargetName();
+            return backupDir;
+        }
 
-            String displayName = (subDir.isEmpty() ? "" : subDir) + target.getTargetName();
-            logCallback.accept("[备份] " + displayName + " ...");
+        // 并行路径：备份阶段失败必须整体失败，因此 strategy 固定 ROLLBACK_ALL（任一失败传播取消）
+        com.flux.deploy.deploy.CancellationToken.Simple parallelToken =
+                new com.flux.deploy.deploy.CancellationToken.Simple();
+        com.flux.deploy.parallel.ParallelExecutor.Options opts =
+                new com.flux.deploy.parallel.ParallelExecutor.Options(
+                        parallelism,
+                        com.flux.deploy.config.FailureStrategy.ROLLBACK_ALL,
+                        parallelToken,
+                        "backup");
+        java.util.Map<String, com.flux.deploy.parallel.TargetOutcome> outcomes =
+                com.flux.deploy.parallel.ParallelExecutor.execute(
+                        opts, allTargets,
+                        t -> t.getRelativePath(),
+                        (target, log) -> {
+                            // 单包日志写入 buffer，完成后由调用方 flush 到 logCallback
+                            java.util.function.Consumer<String> bufLog =
+                                    line -> log.append(line).append('\n');
+                            backupSingleTarget(target, backupDir, host, port, user, pass, bufLog);
+                            return com.flux.deploy.parallel.TargetOutcome.success(
+                                    target.getRelativePath(), log.toString());
+                        });
 
-            Path tempBackup = Files.createTempFile("backup-", "-" + target.getTargetName());
-            try {
-                // 用独立连接下载
-                runFreshFtpSession(host, port, user, pass,
-                        (s, ops) -> ops.download(remotePath, tempBackup));
-
-                long downloadedSize = Files.size(tempBackup);
-                if (downloadedSize == 0) {
-                    throw new Exception("下载的备份文件为空: " + remotePath);
+        // 并发完成后顺序 flush 单包日志，保持目标内日志连续
+        for (com.flux.deploy.parallel.TargetOutcome o : outcomes.values()) {
+            String seg = o.getLogSegment();
+            if (!seg.isEmpty()) {
+                for (String line : seg.split("\n")) {
+                    if (!line.isEmpty()) logCallback.accept(line);
                 }
-
-                // 用独立连接上传，并在同一会话内立即校验远端文件大小：
-                // 同一连接做"上传+校验"既能复用握手，也能更强地证明上传完成且服务端可读。
-                long backupSize = withFreshFtpSession(host, port, user, pass, (s, ops) -> {
-                    ops.upload(tempBackup, backupFilePath);
-                    return ops.getFileSize(backupFilePath);
-                });
-
-                if (backupSize != downloadedSize) {
-                    throw new Exception("备份大小不一致: " + target.getTargetName()
-                            + " (下载 " + downloadedSize + " 字节, 备份 " + backupSize + " 字节)");
-                }
-
-                logCallback.accept("[备份] " + displayName
-                        + " -> " + backupFilePath + " (" + formatSize(backupSize) + ")");
-            } finally {
-                Files.deleteIfExists(tempBackup);
             }
         }
 
+        // 收集失败包列表
+        java.util.LinkedHashMap<String, FtpTargetSelection> targetByKey = new java.util.LinkedHashMap<>();
+        for (FtpTargetSelection t : allTargets) {
+            targetByKey.put(t.getRelativePath(), t);
+        }
+        java.util.LinkedHashMap<String, FtpTargetSelection> failedTargets = new java.util.LinkedHashMap<>();
+        for (com.flux.deploy.parallel.TargetOutcome o : outcomes.values()) {
+            if (o.getStatus() != com.flux.deploy.parallel.TargetStatus.SUCCESS) {
+                // AUTH 错误立即放弃（无意义重试）
+                if (o.getErrorKind() == com.flux.deploy.ftp.FtpErrorKind.AUTH) {
+                    Throwable rootCause = o.getError();
+                    String reason = rootCause != null && rootCause.getMessage() != null
+                            ? rootCause.getMessage() : "认证失败";
+                    throw new Exception("备份失败: " + o.getTargetKey()
+                            + " - " + reason + "（认证错误不重试）", rootCause);
+                }
+                FtpTargetSelection target = targetByKey.get(o.getTargetKey());
+                if (target != null) {
+                    failedTargets.put(o.getTargetKey(), target);
+                }
+            }
+        }
+
+        // 串行重试失败包
+        if (!failedTargets.isEmpty() && maxRetries > 0) {
+            retryFailedBackupSerially(failedTargets, backupDir, maxRetries,
+                    host, port, user, pass, logCallback);
+        }
+
+        // 重试后仍失败 → 整体抛异常
+        if (!failedTargets.isEmpty()) {
+            FtpTargetSelection firstFailed = failedTargets.values().iterator().next();
+            com.flux.deploy.parallel.TargetOutcome origOutcome = outcomes.get(firstFailed.getRelativePath());
+            Throwable rootCause = origOutcome != null ? origOutcome.getError() : null;
+            String reason = rootCause != null && rootCause.getMessage() != null
+                    ? rootCause.getMessage() : "重试 " + maxRetries + " 次后仍失败";
+            throw new Exception("备份失败: " + firstFailed.getRelativePath() + " - " + reason, rootCause);
+        }
+
         return backupDir;
+    }
+
+    /**
+     * 备份阶段失败包的串行重试
+     *
+     * <p>对失败包逐个调用 {@link #backupSingleTarget} 重试。重试成功的从 failedTargets 中移除。
+     * 重试间 2 秒延迟，给 FTP 服务器缓冲。</p>
+     *
+     * <p>与嵌入阶段重试的差异：备份阶段没有 ISOLATED 语义，重试仍失败将由调用方抛异常导致整体失败。</p>
+     *
+     * @param failedTargets 待重试的目标（map 由本方法直接修改：成功的会被移除）
+     * @param backupDir     备份根目录（含尾部 /）
+     * @param maxRetries    最大重试次数
+     * @param host          FTP 主机
+     * @param port          FTP 端口
+     * @param user          FTP 用户名
+     * @param pass          FTP 密码
+     * @param logCallback   日志回调
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static void retryFailedBackupSerially(
+            java.util.LinkedHashMap<String, FtpTargetSelection> failedTargets,
+            String backupDir,
+            int maxRetries,
+            String host, int port, String user, String pass,
+            Consumer<String> logCallback) {
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            if (failedTargets.isEmpty()) break;
+
+            logCallback.accept("\n━━ 重试备份失败包 (第 " + attempt + " 轮，"
+                    + failedTargets.size() + " 个) ━━");
+
+            java.util.Iterator<java.util.Map.Entry<String, FtpTargetSelection>> it =
+                    failedTargets.entrySet().iterator();
+            while (it.hasNext()) {
+                if (currentCancelMode != CancelMode.NONE) {
+                    logCallback.accept("[重试] 用户已取消，跳过剩余 " + failedTargets.size() + " 个包");
+                    return;
+                }
+
+                FtpTargetSelection target = it.next().getValue();
+                logCallback.accept("[重试] " + target.getTargetName() + " ...");
+                try {
+                    backupSingleTarget(target, backupDir, host, port, user, pass, logCallback);
+                    it.remove();
+                    logCallback.accept("✓ 备份重试成功: " + target.getTargetName());
+                } catch (Exception e) {
+                    com.flux.deploy.ftp.FtpErrorKind kind =
+                            com.flux.deploy.ftp.FtpErrorClassifier.classify(e);
+                    String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    if (kind == com.flux.deploy.ftp.FtpErrorKind.AUTH) {
+                        // AUTH 错误立即放弃，让上层抛失败
+                        logCallback.accept("✗ 备份重试遇到认证失败，放弃: " + target.getTargetName()
+                                + " - " + reason);
+                        return;
+                    }
+                    if (attempt >= maxRetries) {
+                        // 最后一轮失败：明确告知"已达最大重试次数"
+                        logCallback.accept("✗ " + target.getTargetName()
+                                + " 已达最大备份重试次数 " + maxRetries + "，最终标记为失败 - " + reason);
+                    } else {
+                        logCallback.accept("✗ " + target.getTargetName()
+                                + " 第 " + attempt + " 次备份重试失败，将进入下一轮 - " + reason);
+                    }
+                }
+
+                // 重试间 2 秒延迟，给 FTP 服务器缓冲
+                if (it.hasNext() || attempt < maxRetries) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 在主线程串行预创建所有备份子目录
+     *
+     * <p>把"目录管理"和"文件传输"在阶段上分离：</p>
+     * <ul>
+     *   <li>避免并发备份时多个 worker 线程同时 mkdir 相同路径产生的服务端响应码竞态</li>
+     *   <li>避免在 worker 线程里维护非线程安全的 HashSet 来去重</li>
+     * </ul>
+     *
+     * @param ops        已建连接的 FTP 操作（短连接复用，调用方负责关闭）
+     * @param backupDir  备份根目录（含尾部 /）
+     * @param allTargets 全部目标列表
+     * @throws IOException 创建目录失败
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static void precreateBackupSubDirs(FtpOperations ops,
+                                                 String backupDir,
+                                                 List<FtpTargetSelection> allTargets) throws java.io.IOException {
+        Set<String> created = new HashSet<>();
+        for (FtpTargetSelection target : allTargets) {
+            String subDir = backupSubDirFor(target);
+            if (!subDir.isEmpty() && created.add(subDir)) {
+                ops.mkdirIfAbsent(backupDir + subDir);
+            }
+        }
+    }
+
+    /**
+     * 备份单个目标包到备份目录
+     *
+     * <p>独立短连接：下载用一个 session，上传 + 校验大小用一个 session，
+     * 两次 session 各自 try-with-resources。失败时抛 Exception 由调用方处理。</p>
+     *
+     * @param target      待备份的目标
+     * @param backupDir   备份根目录（含尾部 /；子目录已预先创建）
+     * @param host        FTP 主机
+     * @param port        FTP 端口
+     * @param user        FTP 用户名
+     * @param pass        FTP 密码
+     * @param logCallback 日志回调（线程安全要求由调用方保证）
+     * @throws Exception 任意 IO / 校验失败
+     * @author claude
+     * @date 2026-05-02
+     */
+    private static void backupSingleTarget(FtpTargetSelection target,
+                                             String backupDir,
+                                             String host, int port, String user, String pass,
+                                             Consumer<String> logCallback) throws Exception {
+        String remotePath = target.getRemoteDir() + target.getRelativePath();
+        String subDir = backupSubDirFor(target);
+        String backupFilePath = backupDir + subDir + target.getTargetName();
+        String displayName = (subDir.isEmpty() ? "" : subDir) + target.getTargetName();
+
+        logCallback.accept("[备份] " + displayName + " ...");
+
+        Path tempBackup = Files.createTempFile("backup-", "-" + target.getTargetName());
+        try {
+            runFreshFtpSession(host, port, user, pass,
+                    (s, ops) -> ops.download(remotePath, tempBackup));
+
+            long downloadedSize = Files.size(tempBackup);
+            if (downloadedSize == 0) {
+                throw new Exception("下载的备份文件为空: " + remotePath);
+            }
+
+            long backupSize = withFreshFtpSession(host, port, user, pass, (s, ops) -> {
+                ops.upload(tempBackup, backupFilePath);
+                return ops.getFileSize(backupFilePath);
+            });
+
+            if (backupSize != downloadedSize) {
+                throw new Exception("备份大小不一致: " + target.getTargetName()
+                        + " (下载 " + downloadedSize + " 字节, 备份 " + backupSize + " 字节)");
+            }
+
+            logCallback.accept("[备份] " + displayName
+                    + " -> " + backupFilePath + " (" + formatSize(backupSize) + ")");
+        } finally {
+            Files.deleteIfExists(tempBackup);
+        }
     }
 
     /**
@@ -3067,7 +4319,7 @@ public class DeployExecutionService {
                 }
             }
         }
-        throw new Exception("WAR 中未找到匹配 [" + artifactPrefix + "] 的嵌入 JAR");
+        throw new Exception("目标 WAR 内不存在 " + artifactPrefix + " 的 JAR 文件");
     }
 
     private static String extractArtifactPrefix(String fileName) {

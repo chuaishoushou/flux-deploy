@@ -87,6 +87,12 @@ public class DeployConfig {
     /** 取消令牌（IDE / CLI 注入，默认永不取消） */
     private CancellationToken cancellationToken = CancellationToken.NOOP;
 
+    /** 上传重试策略；UI 默认 networkDefault，CLI 也用同样默认 */
+    private com.flux.deploy.ftp.RetryPolicy uploadRetryPolicy = com.flux.deploy.ftp.RetryPolicy.networkDefault();
+
+    /** 重试预算耗尽时的用户提示器；CLI / 测试默认 abortAll，IDE 注入弹窗实现 */
+    private com.flux.deploy.ftp.RetryUserPrompter retryPrompter = com.flux.deploy.ftp.RetryUserPrompter.abortAll();
+
     /**
      * Stage 0 残留锁处理策略
      */
@@ -198,4 +204,14 @@ public class DeployConfig {
 
     public CancellationToken getCancellationToken() { return cancellationToken; }
     public void setCancellationToken(CancellationToken v) { this.cancellationToken = v != null ? v : CancellationToken.NOOP; }
+
+    public com.flux.deploy.ftp.RetryPolicy getUploadRetryPolicy() { return uploadRetryPolicy; }
+    public void setUploadRetryPolicy(com.flux.deploy.ftp.RetryPolicy v) {
+        this.uploadRetryPolicy = v != null ? v : com.flux.deploy.ftp.RetryPolicy.networkDefault();
+    }
+
+    public com.flux.deploy.ftp.RetryUserPrompter getRetryPrompter() { return retryPrompter; }
+    public void setRetryPrompter(com.flux.deploy.ftp.RetryUserPrompter v) {
+        this.retryPrompter = v != null ? v : com.flux.deploy.ftp.RetryUserPrompter.abortAll();
+    }
 }

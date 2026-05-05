@@ -2,6 +2,8 @@ package com.flux.deploy.deploy.gates;
 
 import com.flux.deploy.deploy.Gate;
 import com.flux.deploy.ftp.FtpOperations;
+import com.flux.deploy.ftp.RetryPolicy;
+import com.flux.deploy.ftp.RetryUserPrompter;
 import com.flux.deploy.model.TargetPackage;
 
 import java.io.IOException;
@@ -18,16 +20,36 @@ import java.io.IOException;
 public class UploadGate implements Gate {
 
     private final FtpOperations ops;
+    private final RetryPolicy retryPolicy;
+    private final RetryUserPrompter prompter;
 
     /**
-     * 创建上传门禁实例
+     * 创建上传门禁实例（默认重试策略 + 非交互 ABORT）。
+     *
+     * <p>仅用于不需要交互式重试的场景（CLI、单元测试）。
+     * IDE 应使用 {@link #UploadGate(FtpOperations, RetryPolicy, RetryUserPrompter)} 注入弹窗。</p>
      *
      * @param ops FTP 操作对象
      * @author xumanyi
      * @date 2026-03-26
      */
     public UploadGate(FtpOperations ops) {
+        this(ops, RetryPolicy.networkDefault(), RetryUserPrompter.abortAll());
+    }
+
+    /**
+     * 创建上传门禁实例（带重试策略 + 用户提示）。
+     *
+     * @param ops      FTP 操作对象
+     * @param policy   网络异常时的自动重试策略
+     * @param prompter 重试预算耗尽时的用户决策器
+     * @author claude
+     * @date 2026-05-03
+     */
+    public UploadGate(FtpOperations ops, RetryPolicy policy, RetryUserPrompter prompter) {
         this.ops = ops;
+        this.retryPolicy = policy != null ? policy : RetryPolicy.networkDefault();
+        this.prompter = prompter != null ? prompter : RetryUserPrompter.abortAll();
     }
 
     /** {@inheritDoc} */
@@ -64,10 +86,13 @@ public class UploadGate implements Gate {
             }
         }
 
-        // 3. 上传到临时文件名
+        // 3. 上传到临时文件名（带重试 + 断点续传）
+        // 临时文件 .__UPLOADING__ 后缀让 Stage 0 残留扫描能识别上次中断的滞留物，
+        // uploadResumable 自身也会读临时文件 SIZE 决定续传 offset，让网络抖断后接续上传。
         String tempName = target.getPackageName() + ".__UPLOADING__";
         String tempPath = remoteDir + tempName;
-        ops.upload(target.getLocalStagingFile(), tempPath);
+        ops.uploadResumable(target.getLocalStagingFile(), tempPath, retryPolicy, prompter,
+                msg -> System.out.println("  " + msg));
 
         // 4. 重命名为目标文件名
         try {

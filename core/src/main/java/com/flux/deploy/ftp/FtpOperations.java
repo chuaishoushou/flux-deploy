@@ -6,8 +6,10 @@ import org.apache.commons.net.ftp.FTPFile;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * FTP 原子操作集合
@@ -96,6 +98,176 @@ public class FtpOperations {
                 throw new IOException("上传失败: " + remoteFilePath
                         + " (响应: " + client.getReplyString().trim() + ")");
             }
+        }
+    }
+
+    /**
+     * 带重试 + 断点续传的上传。
+     *
+     * <p>核心策略：</p>
+     * <ol>
+     *   <li>开始前 {@code SIZE} 远端目标文件，已传 N 字节就 {@code REST N} 续传，
+     *       本地输入流 skip(N) 后调 {@code STOR}</li>
+     *   <li>失败按 {@link FtpErrorClassifier} 分类，仅 NETWORK 进入退避重试循环</li>
+     *   <li>每次重试前调用 {@link FtpSession#reconnect()} 重建控制连接</li>
+     *   <li>预算耗尽时调 {@code prompter.askRetryOrAbort}：用户选 RETRY 重置预算再来一轮，
+     *       选 ABORT 抛最后一次异常给上层</li>
+     * </ol>
+     *
+     * <p>幂等保证：远端 size &gt; 本地 size 视为脏数据（上次部署留下的不同版本残片），
+     * 强制从 0 重传，避免传出半新半旧的混合体。</p>
+     *
+     * <p>线程：本方法阻塞调用线程，调用方自行决定是否在线程池里跑。</p>
+     *
+     * @param localPath  本地文件
+     * @param remotePath 远端目标路径
+     * @param policy     重试策略
+     * @param prompter   预算耗尽时的用户提示器
+     * @param log        日志回调（每次重试 / 续传决策都会写一行）
+     * @throws IOException 用户选择 ABORT 后抛最后一次错误；或非网络类错误首次失败即抛
+     * @author claude
+     * @date 2026-05-03
+     */
+    public void uploadResumable(Path localPath, String remotePath,
+                                  RetryPolicy policy, RetryUserPrompter prompter,
+                                  Consumer<String> log) throws IOException {
+        validateRemotePath(remotePath);
+        long localSize = Files.size(localPath);
+        Consumer<String> logger = log != null ? log : msg -> {};
+
+        // 外层 while：用户在弹窗选 RETRY 时重新进入新一轮重试
+        while (true) {
+            IOException lastErr = null;
+            FtpErrorKind lastKind = FtpErrorKind.PROTOCOL;
+
+            for (int attempt = 1; attempt <= policy.maxAttempts(); attempt++) {
+                try {
+                    long remoteOffset = computeResumeOffset(remotePath, localSize, logger);
+                    tryUploadFromOffset(localPath, remotePath, remoteOffset, logger);
+                    return; // 成功
+                } catch (IOException e) {
+                    lastErr = e;
+                    lastKind = FtpErrorClassifier.classify(e);
+                    boolean canRetry = policy.shouldRetry(lastKind) && attempt < policy.maxAttempts();
+                    if (!canRetry) {
+                        // 非网络类错误首次失败即跳出，不进入退避；网络类预算耗尽也跳出
+                        if (!policy.shouldRetry(lastKind)) {
+                            // 非网络错误：不询问用户，直接抛（AUTH/SERVER_LIMIT/PROTOCOL 重试无意义）
+                            throw e;
+                        }
+                        break;
+                    }
+                    Duration backoff = policy.backoffFor(attempt);
+                    logger.accept("[上传] 第 " + attempt + " 次失败，"
+                            + backoff.toSeconds() + "s 后重试 (剩 "
+                            + (policy.maxAttempts() - attempt) + " 次): " + e.getMessage());
+                    sleep(backoff);
+                    try {
+                        session.reconnect();
+                        logger.accept("[上传] 控制连接已重建");
+                    } catch (IOException reconnectErr) {
+                        logger.accept("[上传] 重连失败: " + reconnectErr.getMessage()
+                                + "（继续退避后下一轮重试会再次尝试）");
+                    }
+                }
+            }
+
+            // 预算耗尽，询问用户
+            String key = remotePath;
+            RetryUserPrompter.Decision d = prompter.askRetryOrAbort(
+                    key, policy.maxAttempts(),
+                    lastErr != null ? lastErr.getMessage() : "未知错误",
+                    lastKind);
+            if (d == RetryUserPrompter.Decision.ABORT) {
+                throw lastErr != null ? lastErr : new IOException("上传失败: " + remotePath);
+            }
+            logger.accept("[上传] 用户选择重试，重置预算");
+            // 用户选 RETRY：尝试重连一次（可能现在网通了），失败也无所谓，循环里还会重试
+            try { session.reconnect(); } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * 计算续传起点：远端已存在则用其大小作为 offset，&gt; 本地大小则视为脏数据从 0 重传。
+     *
+     * @param remotePath 远端文件路径
+     * @param localSize  本地文件大小
+     * @param log        日志回调
+     * @return 续传起点（≥ 0，≤ localSize）
+     * @throws IOException 列目录失败
+     * @author claude
+     * @date 2026-05-03
+     */
+    private long computeResumeOffset(String remotePath, long localSize, Consumer<String> log) throws IOException {
+        long remoteSize = exists(remotePath) ? getFileSize(remotePath) : 0;
+        if (remoteSize < 0) remoteSize = 0;
+        if (remoteSize > localSize) {
+            log.accept("[上传] 远端已有 " + remoteSize + " 字节 > 本地 " + localSize
+                    + " 字节，疑似残留脏数据，从 0 重传");
+            return 0;
+        }
+        if (remoteSize > 0 && remoteSize < localSize) {
+            log.accept("[上传] 检测到远端已传 " + remoteSize + "/" + localSize + " 字节，启用断点续传");
+        }
+        return remoteSize;
+    }
+
+    /**
+     * 从指定 offset 上传：local skip(offset) → setRestartOffset → storeFile。
+     *
+     * <p>finally 中清空 RestartOffset 防止污染同一 FTPClient 后续操作。</p>
+     *
+     * @param local  本地文件
+     * @param remote 远端路径
+     * @param offset 续传起点（0 = 从头）
+     * @param log    日志回调
+     * @throws IOException IO 失败 / 服务端响应非正完成
+     * @author claude
+     * @date 2026-05-03
+     */
+    private void tryUploadFromOffset(Path local, String remote, long offset,
+                                       Consumer<String> log) throws IOException {
+        FTPClient client = session.getClient();
+        try (InputStream raw = new BufferedInputStream(Files.newInputStream(local))) {
+            if (offset > 0) {
+                long skipped = 0;
+                while (skipped < offset) {
+                    long n = raw.skip(offset - skipped);
+                    if (n <= 0) {
+                        throw new IOException("本地文件 skip 到 offset 失败: 已 skip "
+                                + skipped + "/" + offset);
+                    }
+                    skipped += n;
+                }
+                client.setRestartOffset(offset);
+            }
+            boolean ok = client.storeFile(remote, raw);
+            if (!ok) {
+                throw new IOException("上传失败: " + remote
+                        + " (响应: " + client.getReplyString().trim() + ")");
+            }
+        } finally {
+            // 必须清理：否则同一 FTPClient 上的下一次 storeFile/retrieveFile 会继续使用旧 offset
+            try { client.setRestartOffset(0); } catch (RuntimeException ignored) {}
+        }
+    }
+
+    /**
+     * 可中断的退避 sleep。被中断时恢复中断标志并抛 IOException 让上层结束循环。
+     *
+     * @param duration 等待时长，≤ 0 立即返回
+     * @throws IOException 被中断
+     * @author claude
+     * @date 2026-05-03
+     */
+    private static void sleep(Duration duration) throws IOException {
+        long ms = duration.toMillis();
+        if (ms <= 0) return;
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("等待重试被中断", e);
         }
     }
 

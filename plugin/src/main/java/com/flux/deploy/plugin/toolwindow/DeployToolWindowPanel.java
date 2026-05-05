@@ -127,6 +127,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private boolean hasDeployed = false;
     /** 是否已执行过预检 */
     private boolean hasPreChecked = false;
+    /**
+     * 预检完成后的后续动作（单次消费）。
+     *
+     * <p>使用场景：用户点击「打包并上传」但尚未预检时，系统会先弹"是否先预检"对话框；
+     * 用户选 YES 后跑预检，预检通过后**自动继续**走原本的部署流程。
+     * 该字段在 {@link #proceedToDeployOrPreCheck} 设置，在 {@link #executeDeploy} 的
+     * onComplete 回调里消费（成功的预检后调用并清空）。</p>
+     */
+    private Runnable pendingPostPrecheckAction;
 
     /** 「打包并上传」按钮的运行态：IDLE 触发部署 / RUNNING 触发停止弹窗 / STOPPING 禁用等待 */
     private enum DeployButtonState { IDLE, RUNNING, STOPPING }
@@ -140,6 +149,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     public DeployToolWindowPanel(Project project) {
         super(new BorderLayout());
         this.project = project;
+
+        // 工具窗口首次打开时静默触发一次配置加载：
+        // ~/.flux-deploy/config.toml 不存在时会自动生成默认模板，便于新用户发现可调项。
+        // 不需要返回值；任何异常都吞掉（实际部署时还会再次 load 并展示具体错误）。
+        try {
+            com.flux.deploy.config.UserConfig.load();
+        } catch (Throwable ignored) {
+            // 配置非法时 panel 仍能正常打开；用户在部署阶段会看到详细错误
+        }
 
         this.backupCheckBox = new JCheckBox("执行备份", true);
         this.sourceSection = new SourceSectionPanel(project);
@@ -183,9 +201,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 return null;
             }
         });
-        // 项目/系统/连接变化时刷新"备份至"行
-        this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(
-                this.infoSection::refreshBackupLocationLabel));
+        // 项目/系统/连接变化时：清空本次 session 的自定义备份根（避免跨系统误用），
+        // 再刷新"备份至"行显示最新默认派生路径
+        this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(() -> {
+            this.infoSection.clearSessionBackupRoot();
+            this.infoSection.refreshBackupLocationLabel();
+        }));
 
         initUI();
         initListeners();
@@ -697,6 +718,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         // 日志与状态
         logSection.clear();
         hasPreChecked = false;
+        pendingPostPrecheckAction = null;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -716,6 +738,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         logSection.clear();
         hasDeployed = false;
         hasPreChecked = false;
+        pendingPostPrecheckAction = null;
         rollbackButton.setEnabled(false);
     }
 
@@ -754,6 +777,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                     logSection.setProgressVisible(false);
                     hasDeployed = false;
                     hasPreChecked = false;
+        pendingPostPrecheckAction = null;
                     rollbackButton.setEnabled(false);
                 });
     }
@@ -785,16 +809,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 .executeOnPooledThread(() -> {
             java.util.List<String> conflicts;
             try {
-                String detectContextDir = targetSection.getCurrentContextDir();
-                String detectCustomRoot = null;
-                if (detectContextDir != null) {
-                    String detectKey = host + ":" + port + "|" + detectContextDir;
-                    com.flux.deploy.plugin.service.PluginSettingsService detectSettings =
-                            project.getService(com.flux.deploy.plugin.service.PluginSettingsService.class);
-                    if (detectSettings != null && detectSettings.getState() != null) {
-                        detectCustomRoot = detectSettings.getState().customBackupRoots.get(detectKey);
-                    }
-                }
+                // 自定义备份根改为 session 级（不持久化），直接从 InfoSectionPanel 读
+                String detectCustomRoot = infoSection.getSessionBackupRoot();
                 conflicts = DeployExecutionService.detectExistingBackups(
                         host, port, user, pass, operator, allTargets, detectCustomRoot,
                         msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
@@ -837,22 +853,24 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
      *
      * @return true=用户确认继续覆盖；false=取消
      */
-    /** 备份冲突检查后的通用入口：按预检状态决定是否先提示预检 */
+    /**
+     * 备份冲突检查后的通用入口
+     *
+     * <p>设计：用户既然已经点了「打包并上传」，就不再弹"是否先预检"对话框打断流程。
+     * 同一 session 内首次部署自动跑一次预检（确认 FTP 状态），通过后自动进入部署确认；
+     * 预检已跑过则直接进部署确认。</p>
+     *
+     * @author claude
+     * @date 2026-05-02
+     */
     private void proceedToDeployOrPreCheck() {
         if (!hasPreChecked) {
-            int choice = JOptionPane.showConfirmDialog(this,
-                    "尚未进行预检，建议先预检确认 FTP 状态。\n是否先执行预检？",
-                    "提示", JOptionPane.YES_NO_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
-            if (choice == JOptionPane.YES_OPTION) {
-                logSection.appendLog("[操作] 先执行预检");
-                executeDeploy(true);
-                hasPreChecked = true;
-            } else if (choice == JOptionPane.NO_OPTION) {
-                logSection.appendLog("[操作] 跳过预检，直接进入部署确认");
-                showConfirmAndDeploy();
-            } else {
-                logSection.appendLog("[操作] 用户取消，未执行更新");
-            }
+            logSection.appendLog("[操作] 自动执行预检（预检通过后将自动进入部署确认）");
+            // 预检通过后自动继续部署，串接成无缝流程。
+            // 预检失败时该 action 仍会被消费但不会重复触发部署（onComplete 内会判断 result.isSuccess）。
+            pendingPostPrecheckAction = this::showConfirmAndDeploy;
+            executeDeploy(true);
+            hasPreChecked = true;
         } else {
             showConfirmAndDeploy();
         }
@@ -1060,19 +1078,10 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         pluginConfig.setSkipBackup(!backupCheckBox.isSelected());
         pluginConfig.setSkipCompile(!sourceSection.needsCompile());
 
-        // 注入用户自定义备份根（若已配置）
-        String contextDir = targetSection.getCurrentContextDir();
-        if (contextDir != null) {
-            String customKey = targetSection.getConnectedHost() + ":"
-                    + targetSection.getConnectedPort() + "|" + contextDir;
-            com.flux.deploy.plugin.service.PluginSettingsService settings =
-                    project.getService(com.flux.deploy.plugin.service.PluginSettingsService.class);
-            if (settings != null && settings.getState() != null) {
-                String custom = settings.getState().customBackupRoots.get(customKey);
-                if (custom != null && !custom.isBlank()) {
-                    pluginConfig.setCustomBackupRoot(custom);
-                }
-            }
+        // 注入用户在本次 session 内选定的自定义备份根（仅 session 级，不持久化）
+        String sessionBackupRoot = infoSection.getSessionBackupRoot();
+        if (sessionBackupRoot != null && !sessionBackupRoot.isBlank()) {
+            pluginConfig.setCustomBackupRoot(sessionBackupRoot);
         }
 
         if (selectedFiles != null) {
@@ -1141,6 +1150,16 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                     }
                     // 一次部署结束后重置备份冲突策略为默认，避免污染下次操作
                     pendingBackupStrategy = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
+
+                    // 消费"预检后自动继续部署"的 pending action：
+                    // 仅在预检 + 通过 + 非本地打包 时触发，避免在常规部署完成后误触
+                    Runnable postAction = pendingPostPrecheckAction;
+                    pendingPostPrecheckAction = null;
+                    if (dryRun && !localOnly && result != null && result.isSuccess()
+                            && postAction != null) {
+                        logSection.appendLog("[操作] 预检通过，自动进入部署确认");
+                        postAction.run();
+                    }
                 }));
     }
 
