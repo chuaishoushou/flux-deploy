@@ -19,6 +19,7 @@ import com.intellij.util.ui.AsyncProcessIcon;
 
 import javax.swing.*;
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreePath;
 import java.awt.*;
 import java.io.IOException;
 import java.util.*;
@@ -693,39 +694,41 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         String keyword = packageSearchField.getText().trim();
         String[] terms = keyword.isEmpty() ? null : keyword.toLowerCase(Locale.ROOT).split("\\s+");
 
-        Map<String, List<PackageNodeData>> grouped = new LinkedHashMap<>();
+        // 按 "/" 分段建嵌套目录树：同一前缀只建一个节点，包挂在最深层目录下。
+        // 这样 backup/20260502_xumanyi/shared-tms 不再是一行扁平串，而是
+        // backup → 20260502_xumanyi → shared-tms 三层嵌套，backup 顶层节点全局只出现一次，
+        // FTP 上有几十次备份也只是顶层 backup 节点下的子树，视觉上极简
+        Map<String, CheckedTreeNode> dirByPath = new LinkedHashMap<>();
         for (PackageNodeData d : sorted) {
-            // 主目标（locked）始终保留——它是部署的核心对象，被过滤掉视觉上太怪
+            // 主目标 (locked) 始终保留——它是部署的核心对象，被过滤掉视觉上太怪
             if (terms != null && !d.locked && !packageMatches(d, terms)) continue;
-            grouped.computeIfAbsent(d.info.getSubDirectory(), k -> new ArrayList<>()).add(d);
+            CheckedTreeNode parent = resolveDirNode(d.info.getSubDirectory(), dirByPath);
+            CheckedTreeNode pkgNode = new CheckedTreeNode(d);
+            pkgNode.setChecked(userCheckedKeys.contains(packageKey(d.info)));
+            parent.add(pkgNode);
         }
 
-        for (Map.Entry<String, List<PackageNodeData>> entry : grouped.entrySet()) {
-            String subDir = entry.getKey();
-            String displayDir = ".".equals(subDir) ? "(当前目录)" : subDir;
-            CheckedTreeNode dirNode = new CheckedTreeNode(displayDir);
-            int checkedCount = 0;
-            for (PackageNodeData d : entry.getValue()) {
-                CheckedTreeNode pkgNode = new CheckedTreeNode(d);
-                boolean checked = userCheckedKeys.contains(packageKey(d.info));
-                pkgNode.setChecked(checked);
-                dirNode.add(pkgNode);
-                if (checked) checkedCount++;
-            }
-            if (dirNode.getChildCount() > 0) {
-                // 子项全勾时父勾，否则父不勾（避免渲染器画"部分选中"的灰横条）
-                dirNode.setChecked(checkedCount == dirNode.getChildCount());
-                packageTreeRoot.add(dirNode);
-            }
-        }
+        // 自底向上聚合：仅当目录下所有叶子（包）都勾选时父级才勾选，
+        // 避免渲染器画"部分选中"的灰横条
+        propagateDirChecked(packageTreeRoot);
 
         DefaultTreeModel model = new DefaultTreeModel(packageTreeRoot);
         rebuildingPackageTree = true;
         try {
             packageTree.setModel(model);
             packageTree.setRootVisible(false);
-            for (int i = 0; i < packageTree.getRowCount(); i++) {
-                packageTree.expandRow(i);
+            // 默认展开规则：
+            // - 搜索激活（terms != null）：整棵子树全展开，让命中项不被折叠藏住
+            // - 否则：非备份顶层目录展开 1 层（看到包名方便挑），
+            //   备份顶层（backup/backups/bak/.backup）连同内部嵌套都保持折叠
+            boolean hasSearch = terms != null;
+            for (int i = 0; i < packageTreeRoot.getChildCount(); i++) {
+                if (!(packageTreeRoot.getChildAt(i) instanceof CheckedTreeNode child)) continue;
+                if (hasSearch) {
+                    expandAllUnder(child);
+                } else if (!isBackupTopName(child.getUserObject())) {
+                    packageTree.expandPath(new TreePath(child.getPath()));
+                }
             }
         } finally {
             rebuildingPackageTree = false;
@@ -735,6 +738,88 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         updateSelectionSummary();
         revalidate();
         repaint();
+    }
+
+    /**
+     * 在 packageTreeRoot 下按 "/" 分段建（或复用）嵌套目录节点，返回最深层目录节点（包应挂在它下面）。
+     *
+     * <p>{@code "."} 视为"当前目录"特殊单段，建成单一顶层节点 {@code "(当前目录)"}；
+     * 其他多段 subDir（如 {@code backup/20260502_xumanyi/shared-tms}）按斜杠切开后逐层
+     * computeIfAbsent，保证 {@code backup} 这种顶层段全局只建一个节点。</p>
+     *
+     * @param subDir    包所在的 subDirectory 字符串（来自 PackageInfo.getSubDirectory()）
+     * @param dirByPath 路径前缀 → 节点缓存，键是累积的 "a/b/c" 形式串
+     * @return 包应直接挂载到的目录节点
+     */
+    private CheckedTreeNode resolveDirNode(String subDir, Map<String, CheckedTreeNode> dirByPath) {
+        if (".".equals(subDir)) {
+            return dirByPath.computeIfAbsent(".", k -> {
+                CheckedTreeNode node = new CheckedTreeNode("(当前目录)");
+                packageTreeRoot.add(node);
+                return node;
+            });
+        }
+        String[] segs = subDir.split("/");
+        CheckedTreeNode parent = packageTreeRoot;
+        StringBuilder accumulated = new StringBuilder();
+        for (String seg : segs) {
+            if (seg.isEmpty()) continue;
+            if (accumulated.length() > 0) accumulated.append("/");
+            accumulated.append(seg);
+            String key = accumulated.toString();
+            CheckedTreeNode existing = dirByPath.get(key);
+            if (existing == null) {
+                CheckedTreeNode created = new CheckedTreeNode(seg);
+                parent.add(created);
+                dirByPath.put(key, created);
+                parent = created;
+            } else {
+                parent = existing;
+            }
+        }
+        return parent;
+    }
+
+    /**
+     * 自底向上递归设置目录节点的勾选状态：仅当所有后代叶子（包节点）都被勾选时父级才勾选。
+     *
+     * <p>CheckedTreeNode 默认 {@code isChecked()=true}，如果不在初始化时统一回填，新建的目录
+     * 节点会以"勾选"状态出现（视觉上像默认全选），所以这里对所有非包节点都强制 setChecked。</p>
+     *
+     * @return 该子树下 {@code [叶子总数, 已勾叶子数]}，供上层聚合
+     */
+    private static int[] propagateDirChecked(CheckedTreeNode node) {
+        if (node.getChildCount() == 0) {
+            return new int[]{1, node.isChecked() ? 1 : 0};
+        }
+        int total = 0, checked = 0;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (node.getChildAt(i) instanceof CheckedTreeNode child) {
+                int[] r = propagateDirChecked(child);
+                total += r[0];
+                checked += r[1];
+            }
+        }
+        if (!(node.getUserObject() instanceof PackageNodeData)) {
+            node.setChecked(total > 0 && checked == total);
+        }
+        return new int[]{total, checked};
+    }
+
+    /** 顶层目录节点的显示名是否命中备份目录约定（backup/backups/bak/.backup）。 */
+    private static boolean isBackupTopName(Object userObj) {
+        return userObj instanceof String s
+                && com.flux.deploy.ftp.FtpOperations.BACKUP_DIR_NAMES.contains(s);
+    }
+
+    /** 把指定子树整棵展开（搜索激活时用，避免命中项被折叠藏住）。 */
+    private void expandAllUnder(CheckedTreeNode root) {
+        packageTree.expandPath(new TreePath(root.getPath()));
+        for (int i = 0; i < root.getChildCount(); i++) {
+            if (root.getChildAt(i) instanceof CheckedTreeNode child) {
+                expandAllUnder(child);
+            }
+        }
     }
 
     /** 包过滤匹配：包名 / 子目录 任意命中（子串或拼音），多关键字 AND */
