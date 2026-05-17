@@ -38,6 +38,13 @@ tasks.named("instrumentCode") {
     enabled = false
 }
 
+// 编译期开启 deprecation / unchecked lint，便于在控制台直接看到 Marketplace
+// Plugin Verifier 报的 deprecated API 使用，配合 :plugin:verifyPlugin 互相参照。
+tasks.named<JavaCompile>("compileJava") {
+    options.isDeprecation = true
+    options.compilerArgs.addAll(listOf("-Xlint:deprecation", "-Xlint:unchecked"))
+}
+
 intellijPlatform {
     pluginConfiguration {
         id = "com.flux.deploy.plugin"
@@ -54,6 +61,15 @@ intellijPlatform {
                 parseChangelog(rootProject.file("CHANGELOG.md").readText()),
                 limit = 5
             )
+        }
+    }
+
+    // ./gradlew :plugin:verifyPlugin —— 跑 Marketplace Plugin Verifier 本地复现。
+    // 同时跑 sinceBuild 对应的 2024.1 与 2024.3，覆盖大部分 deprecated/internal API 差异。
+    pluginVerification {
+        ides {
+            ide(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.1")
+            ide(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.3")
         }
     }
 }

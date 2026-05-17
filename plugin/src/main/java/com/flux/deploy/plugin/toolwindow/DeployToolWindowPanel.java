@@ -20,7 +20,7 @@ import com.flux.deploy.plugin.util.DeployRunLogger;
 import com.flux.deploy.plugin.util.DeployRunMeta;
 import com.flux.deploy.plugin.util.DeployRunStatus;
 import com.intellij.icons.AllIcons;
-import com.intellij.ide.plugins.PluginManagerCore;
+import com.intellij.ide.plugins.PluginManager;
 import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.Project;
@@ -1896,7 +1896,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @date 2026-05-08
      */
     private static String currentPluginVersion() {
-        var plugin = PluginManagerCore.getPlugin(PluginId.getId("com.flux.deploy.plugin"));
+        var plugin = PluginManager.getInstance().findEnabledPlugin(PluginId.getId("com.flux.deploy.plugin"));
         return plugin != null ? plugin.getVersion() : "unknown";
     }
 
@@ -1931,7 +1931,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         String ideVersion = "IntelliJ IDEA " + ApplicationInfo.getInstance().getFullVersion();
         String pluginVersion = "flux-deploy-plugin (unknown)";
-        var plugin = PluginManagerCore.getPlugin(PluginId.getId("com.flux.deploy.plugin"));
+        var plugin = PluginManager.getInstance().findEnabledPlugin(PluginId.getId("com.flux.deploy.plugin"));
         if (plugin != null) {
             pluginVersion = "flux-deploy-plugin " + plugin.getVersion();
         }

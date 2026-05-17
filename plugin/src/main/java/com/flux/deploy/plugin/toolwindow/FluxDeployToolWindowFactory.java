@@ -58,10 +58,14 @@ public class FluxDeployToolWindowFactory implements ToolWindowFactory {
 
     /**
      * 从 IDEA 插件管理器动态获取本插件版本号
+     *
+     * <p>使用公共 API {@link com.intellij.ide.plugins.PluginManager#findEnabledPlugin}
+     * 替代 internal {@code PluginManagerCore.getPlugin}，
+     * 通过 Marketplace Plugin Verifier。</p>
      */
     private static String getPluginVersion() {
         com.intellij.ide.plugins.IdeaPluginDescriptor plugin =
-                com.intellij.ide.plugins.PluginManagerCore.getPlugin(
+                com.intellij.ide.plugins.PluginManager.getInstance().findEnabledPlugin(
                         com.intellij.openapi.extensions.PluginId.getId("com.flux.deploy.plugin"));
         return plugin != null ? plugin.getVersion() : "1.0.0";
     }
