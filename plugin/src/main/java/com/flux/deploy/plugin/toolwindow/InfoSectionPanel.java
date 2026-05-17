@@ -5,6 +5,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBTextField;
+import com.intellij.util.ui.NamedColorUtil;
 
 import javax.swing.*;
 import java.awt.*;
@@ -98,7 +99,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
 
         this.updateNoteCheckBox = new JCheckBox("更新版本记录", true);
         this.updateNoteCheckBox.setToolTipText(
-                "<html>上传成功后在远程目录追加 <b>*_update_note.txt</b> 更新记录，"
+                "<html>上传成功后在远程目录追加 <b>*_update_notes.txt</b> 更新记录，"
                 + "<br>写入 取包/传包 两行，包含时间、开发、任务、客服、包名。"
                 + "<br>不勾选则跳过版本记录。</html>");
         backupCheckBox.setToolTipText(
@@ -127,11 +128,12 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
 
         restoreFromCache();
 
-        // 统一单网格：所有 label + field 共享同一列宽，确保视觉对齐
+        // 统一单网格：所有 label + field 共享同一列宽，确保视觉对齐。
+        // 标签右对齐 + 不带冒号，跟源工程框的 addFormRow 同款规格。
         JPanel container = new JPanel(new GridBagLayout());
         GridBagConstraints g = new GridBagConstraints();
         g.anchor = GridBagConstraints.WEST;
-        g.insets = new Insets(2, 2, 2, 2);
+        g.insets = new Insets(2, 0, 2, 0);
 
         // 行 0：勾选项，跨两列；备份选项后附小号灰色斜体使用提示
         g.gridy = 0;
@@ -141,7 +143,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         checkRow.add(backupCheckBox);
         JBLabel backupHint = new JBLabel("· 重复备份会覆盖原包，多次更新请取消");
         backupHint.setFont(backupHint.getFont().deriveFont(Font.ITALIC, 11f));
-        backupHint.setForeground(UIManager.getColor("Label.disabledForeground"));
+        backupHint.setForeground(NamedColorUtil.getInactiveTextColor());
         backupHint.setToolTipText(
                 "<html>若同一开发在同一天多次更新同一个包，"
                 + "<br>后一次备份会覆盖前一次，原始远程包会永久丢失。"
@@ -197,7 +199,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         });
 
         backupLocationRow = new JPanel(new BorderLayout(8, 0));
-        backupLocationRow.add(new JBLabel("备份至："), BorderLayout.WEST);
+        backupLocationRow.add(PanelChromes.rightLabel("备份至"), BorderLayout.WEST);
         backupLocationRow.add(backupLocationLabel, BorderLayout.CENTER);
 
         g.gridy = 1; g.gridx = 0; g.gridwidth = 2;
@@ -206,27 +208,39 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         g.gridwidth = 1; g.weightx = 0; g.fill = GridBagConstraints.NONE;
 
         // 行 2：开发（仅在需要时显示：勾选了版本记录或执行备份）
-        JBLabel operatorLabel = new JBLabel("开发：");
+        JBLabel operatorLabel = PanelChromes.rightLabel("开发");
         g.gridy = 2; g.gridwidth = 1;
-        g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.gridx = 0; g.anchor = GridBagConstraints.EAST;
+        g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.insets = new Insets(2, 0, 2, 8);
         container.add(operatorLabel, g);
-        g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.gridx = 1; g.anchor = GridBagConstraints.WEST;
+        g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.insets = new Insets(2, 0, 2, 0);
         container.add(operatorField, g);
 
         // 行 3 + 4：任务 / 客服，单独记录引用以便整体显隐
-        JBLabel taskLabel = new JBLabel("任务：");
-        JBLabel customerLabel = new JBLabel("客服：");
+        JBLabel taskLabel = PanelChromes.rightLabel("任务");
+        JBLabel customerLabel = PanelChromes.rightLabel("客服");
 
         g.gridy = 3;
-        g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.gridx = 0; g.anchor = GridBagConstraints.EAST;
+        g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.insets = new Insets(2, 0, 2, 8);
         container.add(taskLabel, g);
-        g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.gridx = 1; g.anchor = GridBagConstraints.WEST;
+        g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.insets = new Insets(2, 0, 2, 0);
         container.add(taskIdField, g);
 
         g.gridy = 4;
-        g.gridx = 0; g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.gridx = 0; g.anchor = GridBagConstraints.EAST;
+        g.fill = GridBagConstraints.NONE; g.weightx = 0;
+        g.insets = new Insets(2, 0, 2, 8);
         container.add(customerLabel, g);
-        g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.gridx = 1; g.anchor = GridBagConstraints.WEST;
+        g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
+        g.insets = new Insets(2, 0, 2, 0);
         container.add(customerIdField, g);
 
         // fieldsPanel 不再作为容器使用，但保留字段以兼容既有 reset() 逻辑

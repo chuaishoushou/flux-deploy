@@ -63,7 +63,7 @@ public class FtpBrowseService {
     /** 最大递归深度（从系统根算起）：避免误扫无关的大型子树 */
     private static final int MAX_SCAN_DEPTH = 5;
     /** 最大条目数：兜底防止 FTP 结构意外庞大导致卡死 */
-    private static final int MAX_SCAN_ENTRIES = 2000;
+    private static final int MAX_SCAN_ENTRIES = 10000;
 
     /**
      * 扫描系统目录下的可部署包（结构化数据，递归）

@@ -31,19 +31,71 @@ import java.util.stream.Stream;
  */
 public class StagingPackageBuilder {
 
+    /**
+     * 一次 jar 补丁操作的变更明细
+     *
+     * <p>三类变更分别记录条目完整路径，用于上层（如 war 嵌入完成后）汇总打印
+     * "包内更新了哪些文件"。同一类内按写入顺序保留，便于阅读。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    public static final class PatchManifest {
+        private final List<String> replaced;
+        private final List<String> added;
+        private final List<String> deleted;
+
+        private PatchManifest(List<String> replaced, List<String> added, List<String> deleted) {
+            this.replaced = List.copyOf(replaced);
+            this.added = List.copyOf(added);
+            this.deleted = List.copyOf(deleted);
+        }
+
+        public List<String> getReplaced() { return replaced; }
+        public List<String> getAdded() { return added; }
+        public List<String> getDeleted() { return deleted; }
+        public int total() { return replaced.size() + added.size() + deleted.size(); }
+        public boolean isEmpty() { return total() == 0; }
+    }
+
+    /**
+     * {@link #patchExistingJar} 的返回值：打补丁后的 jar 路径 + 变更明细
+     *
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    public static final class PatchOutcome {
+        private final Path patchedJar;
+        private final PatchManifest manifest;
+
+        public PatchOutcome(Path patchedJar, PatchManifest manifest) {
+            this.patchedJar = patchedJar;
+            this.manifest = manifest;
+        }
+
+        public Path getPatchedJar() { return patchedJar; }
+        public PatchManifest getManifest() { return manifest; }
+    }
+
     private final String modulePath;
     private final String artifactFileName;
     private final List<String> changedSourceFiles;
     private final Consumer<String> logCallback;
 
     /**
-     * 跳过编译模式：true 时静态资源直接从 src/main/resources、src/main/java（非 .java）下读取，
-     * 不再走 target/classes。仅当上层调用方确认"勾选清单中无 .java 文件"时才设为 true。
-     */
-    private boolean skipCompile = false;
-
-    /**
      * 构造暂存包构建器
+     *
+     * <p>资源解析策略（无"跳过编译"开关）：</p>
+     * <ul>
+     *   <li>{@code .java} → 必须读 {@code target/classes/<x>.class}（无源等价物）；
+     *       上层调用方应在调用本类前用
+     *       {@link com.flux.deploy.plugin.util.ArtifactPresenceValidator} 校验存在性</li>
+     *   <li>{@code src/main/resources/<x>} 或 {@code src/main/java/<x>}（非 .java）→
+     *       优先读 {@code target/classes/<x>}（携带 mvn process-resources 的 filtering 结果），
+     *       缺失时回退到源文件</li>
+     * </ul>
+     *
+     * <p>插件不再触发任何编译；缺 .class 由调用方在部署前以弹窗提前拒绝，本类不再做编译类自检。</p>
      *
      * @param modulePath         模块根目录路径
      * @param artifactFileName   产物文件名
@@ -61,28 +113,88 @@ public class StagingPackageBuilder {
     }
 
     /**
-     * 设置"跳过编译"模式
+     * 构建结果：暂存包路径 + 下载到本地的原包路径
      *
-     * <p>开启后，静态资源（.js / .css / .csv / .properties / .xml 等）直接从源目录读取，
-     * 不再依赖 target/classes 下的产物。适用于勾选清单中**完全不含 .java** 的场景。</p>
+     * <p>{@code originalDownloaded} 由调用方负责清理（{@link com.flux.deploy.deploy.DeployPipeline}
+     * 在流水线收尾统一删除），便于后续门禁（如 BackupGate）复用同一份字节，
+     * 避免对同一字节再做一次远端下载。</p>
      *
-     * <p>调用方必须自行保证 changedSourceFiles 内不含 .java，否则会因 jar 内 .class 陈旧导致
-     * 部署旧代码。当前 UI 的"自动判定"规则已确保这一点。</p>
-     *
-     * @param skipCompile 是否跳过编译；默认 false
-     * @return 当前对象以支持链式调用
-     * @author xumanyi
-     * @date 2026-04-29
+     * @author claude
+     * @date 2026-05-08
      */
-    public StagingPackageBuilder setSkipCompile(boolean skipCompile) {
-        this.skipCompile = skipCompile;
-        return this;
+    public static final class BuildResult {
+        private final Path staging;
+        private final Path originalDownloaded;
+
+        public BuildResult(Path staging, Path originalDownloaded) {
+            this.staging = staging;
+            this.originalDownloaded = originalDownloaded;
+        }
+
+        public Path getStaging() { return staging; }
+        public Path getOriginalDownloaded() { return originalDownloaded; }
     }
 
     /**
-     * 构建暂存包
+     * 构建暂存包（保留下载的原包）
      *
-     * <p>下载远程包 → 定位变更 class → 替换到包中 → 返回暂存包路径</p>
+     * <p>下载远程包 → 定位变更 class → 替换到包中 → 返回暂存包 + 原包本地路径。</p>
+     *
+     * <p>与 {@link #build} 的差异：不删除下载到本地的原包，由调用方接管所有权用于复用
+     * （详见 {@link BuildResult#getOriginalDownloaded()}）。</p>
+     *
+     * @param ftpHost     FTP 主机
+     * @param ftpPort     FTP 端口
+     * @param ftpUsername FTP 用户名
+     * @param ftpPassword FTP 密码
+     * @param remotePath  远程包完整路径
+     * @return 构建结果（含暂存包 + 本地原包），未找到变更 class 时返回 null
+     * @author claude
+     * @date 2026-05-08
+     */
+    public BuildResult buildKeepingOriginal(String ftpHost, int ftpPort,
+                                             String ftpUsername, String ftpPassword,
+                                             String remotePath) throws IOException {
+        Path moduleRoot = Path.of(modulePath);
+        Path targetDir = moduleRoot.resolve("target");
+        Path classesDir = targetDir.resolve("classes");
+
+        logCallback.accept("[暂存包] 分析变更文件...");
+        Map<String, Path> classEntries = resolveChangedClasses(moduleRoot, classesDir);
+
+        if (classEntries.isEmpty()) {
+            logCallback.accept("[错误] 未找到变更文件对应的 class 文件，请确认已编译");
+            return null;
+        }
+
+        logCallback.accept("[暂存包] 待替换/新增 " + classEntries.size()
+                + " 条，待删除 " + deleteEntries.size() + " 条");
+        for (String entry : classEntries.keySet()) {
+            logCallback.accept("  → " + entry);
+        }
+
+        logCallback.accept("[暂存包] 下载远程包: " + remotePath);
+        Path downloadedPackage = targetDir.resolve("__remote_" + artifactFileName);
+        downloadRemotePackage(ftpHost, ftpPort, ftpUsername, ftpPassword, remotePath, downloadedPackage);
+        logCallback.accept("[暂存包] 下载完成 (" + Files.size(downloadedPackage) / 1024 + " KB)");
+
+        Path stagingPackage = targetDir.resolve("__staging_" + artifactFileName);
+        logCallback.accept("[暂存包] 替换 class 文件...");
+        PatchManifest manifest = patchJar(downloadedPackage, stagingPackage, classEntries);
+        logCallback.accept("[暂存包] 已变更 " + manifest.total() + " 个条目（替换 "
+                + manifest.getReplaced().size() + "，新增 " + manifest.getAdded().size()
+                + "，删除 " + manifest.getDeleted().size() + "），暂存包已生成 ("
+                + Files.size(stagingPackage) / 1024 + " KB)");
+
+        // 不删除 downloadedPackage：所有权移交给调用方，用于后续 BackupGate 复用
+        return new BuildResult(stagingPackage, downloadedPackage);
+    }
+
+    /**
+     * 构建暂存包（兼容入口，下载完即删除原包）
+     *
+     * <p>新代码请使用 {@link #buildKeepingOriginal}：保留下载的原包供后续门禁复用，
+     * 避免对同一字节做两次远端下载（"1 下 + 2 上"优化）。</p>
      *
      * @param ftpHost     FTP 主机
      * @param ftpPort     FTP 端口
@@ -95,42 +207,13 @@ public class StagingPackageBuilder {
      */
     public Path build(String ftpHost, int ftpPort, String ftpUsername, String ftpPassword,
                       String remotePath) throws IOException {
-
-        Path moduleRoot = Path.of(modulePath);
-        Path targetDir = moduleRoot.resolve("target");
-        Path classesDir = targetDir.resolve("classes");
-
-        // 1. 查找变更文件对应的 class 文件
-        logCallback.accept("[暂存包] 分析变更文件...");
-        Map<String, Path> classEntries = resolveChangedClasses(moduleRoot, classesDir);
-
-        if (classEntries.isEmpty()) {
-            logCallback.accept("[错误] 未找到变更文件对应的 class 文件，请确认已编译");
+        BuildResult res = buildKeepingOriginal(ftpHost, ftpPort, ftpUsername, ftpPassword, remotePath);
+        if (res == null) {
             return null;
         }
-
-        logCallback.accept("[暂存包] 找到 " + classEntries.size() + " 个 class 文件需要替换：");
-        for (String entry : classEntries.keySet()) {
-            logCallback.accept("  → " + entry);
-        }
-
-        // 2. 下载远程原包
-        logCallback.accept("[暂存包] 下载远程包: " + remotePath);
-        Path downloadedPackage = targetDir.resolve("__remote_" + artifactFileName);
-        downloadRemotePackage(ftpHost, ftpPort, ftpUsername, ftpPassword, remotePath, downloadedPackage);
-        logCallback.accept("[暂存包] 下载完成 (" + Files.size(downloadedPackage) / 1024 + " KB)");
-
-        // 3. 替换 class 文件，生成暂存包
-        Path stagingPackage = targetDir.resolve("__staging_" + artifactFileName);
-        logCallback.accept("[暂存包] 替换 class 文件...");
-        int replaced = patchJar(downloadedPackage, stagingPackage, classEntries);
-        logCallback.accept("[暂存包] 已替换 " + replaced + " 个条目，暂存包已生成 ("
-                + Files.size(stagingPackage) / 1024 + " KB)");
-
-        // 4. 清理下载的原包
-        Files.deleteIfExists(downloadedPackage);
-
-        return stagingPackage;
+        // 兼容旧契约：调用方不接管原包所有权 → 立即清理
+        try { Files.deleteIfExists(res.getOriginalDownloaded()); } catch (IOException ignored) {}
+        return res.getStaging();
     }
 
     /**
@@ -171,10 +254,10 @@ public class StagingPackageBuilder {
                 + " 条，待删除 " + deleteEntries.size() + " 条");
 
         Files.createDirectories(outputPath.getParent());
-        int count = patchJar(localPackage, outputPath, classEntries);
-        logCallback.accept("[本地补丁] 已变更 " + count + " 个条目，输出包: "
+        PatchManifest manifest = patchJar(localPackage, outputPath, classEntries);
+        logCallback.accept("[本地补丁] 已变更 " + manifest.total() + " 个条目，输出包: "
                 + outputPath.getFileName() + " (" + Files.size(outputPath) / 1024 + " KB)");
-        return count;
+        return manifest.total();
     }
 
     /**
@@ -201,11 +284,14 @@ public class StagingPackageBuilder {
      * <p>用于 WAR 嵌入场景：从远程 WAR 中提取嵌入 JAR 后，
      * 只替换修改的 class 而不是整个替换 JAR。</p>
      *
+     * <p>返回 {@link PatchOutcome}（含变更明细）以便上层在 war 嵌入完成时
+     * 汇总打印"本次包内具体更新了哪些 class / 资源"。无可补丁内容时返回 null。</p>
+     *
      * @param existingJar 远程提取的嵌入 JAR
      * @param outputDir   临时输出目录
-     * @return 打好补丁的 JAR 路径，失败返回 null
+     * @return 补丁产物（含 jar 路径与变更明细）；无变更可做时返回 null
      */
-    public Path patchExistingJar(Path existingJar, Path outputDir) throws IOException {
+    public PatchOutcome patchExistingJar(Path existingJar, Path outputDir) throws IOException {
         Path moduleRoot = Path.of(modulePath);
         Path classesDir = moduleRoot.resolve("target/classes");
 
@@ -218,11 +304,11 @@ public class StagingPackageBuilder {
 
         // 对提取的 JAR 做补丁；不再打"找到 N 个 class 需要替换"——下面那行结果已包含同等信息
         Path patchedJar = outputDir.resolve("patched-" + existingJar.getFileName());
-        int count = patchJar(existingJar, patchedJar, classEntries);
-        logCallback.accept("[补丁] 替换 " + count + " 个 class"
+        PatchManifest manifest = patchJar(existingJar, patchedJar, classEntries);
+        logCallback.accept("[补丁] 替换 " + manifest.total() + " 个 class"
                 + (deleteEntries.isEmpty() ? "" : "（含 " + deleteEntries.size() + " 个删除）"));
 
-        return patchedJar;
+        return new PatchOutcome(patchedJar, manifest);
     }
 
     /**
@@ -390,38 +476,63 @@ public class StagingPackageBuilder {
         }
 
         // 2. src/main/resources/ → JAR: 根目录 / WAR: WEB-INF/classes/
-        // skipCompile=true 时直接读源文件（用户未编译，target/classes 下可能是旧资源或不存在）；
-        // skipCompile=false 时优先走 target/classes（mvn 已经跑过 process-resources，含 filtering 后内容）
+        // 优先 target/classes（携带 mvn process-resources filtering 后内容），缺失则回退源文件。
+        // 插件不再触发 mvn；如果用户做过完整编译，target/classes 应已就绪。
         int resIdx = pathStr.indexOf("src/main/resources/");
         if (resIdx >= 0) {
             String resRelative = pathStr.substring(resIdx + "src/main/resources/".length());
-            Path resolved = skipCompile
-                    ? sourcePath
-                    : moduleRoot.resolve("target/classes").resolve(resRelative);
-            if (Files.exists(resolved)) {
+            Path classesPath = moduleRoot.resolve("target/classes").resolve(resRelative);
+            Path resolved;
+            boolean fromSource;
+            if (Files.exists(classesPath)) {
+                resolved = classesPath;
+                fromSource = false;
+            } else if (Files.exists(sourcePath)) {
+                resolved = sourcePath;
+                fromSource = true;
+            } else {
+                // 两路都没有：保持兼容（继续走下一段查找）
+                resolved = null;
+                fromSource = false;
+            }
+            if (resolved != null) {
                 // WAR 包：resources 打包到 WEB-INF/classes/ 下
                 String entryPath = isWar ? "WEB-INF/classes/" + resRelative : resRelative;
                 result.put(entryPath, resolved);
-                if (skipCompile) {
-                    logCallback.accept("[源] " + resRelative + " ← src/main/resources/" + resRelative);
+                if (fromSource) {
+                    logCallback.accept("[源] " + resRelative
+                            + " ← src/main/resources/" + resRelative
+                            + "（target/classes 未找到，回退源文件）");
                 }
                 return;
             }
         }
 
         // 3. src/main/java/ 下的非 .java 文件（如 .xml mapper 文件）
-        // 同 2 的策略：skipCompile=true 时直接读源文件；否则走 target/classes
+        // 同 2 的策略：优先 target/classes，缺失回退源文件。
         int javaIdx = pathStr.indexOf("src/main/java/");
         if (javaIdx >= 0) {
             String javaRelative = pathStr.substring(javaIdx + "src/main/java/".length());
-            Path resolved = skipCompile
-                    ? sourcePath
-                    : moduleRoot.resolve("target/classes").resolve(javaRelative);
-            if (Files.exists(resolved)) {
+            Path classesPath = moduleRoot.resolve("target/classes").resolve(javaRelative);
+            Path resolved;
+            boolean fromSource;
+            if (Files.exists(classesPath)) {
+                resolved = classesPath;
+                fromSource = false;
+            } else if (Files.exists(sourcePath)) {
+                resolved = sourcePath;
+                fromSource = true;
+            } else {
+                resolved = null;
+                fromSource = false;
+            }
+            if (resolved != null) {
                 String entryPath = isWar ? "WEB-INF/classes/" + javaRelative : javaRelative;
                 result.put(entryPath, resolved);
-                if (skipCompile) {
-                    logCallback.accept("[源] " + javaRelative + " ← src/main/java/" + javaRelative);
+                if (fromSource) {
+                    logCallback.accept("[源] " + javaRelative
+                            + " ← src/main/java/" + javaRelative
+                            + "（target/classes 未找到，回退源文件）");
                 }
                 return;
             }
@@ -672,12 +783,14 @@ public class StagingPackageBuilder {
      * @param originalJar  原始 jar/war 文件
      * @param outputJar    输出暂存包路径
      * @param classEntries 要替换的条目（key=jar条目路径, value=新class文件路径）
-     * @return 实际替换/新增的条目数
+     * @return 变更明细 {@link PatchManifest}（替换 / 新增 / 删除三类条目）
      * @author xumanyi
      * @date 2026-03-27
      */
-    private int patchJar(Path originalJar, Path outputJar, Map<String, Path> classEntries) throws IOException {
-        int count = 0;
+    private PatchManifest patchJar(Path originalJar, Path outputJar, Map<String, Path> classEntries) throws IOException {
+        List<String> replaced = new java.util.ArrayList<>();
+        List<String> added = new java.util.ArrayList<>();
+        List<String> deleted = new java.util.ArrayList<>();
         Set<String> processedEntries = new HashSet<>();
 
         try (JarFile jar = new JarFile(originalJar.toFile());
@@ -691,8 +804,8 @@ public class StagingPackageBuilder {
 
                 // 检查是否需要删除此条目
                 if (shouldDelete(entryName)) {
-                    logCallback.accept("  - 删除: " + entryName);
-                    count++;
+                    logCallback.accept("    删除 " + entryName);
+                    deleted.add(entryName);
                     continue; // 跳过，不写入输出包
                 }
 
@@ -703,7 +816,7 @@ public class StagingPackageBuilder {
                     Files.copy(classEntries.get(entryName), jos);
                     jos.closeEntry();
                     processedEntries.add(entryName);
-                    count++;
+                    replaced.add(entryName);
                 } else {
                     // 原样复制
                     JarEntry newEntry = new JarEntry(entry);
@@ -723,12 +836,12 @@ public class StagingPackageBuilder {
                     jos.putNextEntry(newEntry);
                     Files.copy(e.getValue(), jos);
                     jos.closeEntry();
-                    count++;
-                    logCallback.accept("  + 新增: " + e.getKey());
+                    added.add(e.getKey());
+                    logCallback.accept("    新增 " + e.getKey());
                 }
             }
         }
 
-        return count;
+        return new PatchManifest(replaced, added, deleted);
     }
 }

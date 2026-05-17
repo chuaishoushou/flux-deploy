@@ -85,7 +85,12 @@ public class LocalPackagePatchService {
     }
 
     /**
-     * 执行本地模式补丁
+     * 执行本地模式补丁/整包替换。
+     *
+     * <p>插件不再触发任何编译；调用方应在调用本方法前用
+     * {@link com.flux.deploy.plugin.util.ArtifactPresenceValidator} 校验
+     * {@code target/classes/<x>.class} 与 {@code target/<artifactFileName>} 的存在性，
+     * 缺失时弹窗提示用户手动 build / mvn package 后重试。</p>
      *
      * @param mode             更新模式（整包更新 / 增量更新；CLI 内部还有 AUTO_DETECT 仅 patch-local 用）
      * @param modulePath       源工程根目录
@@ -95,31 +100,13 @@ public class LocalPackagePatchService {
      * @param outputDir        输出目录
      * @param logCallback      日志回调
      * @return 执行结果
-     */
-    public static LocalPatchResult execute(DeployMode mode,
-                                            String modulePath, String artifactFileName,
-                                            List<String> changedFiles,
-                                            String localPackagePath, String outputDir,
-                                            Consumer<String> logCallback) {
-        return execute(mode, modulePath, artifactFileName, changedFiles,
-                localPackagePath, outputDir, false, logCallback);
-    }
-
-    /**
-     * 执行本地模式补丁/整包替换（带 skipCompile 开关）
-     *
-     * <p>调用方根据"勾选清单是否含 .java"传入 {@code skipCompile}。开启后，资源文件
-     * 直接从 src/main/resources、src/main/java 下读取，不依赖 target/classes。</p>
-     *
-     * @param skipCompile 是否跳过编译模式：true 时静态资源直接从源目录读
      * @author xumanyi
-     * @date 2026-04-29
+     * @date 2026-05-07
      */
     public static LocalPatchResult execute(DeployMode mode,
                                             String modulePath, String artifactFileName,
                                             List<String> changedFiles,
                                             String localPackagePath, String outputDir,
-                                            boolean skipCompile,
                                             Consumer<String> logCallback) {
         try {
             Path localPackage = Path.of(localPackagePath);
@@ -157,11 +144,11 @@ public class LocalPackagePatchService {
                     case JAR_TO_JAR:
                     case WAR_TO_WAR:
                         changed = patchDirect(modulePath, artifactFileName, changedFiles,
-                                localPackage, outputPackage, skipCompile, logCallback);
+                                localPackage, outputPackage, logCallback);
                         break;
                     case JAR_TO_WAR_LIB:
                         changed = patchWarLib(modulePath, artifactFileName, changedFiles,
-                                localPackage, outputPackage, skipCompile, logCallback);
+                                localPackage, outputPackage, logCallback);
                         break;
                     default:
                         return fail(logCallback, "未知场景");
@@ -229,9 +216,10 @@ public class LocalPackagePatchService {
                     logCallback.accept("[整包] 候选 " + candidates.size()
                             + " 个，精确替换版本一致的: " + targetLib);
                 }
-                String exactBaseName = stripExt(targetLib);
+                // WarEmbedUtil 现在按"完整 jar 文件名"精确匹配，必须传含扩展名的 targetLib，
+                // 不能再传 stripExt 后的"前缀"（旧实现是 startsWith，已改为 equals）
                 WarEmbedUtil.EmbedResult embed = WarEmbedUtil.embedJar(
-                        localPackage, freshArtifact, exactBaseName, outputPackage);
+                        localPackage, freshArtifact, targetLib, outputPackage);
                 if (!embed.isVerified()) {
                     throw new IOException("WAR 嵌入校验失败: " + embed.getMessage());
                 }
@@ -294,11 +282,9 @@ public class LocalPackagePatchService {
     private static int patchDirect(String modulePath, String artifactFileName,
                                     List<String> changedFiles,
                                     Path localPackage, Path outputPackage,
-                                    boolean skipCompile,
                                     Consumer<String> logCallback) throws IOException {
         StagingPackageBuilder builder = new StagingPackageBuilder(
-                modulePath, artifactFileName, changedFiles, logCallback)
-                .setSkipCompile(skipCompile);
+                modulePath, artifactFileName, changedFiles, logCallback);
         return builder.buildFromLocal(localPackage, outputPackage);
     }
 
@@ -311,7 +297,6 @@ public class LocalPackagePatchService {
     private static int patchWarLib(String modulePath, String artifactFileName,
                                     List<String> changedFiles,
                                     Path localWar, Path outputWar,
-                                    boolean skipCompile,
                                     Consumer<String> logCallback) throws IOException {
         String prefix = extractArtifactPrefix(artifactFileName);
         logCallback.accept("[本地] 在 WAR 内 WEB-INF/lib 下定位前缀=" + prefix + " 的 JAR...");
@@ -319,19 +304,20 @@ public class LocalPackagePatchService {
         // 1. 收集所有前缀匹配的 lib jar（war 内可能存在同前缀不同版本的多份）
         List<String> candidates = collectInnerLibJars(localWar, prefix);
         if (candidates.isEmpty()) {
-            throw new IOException("WAR 的 WEB-INF/lib 下未找到匹配 [" + prefix + "] 的 JAR");
+            throw new IOException("目标 WAR 内不存在 " + artifactFileName
+                    + "（WEB-INF/lib 下没有同名 JAR）");
         }
         if (candidates.size() > 1) {
-            logCallback.accept("[本地] 发现 " + candidates.size() + " 个前缀匹配的 JAR: "
+            logCallback.accept("[本地] 发现 " + candidates.size() + " 个同名 JAR: "
                     + String.join(", ", candidates) + "，按版本一致性挑选");
         }
 
         // 2. 从候选集中挑版本严格一致的那个
         String innerLibName = pickVersionMatching(candidates, artifactFileName);
         if (innerLibName == null) {
-            throw new IOException("WAR 的 WEB-INF/lib 下存在前缀 [" + prefix
-                    + "] 的 JAR（" + String.join(", ", candidates)
-                    + "），但没有版本与源产物 " + artifactFileName + " 一致的。");
+            throw new IOException("目标 WAR 内不存在 " + artifactFileName
+                    + "（WEB-INF/lib 下只有版本不一致的 [" + String.join(", ", candidates)
+                    + "]，必须文件名完全一致才能替换）");
         }
         logCallback.accept("[本地] 定位到: WEB-INF/lib/" + innerLibName + "，版本校验通过");
 
@@ -345,17 +331,15 @@ public class LocalPackagePatchService {
             // 4. 对 lib jar 打补丁
             Path patchedJar = tempDir.resolve("patched-" + innerLibName);
             StagingPackageBuilder builder = new StagingPackageBuilder(
-                    modulePath, artifactFileName, changedFiles, logCallback)
-                    .setSkipCompile(skipCompile);
+                    modulePath, artifactFileName, changedFiles, logCallback);
             int changed = builder.buildFromLocal(extractedJar, patchedJar);
             if (changed <= 0) return 0;
 
-            // 5. 回写 war — 传 innerLibName 的 base name 作为精确前缀，
-            //    避免 WarEmbedUtil.embedJar 在同前缀多版本场景下挑错
-            String exactBaseName = stripExt(innerLibName);
+            // 5. 回写 war — 传 innerLibName 完整文件名做精确匹配
+            //    （WarEmbedUtil.embedJar 已强制要求完整 jar 文件名，equals 比对）
             logCallback.accept("[本地] 回写 WAR（精确替换 " + innerLibName + "）...");
             WarEmbedUtil.EmbedResult embed = WarEmbedUtil.embedJar(
-                    localWar, patchedJar, exactBaseName, outputWar);
+                    localWar, patchedJar, innerLibName, outputWar);
             if (!embed.isVerified()) {
                 throw new IOException("WAR 回写校验失败: " + embed.getMessage());
             }
@@ -415,12 +399,15 @@ public class LocalPackagePatchService {
     /**
      * 提取 artifactId 前缀，例如 scev6-utils-tms-10.0.0-SNAPSHOT.jar → scev6-utils-tms
      *
+     * <p>对外公开供 {@link com.flux.deploy.plugin.service.DeployExecutionService} 等共享同一套
+     * "前缀候选 + 版本一致性挑选"逻辑，统一 FTP / 本地两条嵌入路径上的精确匹配规则。</p>
+     *
      * @param fileName 产物文件名（含扩展名）
      * @return artifactId 前缀；无法识别版本号分隔符时返回去扩展名结果
      * @author xumanyi
      * @date 2026-04-17
      */
-    private static String extractArtifactPrefix(String fileName) {
+    public static String extractArtifactPrefix(String fileName) {
         String name = stripExt(fileName);
         for (int i = 1; i < name.length(); i++) {
             if (name.charAt(i - 1) == '-' && Character.isDigit(name.charAt(i))) {
@@ -550,14 +537,15 @@ public class LocalPackagePatchService {
                 String prefix = extractArtifactPrefix(artifactFileName);
                 List<String> candidates = collectInnerLibJars(localPackage, prefix);
                 if (candidates.isEmpty()) {
-                    return PreCheckResult.fail("WAR 的 WEB-INF/lib 下未找到匹配 [" + prefix + "] 的 JAR");
+                    return PreCheckResult.fail("目标 WAR 内不存在 " + artifactFileName
+                            + "（WEB-INF/lib 下没有同名 JAR）");
                 }
                 // 从候选中挑版本严格一致的，没找到则报错列出候选
                 String innerLibName = pickVersionMatching(candidates, artifactFileName);
                 if (innerLibName == null) {
-                    return PreCheckResult.fail("WAR 的 WEB-INF/lib 下存在前缀 [" + prefix
-                            + "] 的 JAR（" + String.join(", ", candidates)
-                            + "），但没有版本与源产物 " + artifactFileName + " 一致的。");
+                    return PreCheckResult.fail("目标 WAR 内不存在 " + artifactFileName
+                            + "（WEB-INF/lib 下只有版本不一致的 [" + String.join(", ", candidates)
+                            + "]，必须文件名完全一致才能替换）");
                 }
                 if (candidates.size() > 1) {
                     logCallback.accept("[本地] 候选 " + candidates.size() + " 个，挑选版本一致的: " + innerLibName);
@@ -613,21 +601,16 @@ public class LocalPackagePatchService {
     }
 
     /**
-     * 旧接口：返回 war 内第一个前缀匹配的 jar（不做版本校验）。
-     * 当前改用 {@link #collectInnerLibJars} + {@link #pickVersionMatching} 组合以支持多版本场景。
-     */
-    private static String findInnerLibJar(Path war, String prefix) throws IOException {
-        List<String> all = collectInnerLibJars(war, prefix);
-        return all.isEmpty() ? null : all.get(0);
-    }
-
-    /**
      * 列出 war 内 WEB-INF/lib 下所有前缀匹配且形如 {@code prefix-{数字}...jar} 的 jar 名
+     *
+     * <p>对外公开：所有需要在 war 内按 artifact 前缀枚举候选 jar 的代码都应走这里，
+     * 杜绝再写"裸 startsWith(prefix)"的简单前缀匹配（会把 {@code scev6-utils-objs-*}
+     * 等同前缀 sibling 误命中，曾导致主包被覆盖）。</p>
      *
      * @author xumanyi
      * @date 2026-04-19
      */
-    private static List<String> collectInnerLibJars(Path war, String prefix) throws IOException {
+    public static List<String> collectInnerLibJars(Path war, String prefix) throws IOException {
         List<String> result = new ArrayList<>();
         try (JarFile warJar = new JarFile(war.toFile())) {
             Enumeration<JarEntry> entries = warJar.entries();
@@ -651,11 +634,16 @@ public class LocalPackagePatchService {
     /**
      * 从候选 lib jar 里挑一个版本与源产物完全一致的（去扩展名 + 不区分大小写）
      *
+     * <p>对外公开：和 {@link #collectInnerLibJars} 配对使用。
+     * 调用方拿到精确匹配的完整 jar 文件名后，必须用它（而非 prefix）传给
+     * {@link com.flux.deploy.util.WarEmbedUtil#embedJar} 与 extract 链路，
+     * 才能保证"抽出"和"写回"在同一个 jar 上做。</p>
+     *
      * @return 匹配项；没有匹配返回 null
      * @author xumanyi
      * @date 2026-04-19
      */
-    private static String pickVersionMatching(List<String> candidates, String expected) {
+    public static String pickVersionMatching(List<String> candidates, String expected) {
         String expBase = stripExt(expected);
         for (String c : candidates) {
             if (stripExt(c).equalsIgnoreCase(expBase)) return c;

@@ -25,6 +25,15 @@ public class TargetPackage {
     /** 本地暂存包路径 */
     private Path localStagingFile;
 
+    /**
+     * 备份阶段下载到本地的远端原包副本（"1 下 + 2 上"复用）。
+     *
+     * <p>{@link com.flux.deploy.deploy.gates.BackupGate} 完成 download → upload-to-backup 后
+     * 不再立刻删除本地 temp 文件，而是把路径挂在本字段上交给后续门禁（如 StagingPackageBuilder）
+     * 复用，避免对同一字节再做一次远端下载。流水线收尾必须遍历 targets 删除这些 temp 文件。</p>
+     */
+    private Path localOriginalCopy;
+
     /** 备份路径（远程 FTP） */
     private String backupRemotePath;
 
@@ -83,6 +92,9 @@ public class TargetPackage {
 
     public Path getLocalStagingFile() { return localStagingFile; }
     public void setLocalStagingFile(Path localStagingFile) { this.localStagingFile = localStagingFile; }
+
+    public Path getLocalOriginalCopy() { return localOriginalCopy; }
+    public void setLocalOriginalCopy(Path localOriginalCopy) { this.localOriginalCopy = localOriginalCopy; }
 
     public String getBackupRemotePath() { return backupRemotePath; }
     public void setBackupRemotePath(String backupRemotePath) { this.backupRemotePath = backupRemotePath; }

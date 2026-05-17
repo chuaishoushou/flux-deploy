@@ -75,9 +75,23 @@ public final class WarEmbedUtil {
     /**
      * 将 JAR 嵌入 WAR 的 WEB-INF/lib 中
      *
+     * <p><b>精确匹配契约</b>：{@code targetJarName} 必须是 lib 下的<b>完整文件名</b>（含扩展名），
+     * 例如 {@code scev6-utils-6.2.1-SNAPSHOT.jar}。本方法用 {@code equals} 比对 lib 下文件名，
+     * 不再做任何前缀近似匹配。<br>
+     * 历史遗留：旧版形参 {@code jarArtifactId} 接受"artifactId 前缀"并用 {@code startsWith} 模糊匹配，
+     * 在 maven 多模块项目里会把同前缀 sibling jar（{@code scev6-utils-objs-*} /
+     * {@code scev6-utils-wms-*}）误命中，配合 extract 阶段同样的前缀匹配，导致"抽到 X、写回 Y"，
+     * 主包被错误的 patch 包覆盖、且 lib 文件数校验依然显示"通过"。已废止。</p>
+     *
+     * <p><b>调用方义务</b>：传入前必须先用
+     * {@link com.flux.deploy.plugin.service.LocalPackagePatchService#collectInnerLibJars}
+     * + {@link com.flux.deploy.plugin.service.LocalPackagePatchService#pickVersionMatching}
+     * 在该 war 内确认完整 jar 文件名；并且 {@code newJarFile} 必须是基于<b>同一个</b>
+     * jar 抽出后做的补丁产物，不能跨 war 复用。</p>
+     *
      * @param warFile        本地 WAR 文件
-     * @param newJarFile     要嵌入的新 JAR 文件
-     * @param jarArtifactId  JAR 的 artifactId 前缀（用于匹配 lib 中的旧 jar）
+     * @param newJarFile     要嵌入的新 JAR 文件（基于同一 war 内的 targetJar 抽出 + 打补丁后的产物）
+     * @param targetJarName  WEB-INF/lib 下被替换的 JAR 完整文件名（含 .jar 扩展名）
      * @param outputWarFile  输出的新 WAR 文件路径
      * @return 嵌入结果（含校验信息）
      * @throws IOException 操作失败
@@ -85,7 +99,11 @@ public final class WarEmbedUtil {
      * @date 2026-03-26
      */
     public static EmbedResult embedJar(Path warFile, Path newJarFile,
-                                        String jarArtifactId, Path outputWarFile) throws IOException {
+                                        String targetJarName, Path outputWarFile) throws IOException {
+        if (targetJarName == null || targetJarName.isEmpty() || !targetJarName.endsWith(".jar")) {
+            throw new IOException("targetJarName 必须是完整 jar 文件名（含 .jar 扩展名），实际: "
+                    + targetJarName);
+        }
         // 1. 创建临时解压目录
         Path tempDir = Files.createTempDirectory("war-embed-");
 
@@ -99,49 +117,25 @@ public final class WarEmbedUtil {
                 throw new IOException("WAR 中未找到 WEB-INF/lib 目录");
             }
 
-            // 4. 找到匹配的旧 JAR
-            String matchedJarName = null;
-            try (var stream = Files.list(libDir)) {
-                for (Path p : (Iterable<Path>) stream::iterator) {
-                    String name = p.getFileName().toString();
-                    if (name.startsWith(jarArtifactId) && name.endsWith(".jar")) {
-                        matchedJarName = name;
-                        break;
-                    }
-                }
+            // 4. 精确定位目标 JAR（完整文件名 equals，不再做前缀模糊匹配）
+            Path targetJar = libDir.resolve(targetJarName);
+            if (!Files.isRegularFile(targetJar)) {
+                throw new IOException("目标 WAR 的 WEB-INF/lib 下不存在 " + targetJarName
+                        + "（必须按完整文件名精确匹配，禁止 prefix 兜底）");
             }
+            String matchedJarName = targetJarName;
 
-            if (matchedJarName == null) {
-                throw new IOException("目标 WAR 内不存在 " + jarArtifactId + " 的 JAR 文件");
-            }
-
-            System.out.println("  [嵌入] 匹配到: WEB-INF/lib/" + matchedJarName);
+            System.out.println("INFO  [嵌入] 匹配到 WEB-INF/lib/" + matchedJarName);
 
             // 5. 记录替换前所有 lib 文件的 SHA256
             Map<String, String> beforeHashes = hashAllFiles(libDir);
             int libCountBefore = beforeHashes.size();
 
-            // 6. 替换 JAR
-            Path targetJar = libDir.resolve(matchedJarName);
+            // 6. 替换 JAR：固定用 targetJarName，确保"被替换条目"与"写回条目"的文件名严格一致
             Files.delete(targetJar);
-
-            // 如果新 jar 文件名与旧的不同（版本号变化），用旧名字保持一致
-            // 但通常我们用新 jar 的文件名
-            String newJarName = newJarFile.getFileName().toString();
-            Path destJar;
-            if (newJarName.startsWith(jarArtifactId)) {
-                // 版本可能不同，保留新文件名
-                destJar = libDir.resolve(newJarName);
-                // 如果旧名和新名不同，记录
-                if (!matchedJarName.equals(newJarName)) {
-                    System.out.println("  [嵌入] JAR 名称变更: " + matchedJarName + " → " + newJarName);
-                }
-            } else {
-                destJar = libDir.resolve(matchedJarName);
-            }
+            Path destJar = libDir.resolve(targetJarName);
             Files.copy(newJarFile, destJar);
-            // 不打"已替换 X.jar"：上面"匹配到 WEB-INF/lib/X.jar"已表达"哪个 jar 被替换"；
-            // 名称变化场景由前面的"JAR 名称变更"行单独提示，无需此处再来一条同义记录。
+            // 不打"已替换 X.jar"：上面"匹配到 WEB-INF/lib/X.jar"已表达"哪个 jar 被替换"。
 
             // 7. 记录替换后所有 lib 文件的 SHA256
             Map<String, String> afterHashes = hashAllFiles(libDir);
@@ -178,7 +172,7 @@ public final class WarEmbedUtil {
                 message = "校验通过：仅目标 JAR 变更，其他 " + unchanged + " 个文件未受影响";
             }
 
-            System.out.println("  [嵌入] " + message);
+            System.out.println("INFO  [嵌入] " + message);
 
             if (!verified) {
                 throw new IOException("WAR 嵌入校验失败: " + message);
@@ -186,8 +180,20 @@ public final class WarEmbedUtil {
 
             // 9. 重新打包 WAR（不打"重新打包 WAR..."进度行，紧跟其后的"输出"行已自带语义）
             zip(tempDir, outputWarFile);
-            System.out.println("  [嵌入] 输出: " + outputWarFile.getFileName()
-                    + " (" + Files.size(outputWarFile) / 1024 + " KB)");
+
+            // 10. 内容守卫（end-to-end）：从 outputWarFile 内回读 WEB-INF/lib/<targetJarName> 字节，
+            //     SHA256 必须等于 newJarFile 的 SHA256。任何差异说明"我以为我嵌入了 X，实际打包后里面是 Y"，
+            //     这种错位（历史 bug 类型）应当在交付前就被立即拦下，而非依赖事后核查
+            String expectedSha = sha256(newJarFile);
+            String packedSha = sha256OfWarEntry(outputWarFile, "WEB-INF/lib/" + targetJarName);
+            if (!expectedSha.equals(packedSha)) {
+                throw new IOException("内嵌 JAR 内容守卫失败：outputWar 内 WEB-INF/lib/"
+                        + targetJarName + " 的 SHA256 [" + packedSha
+                        + "] 与传入 patch 包 [" + expectedSha + "] 不一致，可能存在抽/写错位或打包腐化");
+            }
+
+            System.out.println("INFO  [嵌入] 输出 " + outputWarFile.getFileName()
+                    + "，大小 " + Files.size(outputWarFile) / 1024 + " KB");
 
             return new EmbedResult(outputWarFile, matchedJarName,
                     libCountBefore, libCountAfter,
@@ -331,6 +337,46 @@ public final class WarEmbedUtil {
             return sb.toString();
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IOException("SHA-256 not available", e);
+        }
+    }
+
+    /**
+     * 从 zip / war 中抽出指定条目的字节并计算 SHA256
+     *
+     * <p>用于 end-to-end 内容守卫：嵌入完成后回读 outputWar 内嵌 jar 的真实字节，
+     * 与传入的 patch 包做哈希比对，确保"打包写回"过程没有把字节写错。</p>
+     *
+     * @param zipFile   zip / war 文件
+     * @param entryName zip 内条目名（含路径，如 {@code WEB-INF/lib/foo.jar}）
+     * @return 该条目字节的 SHA-256 小写十六进制
+     * @throws IOException 条目不存在或读取失败
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    private static String sha256OfWarEntry(Path zipFile, String entryName) throws IOException {
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(zipFile.toFile())) {
+            ZipEntry entry = zf.getEntry(entryName);
+            if (entry == null || entry.isDirectory()) {
+                throw new IOException("zip 内不存在条目: " + entryName + " @ " + zipFile);
+            }
+            try {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                try (InputStream is = new BufferedInputStream(zf.getInputStream(entry))) {
+                    byte[] buf = new byte[8192];
+                    int len;
+                    while ((len = is.read(buf)) != -1) {
+                        md.update(buf, 0, len);
+                    }
+                }
+                byte[] digest = md.digest();
+                StringBuilder sb = new StringBuilder();
+                for (byte b : digest) {
+                    sb.append(String.format("%02x", b));
+                }
+                return sb.toString();
+            } catch (java.security.NoSuchAlgorithmException e) {
+                throw new IOException("SHA-256 not available", e);
+            }
         }
     }
 

@@ -2,7 +2,9 @@ package com.flux.deploy.plugin.toolwindow;
 
 import com.flux.deploy.plugin.model.DeployMode;
 import com.intellij.icons.AllIcons;
+import com.intellij.util.IconUtil;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.NamedColorUtil;
 import com.flux.deploy.plugin.service.ModuleEnumerator;
 import com.flux.deploy.plugin.service.ModuleEnumerator.ModuleTreeNode;
 import com.intellij.openapi.project.Project;
@@ -42,11 +44,11 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
     private final Project project;
     private final PickerComboBox moduleCombo;
-    private final JBTextField artifactField;
     private final JComboBox<DeployMode> modeComboBox;
     private final JPanel dynamicContent;
 
-    private final JBLabel fullModeLabel;
+    /** FULL 模式信息卡里显示产物文件名的单元 label；setArtifact() 时与标题栏 meta 同步刷新 */
+    private final JBLabel fullModeArtifactLabel;
     /**
      * 文件状态条：合并展示"已选 X / Y 个文件"与编译策略片段（含 .java 编译 / 静态资源跳过 / 未勾选）。
      * 与右侧 TargetSectionPanel.selectionSummary 风格一致，单行展示节省纵向空间。
@@ -54,9 +56,21 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
     private final JBLabel fileCountLabel;
     /**
      * 文件搜索框，使用 IDEA 平台原生 SearchTextField：
-     * 自带左侧 🔍 图标、右侧 × 清空按钮、历史下拉，常驻显示无需 toggle。
+     * 自带左侧 🔍 图标、右侧 × 清空按钮、历史下拉。
+     * 默认隐藏，由标题栏 🔍 图标按钮切换可见性，配合 ESC 收起。
      */
     private final SearchTextField fileSearchField;
+
+    /** 标题栏右侧：刷新工程列表 + 当前模式文件列表 */
+    private final JButton refreshButton;
+    /** 标题栏右侧：切换文件搜索框显示，再次点击或空文本下 ESC 收起 */
+    private final JButton searchToggleButton;
+    /** 标题栏右侧：一键展开文件树所有目录节点 */
+    private final JButton expandAllButton;
+    /** 标题栏右侧：一键折叠文件树所有目录节点 */
+    private final JButton collapseAllButton;
+    /** 标题栏中部：展示当前选中模块名（meta 信息）；模块未选时为空 */
+    private final JBLabel metaLabel;
 
     // CheckboxTree 替代 CheckBoxList
     private CheckboxTree fileTree;
@@ -97,22 +111,18 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      * @date 2026-03-27
      */
     public SourceSectionPanel(Project project) {
-        super(new GridBagLayout());
+        super(new BorderLayout());
         this.project = project;
+
+        // 不再画独立圆角外框：四个 Section 面板紧贴主分割器 / 上下分割器的 1px 线条做区域分隔。
+        // 每个面板自带的"标题栏底分隔线 + 状态行顶分隔线"已经足够圈出区块感，再加圆角反而冗余。
+        setBorder(JBUI.Borders.empty());
 
         // 用 PickerComboBox（视觉=JComboBox / 点击=自定义弹窗）替换原 JButton，
         // 让控件边框、暗色背景、高度、下拉箭头与同面板的"产物""更新模式"
         // 以及右侧"项目""系统"完全一致；点击下拉时仍弹出模块树搜索面板。
         this.moduleCombo = new PickerComboBox("点击选择工程", this::showModuleTreePopup);
         moduleCombo.setToolTipText("选择要更新的 Maven 模块（源工程）");
-        this.artifactField = new JBTextField();
-        artifactField.setEditable(false);
-        artifactField.setFocusable(false);
-        artifactField.setEnabled(false);
-        artifactField.getEmptyText().setText("选择工程后自动填充");
-        artifactField.setToolTipText(
-                "<html>当前源工程的产物文件名（从 pom 自动解析）。"
-                + "<br>用于匹配目标 FTP 包或本地包的版本。</html>");
         // UI 只暴露两档：FULL / INCREMENTAL；AUTO_DETECT 是 CLI 内部值，不进下拉
         this.modeComboBox = new JComboBox<>(new DeployMode[]{DeployMode.FULL, DeployMode.INCREMENTAL});
         modeComboBox.setToolTipText(
@@ -121,7 +131,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                 + "用户可在此基础上手动增删勾选</html>");
         this.dynamicContent = new JPanel(new CardLayout());
 
-        this.fullModeLabel = new JBLabel("将替换整个远程包");
+        this.fullModeArtifactLabel = new JBLabel("");
         this.fileCountLabel = new JBLabel("");
         // 关闭历史下拉：本场景每次进入文件列表都是新的模块/分支，复用历史关键字价值有限，
         // 且会让 × 旁边多一个三角按钮，挤压输入区
@@ -156,6 +166,37 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                     }
                 }
                 super.paintComponent(g);
+            }
+
+            /**
+             * 把可打印字符键事件转发到面板的搜索框，并屏蔽 Swing/IDEA 树自带的"按键定位下一行"
+             * 与 TreeSpeedSearch，让搜索入口唯一。
+             *
+             * <p>策略：</p>
+             * <ul>
+             *   <li>带 Ctrl / Alt / Cmd 修饰键 → 透传 super（允许导航与平台快捷键）</li>
+             *   <li>控制字符（方向键 / 回车 / Tab / Esc / Backspace 等）→ 透传 super</li>
+             *   <li>其余可打印字符 → 自动展开搜索框、追加该字符、聚焦输入；不调用 super，避免触发
+             *       JTree 默认的 "type-to-next-match" 与平台 SpeedSearch</li>
+             * </ul>
+             */
+            @Override
+            protected void processKeyEvent(java.awt.event.KeyEvent e) {
+                if (e.getID() == java.awt.event.KeyEvent.KEY_TYPED
+                        && !e.isControlDown() && !e.isAltDown() && !e.isMetaDown()
+                        && !Character.isISOControl(e.getKeyChar())) {
+                    char c = e.getKeyChar();
+                    if (!fileSearchField.isVisible()) {
+                        fileSearchField.setVisible(true);
+                        SourceSectionPanel.this.revalidate();
+                        SourceSectionPanel.this.repaint();
+                    }
+                    fileSearchField.setText(fileSearchField.getText() + c);
+                    SourceSectionPanel.this.focusSearchField();
+                    e.consume();
+                    return;
+                }
+                super.processKeyEvent(e);
             }
         };
         fileTree.setRootVisible(false);
@@ -196,6 +237,51 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             }
         });
         this.fileScrollPane = new JBScrollPane(fileTree);
+        // 去掉滚动面板边框：让文件树与外框圆角直接呼应，避免"边框套边框"的视觉嵌套
+        fileScrollPane.setBorder(JBUI.Borders.empty());
+        fileScrollPane.setViewportBorder(JBUI.Borders.empty());
+
+        // 标题栏右侧动作按钮：刷新 + 搜索切换。
+        // styleHeaderIconButton 与运行日志卡片头部三个图标按钮一致（透明底 + 22×22 + 不抢焦点）。
+        this.refreshButton = new JButton(AllIcons.Actions.Refresh);
+        PanelChromes.styleHeaderIconButton(refreshButton);
+        refreshButton.setToolTipText(
+                "<html>刷新工程列表与当前模式的文件列表"
+                + "<br>工程列表：丢弃模块缓存，下次点开「工程」下拉时重新扫描工作区"
+                + "<br>整包更新：无变化"
+                + "<br>增量更新：重新扫描模块文件并重新执行 Git 变更检测</html>");
+        refreshButton.addActionListener(e -> {
+            // 工作区拉了新模块或删了旧模块时，ModuleEnumerator 的内存缓存仍是旧的；
+            // 这里主动失效一次，下次打开「工程」下拉时即可看到最新模块树。
+            ModuleEnumerator.invalidateCache();
+            refreshCurrentMode();
+        });
+
+        this.searchToggleButton = new JButton(AllIcons.Actions.Find);
+        PanelChromes.styleHeaderIconButton(searchToggleButton);
+        searchToggleButton.setToolTipText(
+                "<html>展开 / 收起文件搜索框"
+                + "<br>展开后立即聚焦输入；ESC 清空后再 ESC 自动收起</html>");
+        searchToggleButton.addActionListener(e -> toggleSearchField());
+
+        this.expandAllButton = new JButton(AllIcons.Actions.Expandall);
+        PanelChromes.styleHeaderIconButton(expandAllButton);
+        expandAllButton.setToolTipText("全部展开");
+        expandAllButton.addActionListener(e -> expandAllTreeNodes());
+
+        this.collapseAllButton = new JButton(AllIcons.Actions.Collapseall);
+        PanelChromes.styleHeaderIconButton(collapseAllButton);
+        collapseAllButton.setToolTipText("全部折叠");
+        collapseAllButton.addActionListener(e -> collapseAllTreeNodes());
+
+        // 标题栏中部 meta 标签：跟随当前工程的产物文件名（从 pom 自动解析）同步更新；
+        // 没有产物（未选工程 / pom 解析失败）时为空。
+        // 工程名本身已经在「工程」下拉框里显示，meta 改为承载产物信息避免重复。
+        this.metaLabel = new JBLabel("");
+        this.metaLabel.setForeground(NamedColorUtil.getInactiveTextColor());
+        this.metaLabel.setToolTipText(
+                "<html>当前源工程的产物文件名（从 pom 自动解析）。"
+                + "<br>用于匹配目标 FTP 包或本地包的版本。</html>");
 
         initUI();
         initListeners();
@@ -209,73 +295,261 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         this.modeComboBox.setSelectedItem(DeployMode.INCREMENTAL);
     }
 
-    /** 初始化 UI 布局：工程标签、产物标签、模式下拉和动态内容区 */
+    /**
+     * 初始化 UI 布局
+     *
+     * <p>外层 BorderLayout：</p>
+     * <ul>
+     *   <li>NORTH：标题栏（主色短条 + 标题 + meta + 动作图标按钮组）</li>
+     *   <li>CENTER：表单主体（工程 / 产物 / 更新模式 三行 + 动态内容区）</li>
+     *   <li>SOUTH：状态行（文件计数 + 编译提示）</li>
+     * </ul>
+     */
     private void initUI() {
+        add(buildTitleBar(), BorderLayout.NORTH);
+        add(buildBody(), BorderLayout.CENTER);
+        add(buildStatusRow(), BorderLayout.SOUTH);
+
+        // 初始无内容时隐藏动态区（与原版语义一致：未选工程不显示文件列表区）
+        dynamicContent.setVisible(false);
+    }
+
+    /**
+     * 构造标题栏：主色短条 + 「源工程」标题 + 当前模块名 meta + 刷新 / 搜索切换按钮。
+     *
+     * <p>底部 1px 分隔线把标题区与主体区分开，与底部状态行的顶部线对称。</p>
+     */
+    private JPanel buildTitleBar() {
+        // 复用 PanelChromes.buildTitleBar：四个面板共享同一份标题栏规格
+        // （主色短条 / 14pt 粗体 / meta / 底分隔线 / 上下内边距）。
+        // Source 不挂动作图标——展开 / 折叠 / 刷新 / 搜索四个图标已下沉到「模式」行右侧。
+        return PanelChromes.buildTitleBar("源工程", metaLabel);
+    }
+
+    /** 展开文件树所有节点；逐行展开直到列数稳定（处理展开后出现的新节点） */
+    private void expandAllTreeNodes() {
+        int prevCount = -1;
+        while (fileTree.getRowCount() != prevCount) {
+            prevCount = fileTree.getRowCount();
+            for (int i = 0; i < fileTree.getRowCount(); i++) {
+                fileTree.expandRow(i);
+            }
+        }
+    }
+
+    /** 折叠文件树所有节点；从最后一行开始倒序折叠，保证父节点的折叠不影响后续行号 */
+    private void collapseAllTreeNodes() {
+        for (int i = fileTree.getRowCount() - 1; i >= 0; i--) {
+            fileTree.collapseRow(i);
+        }
+    }
+
+    /**
+     * 构造主体：三行表单（标签 60px 右对齐 + 输入框拉到右边界）+ 动态内容区。
+     *
+     * <p>输入框严格右对齐到同一垂直线；标签去掉冒号、右对齐占位。</p>
+     */
+    private JPanel buildBody() {
+        JPanel body = new JPanel(new GridBagLayout());
+        body.setOpaque(false);
+        body.setBorder(JBUI.Borders.empty(8, 12, 0, 12));
+
         GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(3, 2, 3, 2);
-        gbc.anchor = GridBagConstraints.WEST;
+        gbc.insets = new Insets(3, 0, 3, 0);
 
-        gbc.gridx = 0; gbc.gridy = 0;
-        add(new JBLabel("工程："), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        add(moduleCombo, gbc);
+        // 4 个图标 2-2 拆分到两行末尾：两个工具条等宽 → 两个下拉框右边界严格对齐。
+        // 上行 ⟳ 🔍（刷新 + 搜索）紧跟「工程」选择；
+        // 下行 ⤢ ⤡（展开 + 折叠）紧跟「更新模式」——增量模式才有文件树需要展开折叠，配对合理。
+        // 用 GridBagLayout（默认 anchor=CENTER）让按钮在比自己高的下拉行里上下居中，
+        // 同时不像 FlowLayout 那样在两侧自动追加 hgap 边距，整个工具条宽度更紧凑。
+        JPanel moduleActions = buildActionStrip(refreshButton, searchToggleButton);
+        JPanel modeActions = buildActionStrip(expandAllButton, collapseAllButton);
 
-        gbc.gridx = 0; gbc.gridy = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        add(new JBLabel("产物："), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        add(artifactField, gbc);
+        // 表单第 0 行：工程下拉 + 刷新 / 搜索（产物文件名在标题栏 meta 里显示）
+        JPanel moduleRow = new JPanel(new BorderLayout(4, 0));
+        moduleRow.setOpaque(false);
+        moduleRow.add(moduleCombo, BorderLayout.CENTER);
+        moduleRow.add(moduleActions, BorderLayout.EAST);
+        addFormRow(body, gbc, 0, "工程", moduleRow);
 
-        gbc.gridx = 0; gbc.gridy = 2; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        add(new JBLabel("更新模式："), gbc);
+        // 表单第 1 行：更新模式下拉 + 展开 / 折叠
         JPanel modeRow = new JPanel(new BorderLayout(4, 0));
+        modeRow.setOpaque(false);
         modeRow.add(modeComboBox, BorderLayout.CENTER);
+        modeRow.add(modeActions, BorderLayout.EAST);
+        addFormRow(body, gbc, 1, "模式", modeRow);
 
-        JButton refreshModeButton = new JButton(AllIcons.Actions.Refresh);
-        int btnSize = modeComboBox.getPreferredSize().height;
-        Dimension iconBtnSize = new Dimension(btnSize, btnSize);
-        refreshModeButton.setMargin(JBUI.emptyInsets());
-        refreshModeButton.setPreferredSize(iconBtnSize);
-        refreshModeButton.setFocusPainted(false);
-        refreshModeButton.setFocusable(false);
-        refreshModeButton.setToolTipText(
-                "<html>刷新当前模式的文件列表"
-                + "<br>整包更新：无变化"
-                + "<br>增量更新：重新扫描模块文件并重新执行 Git 变更检测</html>");
-        refreshModeButton.addActionListener(e -> refreshCurrentMode());
-
-        modeRow.add(refreshModeButton, BorderLayout.EAST);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        add(modeRow, gbc);
-
-        // 全量提示
-        dynamicContent.add(fullModeLabel, "FULL");
-
-        // 文件树面板：南区用单个 fileCountLabel 同时承载"已选 X / Y"与编译策略片段，
-        // 与右侧 TargetSectionPanel.selectionSummary 风格统一，单行展示节省纵向空间
-        JPanel fileListPanel = new JPanel(new BorderLayout(0, 4));
+        // 动态内容区：FULL 卡显示整包更新信息卡，FILE_LIST 卡承载 搜索框 + 文件树
+        dynamicContent.add(buildFullModeCard(), "FULL");
+        JPanel fileListPanel = new JPanel(new BorderLayout(0, 2));
+        fileListPanel.setOpaque(false);
+        fileSearchField.setVisible(false);
         fileListPanel.add(fileSearchField, BorderLayout.NORTH);
         fileListPanel.add(fileScrollPane, BorderLayout.CENTER);
-        fileCountLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
-        fileCountLabel.setBorder(JBUI.Borders.emptyTop(2));
-        fileCountLabel.setToolTipText(
-                "<html>编译策略由勾选清单自动决定，无需手动选择："
-                + "<br>• 含任意 <b>.java</b> 文件 → 执行 <code>mvn clean package</code>"
-                + "<br>• 全是静态资源（js/css/csv/模板等）→ 跳过编译，直接从源文件读取"
-                + "<br>• 整包更新模式 → 始终编译"
-                + "<br>取消勾选 .java 即可让本次部署跳过编译。</html>");
-        fileListPanel.add(fileCountLabel, BorderLayout.SOUTH);
         dynamicContent.add(fileListPanel, "FILE_LIST");
 
-        gbc.gridx = 0; gbc.gridy = 3; gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.BOTH; gbc.weighty = 1.0;
-        add(dynamicContent, gbc);
+        gbc.gridx = 0; gbc.gridy = 2; gbc.gridwidth = 2;
+        gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 1.0;
+        // 表单底行自身有 3px 底边距；再追加 4px 顶部，让「更新模式」行到文件树之间约 7px，
+        // 视觉上和"标题栏底分隔线↔工程行"的呼吸感一致
+        gbc.insets = new Insets(4, 0, 0, 0);
+        body.add(dynamicContent, gbc);
 
-        // 底部 spacer：dynamicContent 隐藏时吸收空间，保持内容顶部对齐
-        gbc.gridy = 4; gbc.weighty = 0.01;
-        add(Box.createGlue(), gbc);
+        // 兜底 spacer：dynamicContent 不可见时其 weighty 不参与分配，
+        // 用 glue 吸收剩余纵向空间，避免 GridBag 把上方控件垂直居中
+        gbc.gridy = 3; gbc.weighty = 0.01;
+        gbc.insets = JBUI.emptyInsets();
+        body.add(Box.createGlue(), gbc);
 
-        // 初始无内容时隐藏动态区
-        dynamicContent.setVisible(false);
+        return body;
+    }
+
+    /**
+     * 构造 FULL（整包更新）模式的信息卡：水平垂直居中放图标 + 标题 + 说明 + 产物文件名。
+     *
+     * <p>替换原先孤零零飘在左上角的"将替换整个远程包"单行文字。
+     * 文件树空间在 FULL 模式下没有内容可填，让这张卡占满中部，把"将上传哪个产物"
+     * 这一关键信息突出展示给用户。</p>
+     */
+    private JPanel buildFullModeCard() {
+        JPanel wrapper = new JPanel(new GridBagLayout());
+        wrapper.setOpaque(false);
+
+        JPanel card = new JPanel();
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setOpaque(false);
+
+        // 大图标：AllIcons.Nodes.Module 放大 2.5 倍，作为视觉锚点
+        JBLabel iconLabel = new JBLabel(
+                IconUtil.scale(AllIcons.Nodes.Module, null, 2.5f));
+        iconLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        card.add(iconLabel);
+        card.add(Box.createVerticalStrut(14));
+
+        // 卡片标题
+        JBLabel title = new JBLabel("整包更新模式");
+        title.setFont(title.getFont().deriveFont(Font.BOLD, 14f));
+        title.setAlignmentX(Component.CENTER_ALIGNMENT);
+        card.add(title);
+        card.add(Box.createVerticalStrut(12));
+
+        // 产物文件名：等宽字体 + 主色强调
+        fullModeArtifactLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        fullModeArtifactLabel.setForeground(PanelChromes.accentColor());
+        fullModeArtifactLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        card.add(fullModeArtifactLabel);
+
+        // 显式权重 + anchor=CENTER + 底部留白：让 card 在 wrapper 里水平居中、
+        // 垂直方向略微偏上（约 30px）。图标在卡顶部视觉重量偏大，严格几何中心反而显低。
+        GridBagConstraints g = new GridBagConstraints();
+        g.weightx = 1.0;
+        g.weighty = 1.0;
+        g.anchor = GridBagConstraints.CENTER;
+        g.fill = GridBagConstraints.NONE;
+        g.insets = JBUI.insetsBottom(60);
+        wrapper.add(card, g);
+        return wrapper;
+    }
+
+    /**
+     * 表单尾部 2-图标动作条公共构造：1×2 GridBag 把两个图标按钮严格上下 / 左右居中，
+     * 两按钮间距 2px、整条不带外边距——配合 BorderLayout.EAST 嵌进表单行后视觉紧凑且对齐。
+     */
+    private static JPanel buildActionStrip(JButton left, JButton right) {
+        JPanel strip = new JPanel(new GridBagLayout());
+        strip.setOpaque(false);
+        GridBagConstraints g = new GridBagConstraints();
+        g.gridy = 0;
+        g.gridx = 0;
+        strip.add(left, g);
+        g.gridx = 1;
+        g.insets = JBUI.insetsLeft(2);
+        strip.add(right, g);
+        return strip;
+    }
+
+    /**
+     * 表单行公共方法：第 0 列放右对齐标签，第 1 列放输入控件并拉满。
+     *
+     * @param parent 父容器（body）
+     * @param gbc    复用的约束实例（方法内会改写 gridx/gridy/fill/weightx/anchor）
+     * @param row    行号（gridy）
+     * @param label  标签文本（不带冒号）
+     * @param input  输入控件
+     */
+    private static void addFormRow(JPanel parent, GridBagConstraints gbc,
+                                   int row, String label, JComponent input) {
+        gbc.gridx = 0; gbc.gridy = row;
+        gbc.anchor = GridBagConstraints.EAST;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        gbc.gridwidth = 1;
+        gbc.insets = new Insets(3, 0, 3, 8);
+        JBLabel lbl = new JBLabel(label);
+        lbl.setHorizontalAlignment(SwingConstants.RIGHT);
+        parent.add(lbl, gbc);
+
+        gbc.gridx = 1;
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        gbc.insets = new Insets(3, 0, 3, 0);
+        parent.add(input, gbc);
+    }
+
+    /**
+     * 构造底部状态行：上分隔线 + 左 fileCountLabel + 右 编译提示。
+     */
+    private JPanel buildStatusRow() {
+        fileCountLabel.setForeground(NamedColorUtil.getInactiveTextColor());
+        fileCountLabel.setToolTipText(
+                "<html>勾选要部署的文件。部署前请手动编译 / 打包；"
+                + "<br>静态文件无需编译，缺失编译产物时点击部署会弹窗中止。</html>");
+        JBLabel compileHintLabel = new JBLabel("⚠ 请手动编译/打包，静态文件无需编译");
+        compileHintLabel.setForeground(NamedColorUtil.getInactiveTextColor());
+        compileHintLabel.setToolTipText(
+                "<html>部署前请手动编译 / 打包。"
+                + "<br>静态文件（.html / .css / .js / .properties / .xml 等）不参与编译，可直接部署。"
+                + "<br>缺失编译产物时点击部署会弹窗中止。</html>");
+
+        // 去掉状态行的 1px 顶边线——它和标题栏底部线不是同一语义（一个是 footer 上沿、
+        // 一个是 header 下沿），多画一条反而让面板看起来线条混乱。
+        // 只保留上下内边距，让"请手动编译..."文字和上方文件树之间有呼吸空间。
+        JPanel statusRow = new JPanel(new BorderLayout(8, 0));
+        statusRow.setOpaque(false);
+        statusRow.setBorder(JBUI.Borders.empty(5, 12));
+        statusRow.add(fileCountLabel, BorderLayout.WEST);
+        statusRow.add(compileHintLabel, BorderLayout.EAST);
+        return statusRow;
+    }
+
+    /**
+     * 切换文件搜索框显示状态。
+     *
+     * <p>展开时：自动聚焦输入并全选已有文本；收起时：清空筛选并把焦点交回文件树。</p>
+     */
+    private void toggleSearchField() {
+        if (fileSearchField.isVisible()) {
+            hideSearchField();
+            fileTree.requestFocusInWindow();
+        } else {
+            fileSearchField.setVisible(true);
+            revalidate();
+            repaint();
+            focusSearchField();
+        }
+    }
+
+    /**
+     * 收起搜索框并清空筛选；调用方负责把焦点交回合适位置。
+     */
+    private void hideSearchField() {
+        if (!fileSearchField.getText().isEmpty()) {
+            fileSearchField.setText("");
+        }
+        fileSearchField.setVisible(false);
+        revalidate();
+        repaint();
     }
 
     /** 初始化事件监听：模式切换、搜索过滤、Ctrl+F / Esc 快捷键 */
@@ -288,6 +562,17 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                 if (mode == DeployMode.FULL) {
                     dynamicContent.setVisible(currentModulePath != null);
                 }
+                // 工具条按钮仅在文件列表（INCREMENTAL）模式下有意义：
+                //   - 展开 / 折叠：作用对象是文件树；FULL 模式没有树
+                //   - 搜索切换：搜索框在 FILE_LIST 卡里，FULL 模式下展开它也看不到
+                // 切到 FULL 时一并禁用并自动收起已展开的搜索框。⟳ 刷新一直可用。
+                boolean treeOpsEnabled = mode == DeployMode.INCREMENTAL;
+                searchToggleButton.setEnabled(treeOpsEnabled);
+                expandAllButton.setEnabled(treeOpsEnabled);
+                collapseAllButton.setEnabled(treeOpsEnabled);
+                if (mode == DeployMode.FULL && fileSearchField.isVisible()) {
+                    hideSearchField();
+                }
                 if (!suppressModeCallback && modeChangeCallback != null
                         && currentModulePath != null) {
                     modeChangeCallback.accept(mode);
@@ -296,11 +581,18 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             }
         });
 
-        // SearchTextField 自带 addDocumentListener；其 × 清空按钮会调 setText("")，
-        // 同样走这里的 listener，无需额外处理。
+        // SearchTextField 自带 addDocumentListener；其 × 清空按钮会调 setText("")。
+        // removeUpdate 中识别"一次性多字符删除→空文本"为 ×（或 Cmd+A+Delete）一键清空，
+        // 这种"明确结束搜索"的动作直接收起搜索框；单字符 backspace 不触发收起，留给用户继续输入。
         fileSearchField.addDocumentListener(new javax.swing.event.DocumentListener() {
             @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) {
+                if (!suppressFileSearchEvents && e.getLength() > 1
+                        && fileSearchField.getText().isEmpty()) {
+                    SwingUtilities.invokeLater(SourceSectionPanel.this::hideSearchField);
+                }
+                refresh();
+            }
             @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             private void refresh() {
                 if (suppressFileSearchEvents) return;
@@ -313,16 +605,30 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             }
         });
 
+        // 失去焦点 + 文本为空 → 自动收起搜索框（与点击 🔍 切换的语义对称）。
+        // 延后到事件分发完成后再判断，避免和 IDE 焦点管理器的中间态打架。
+        fileSearchField.getTextEditor().addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                SwingUtilities.invokeLater(() -> {
+                    if (fileSearchField.isVisible() && fileSearchField.getText().isEmpty()) {
+                        hideSearchField();
+                    }
+                });
+            }
+        });
+
         // 不绑定 Ctrl+F：IDEA IdeKeyEventDispatcher 在 Swing 之前就把 Ctrl+F 派给
         // 全局 Find / SpeedSearch，本地 AnAction 注册也无法稳定压过；搜索框已常驻
         // 显示，鼠标点击即可聚焦，无需快捷键。
 
-        // Esc：先清空（让 × 的功能也覆盖到键盘用户），已空时把焦点交回文件树
+        // Esc：先清空（让 × 的功能也覆盖到键盘用户）；已空时收起搜索框并把焦点交回文件树
         fileSearchField.getTextEditor().registerKeyboardAction(
                 e -> {
                     if (!fileSearchField.getText().isEmpty()) {
                         fileSearchField.setText("");
                     } else {
+                        hideSearchField();
                         fileTree.requestFocusInWindow();
                     }
                 },
@@ -361,6 +667,9 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             String name = lastSep >= 0 ? modulePath.substring(lastSep + 1) : modulePath;
             // 不再追加 " ▾"：PickerComboBox 由 L&F 自动绘制下拉箭头
             moduleCombo.setText(name);
+            // 切换工程时清掉旧产物名：紧随其后的 setArtifact() 才是新值的来源；
+            // 如果 pom 解析失败、setArtifact 不会被调用，meta 也不会残留上一次的产物
+            metaLabel.setText("");
             // FULL 模式下显示提示
             DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
             if (mode == DeployMode.FULL) {
@@ -368,6 +677,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             }
         } else {
             moduleCombo.setText("点击选择工程");
+            metaLabel.setText("");
             dynamicContent.setVisible(false);
         }
         updateFileCountLabel();
@@ -436,68 +746,10 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      * @date 2026-03-27
      */
     public void setArtifact(String artifactFileName) {
-        artifactField.setText(artifactFileName != null ? artifactFileName : "");
+        String text = artifactFileName != null ? artifactFileName : "";
+        metaLabel.setText(text);
+        fullModeArtifactLabel.setText(text);
         updateFileCountLabel();
-    }
-
-    /**
-     * 根据当前模式与勾选清单判定是否需要 mvn package
-     *
-     * <p>规则：</p>
-     * <ul>
-     *   <li>FULL 模式：必须编译（要打整 jar）</li>
-     *   <li>INCREMENTAL 模式：勾选清单内含任意 <b>.java</b> → 编译；
-     *       全是静态资源（含 src/main/webapp、src/main/resources、src/main/java 下非 .java）→ 跳过</li>
-     *   <li>未选工程或未勾选任何文件：保守按"需要编译"返回，由上层兜底校验</li>
-     * </ul>
-     *
-     * @return true 表示需要执行 mvn package；false 表示可跳过
-     * @author xumanyi
-     * @date 2026-04-29
-     */
-    public boolean needsCompile() {
-        DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
-        if (mode == DeployMode.FULL) return true;
-        List<String> selected = getSelectedFiles();
-        if (selected.isEmpty()) return true;
-        for (String raw : selected) {
-            String path = raw == null ? "" : raw;
-            if (path.length() > 2 && path.charAt(1) == ' ') {
-                path = path.substring(path.indexOf(' ')).trim();
-            }
-            if (path.toLowerCase(Locale.ROOT).endsWith(".java")) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 计算编译策略片段（带颜色 span，无 &lt;html&gt; 包裹），由 updateFileCountLabel 拼接到状态条尾部。
-     *
-     * <p>未选工程返回空串；FULL 分支保留以防未来在 FULL 卡内复用，
-     * 当前 CardLayout 下 fileCountLabel 仅出现在 FILE_LIST 卡。</p>
-     *
-     * @return 编译策略片段，未选模块返回空串
-     */
-    private String computeCompileStatusFragment() {
-        if (currentModulePath == null) return "";
-        DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
-        if (mode == DeployMode.FULL) {
-            return "<span style='color:#6897BB;'>⚙ 整包更新：将执行 mvn clean package</span>";
-        }
-        List<String> selected = getSelectedFiles();
-        if (selected.isEmpty()) {
-            return "<span style='color:gray;'>未勾选</span>";
-        }
-        int javaCount = 0;
-        for (String raw : selected) {
-            String p = raw == null ? "" : raw;
-            if (p.length() > 2 && p.charAt(1) == ' ') p = p.substring(p.indexOf(' ')).trim();
-            if (p.toLowerCase(Locale.ROOT).endsWith(".java")) javaCount++;
-        }
-        if (javaCount > 0) {
-            return "<span style='color:#6897BB;'>含 " + javaCount + " 个 .java，将编译</span>";
-        }
-        return "<span style='color:#6A8759;'>静态资源，跳过编译</span>";
     }
 
     /**
@@ -895,10 +1147,14 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
     }
 
     /**
-     * 更新底部状态条：合并展示"已选 X / Y 个文件"与编译策略片段。
+     * 更新底部状态条：纯文件计数显示。
      *
-     * <p>计数部分沿用 label 默认 disabledForeground；编译策略片段用 html span 单独着色。
-     * 无文件时清空文本（dynamicContent 在外层负责整体显隐）。</p>
+     * <p>插件不区分文件类型 / 不做编译状态指示，状态条单一职责，只回答"勾了几个"。
+     * 编译产物存在性由部署时的 {@link com.flux.deploy.plugin.util.ArtifactPresenceValidator}
+     * 弹窗负责，状态条不预告。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-07
      */
     private void updateFileCountLabel() {
         int total = rawFiles.size();
@@ -908,20 +1164,13 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         }
         int checked = getSelectedFiles().size();
         String keyword = fileSearchField.getText().trim();
-        String count;
         if (keyword.isEmpty()) {
-            count = "已选 " + checked + " / " + total + " 个文件";
+            fileCountLabel.setText("已选 " + checked + " / " + total + " 个文件");
         } else if (filteredFileCount == 0) {
-            count = "未找到匹配文件，已选 " + checked + " / " + total + " 个文件";
+            fileCountLabel.setText("未找到匹配文件，已选 " + checked + " / " + total + " 个文件");
         } else {
-            count = "已选 " + checked + " / " + total
-                    + " 个文件，筛选 " + filteredFileCount + " 个";
-        }
-        String compile = computeCompileStatusFragment();
-        if (compile.isEmpty()) {
-            fileCountLabel.setText(count);
-        } else {
-            fileCountLabel.setText("<html>" + count + " · " + compile + "</html>");
+            fileCountLabel.setText("已选 " + checked + " / " + total
+                    + " 个文件，筛选 " + filteredFileCount + " 个");
         }
     }
 
@@ -990,12 +1239,21 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         Tree tree = new Tree(root);
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
+        tree.setRowHeight(24);
         tree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
         for (int i = 0; i < tree.getRowCount(); i++) tree.expandRow(i);
 
         // 鼠标悬浮行高亮：数组装指针，渲染器按需着色，mouseMoved 更新后整树重绘
         final int[] treeHoverRow = { -1 };
         tree.setCellRenderer(new javax.swing.tree.DefaultTreeCellRenderer() {
+            {
+                // 替换 JRE 默认黄色文件夹 / 灰色文件图标，统一改用 IDEA 主题感知图标：
+                //  - 中间目录（含子节点）→ AllIcons.Nodes.Folder
+                //  - 叶子模块（Maven artifact）→ AllIcons.Nodes.Module
+                setOpenIcon(AllIcons.Nodes.Folder);
+                setClosedIcon(AllIcons.Nodes.Folder);
+                setLeafIcon(AllIcons.Nodes.Module);
+            }
             @Override
             public Component getTreeCellRendererComponent(JTree tr, Object value, boolean sel,
                     boolean expanded, boolean leaf, int row, boolean hasFocus) {
@@ -1364,14 +1622,25 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
     /**
      * 树节点渲染器
+     *
+     * <p>视觉与 IDEA Project 工具窗口对齐：</p>
+     * <ul>
+     *   <li>目录节点：{@link AllIcons.Nodes#Folder} 图标 + 路径粗体 + 文件数灰色 attached</li>
+     *   <li>文件节点：按扩展名取对应 FileTypes 图标，叶子文本保持常规字重</li>
+     * </ul>
      */
     static class FileTreeCellRenderer extends CheckboxTree.CheckboxTreeCellRenderer {
+
+        /** 目录显示名与"(N 个文件)"后缀之间的分隔符（与 buildCompressedNode 输出保持一致） */
+        private static final String DIR_COUNT_DELIM = "  (";
+
         @Override
         public void customizeRenderer(JTree tree, Object value, boolean selected,
                                        boolean expanded, boolean leaf, int row, boolean hasFocus) {
             if (value instanceof CheckedTreeNode node) {
                 Object userObj = node.getUserObject();
                 if (userObj instanceof FileEntry fe) {
+                    getTextRenderer().setIcon(iconForFile(fe.fileName));
                     // 文件节点：[M] FileName.java（F 状态为全量文件，不显示标签）
                     if (!fe.status.isEmpty() && !"F".equals(fe.status)) {
                         String color = switch (fe.status) {
@@ -1387,12 +1656,43 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                     }
                     getTextRenderer().append(fe.fileName, SimpleTextAttributes.REGULAR_ATTRIBUTES);
                 } else if (userObj instanceof String s) {
-                    // 包节点
-                    getTextRenderer().append(s,
-                            new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD,
-                                    null));
+                    // 包节点：folder 图标；正文粗体 + 文件数灰色尾缀
+                    getTextRenderer().setIcon(AllIcons.Nodes.Folder);
+                    int delim = s.indexOf(DIR_COUNT_DELIM);
+                    if (delim > 0) {
+                        getTextRenderer().append(s.substring(0, delim),
+                                new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, null));
+                        getTextRenderer().append(s.substring(delim),
+                                SimpleTextAttributes.GRAYED_ATTRIBUTES);
+                    } else {
+                        getTextRenderer().append(s,
+                                new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, null));
+                    }
                 }
             }
+        }
+
+        /**
+         * 按扩展名返回 IDEA 内置图标，与 Project 工具窗口的样式对齐：
+         * <ul>
+         *   <li>.java → {@link AllIcons.Nodes#Class}（绿色 C 圆圈，与 IDEA Project 视图一致）</li>
+         *   <li>.xml / .properties / .json / .yml / .html / .css / .js → 对应 FileTypes 图标</li>
+         *   <li>其他 → {@link AllIcons.FileTypes#Text}（三横线纸张图标）</li>
+         * </ul>
+         *
+         * <p>仅靠扩展名做最便宜的匹配，避免引入 FileTypeManager 这种重型平台 API。</p>
+         */
+        private static Icon iconForFile(String filename) {
+            String lower = filename.toLowerCase();
+            if (lower.endsWith(".java")) return AllIcons.Nodes.Class;
+            if (lower.endsWith(".xml")) return AllIcons.FileTypes.Xml;
+            if (lower.endsWith(".properties")) return AllIcons.FileTypes.Properties;
+            if (lower.endsWith(".json")) return AllIcons.FileTypes.Json;
+            if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return AllIcons.FileTypes.Yaml;
+            if (lower.endsWith(".html") || lower.endsWith(".htm")) return AllIcons.FileTypes.Html;
+            if (lower.endsWith(".css")) return AllIcons.FileTypes.Css;
+            if (lower.endsWith(".js")) return AllIcons.FileTypes.JavaScript;
+            return AllIcons.FileTypes.Text;
         }
     }
 

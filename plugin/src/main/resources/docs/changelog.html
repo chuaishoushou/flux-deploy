@@ -78,23 +78,9 @@
 
 <h1>版本记录</h1>
 
-<div class="version-block">
-  <div class="version-title">v1.2.7 <span class="date">2026-05-04</span></div>
-  <ol>
-    <li>项目备份文件夹支持自定义选择。</li>
-    <li>源工程、部署目标，增加列表搜索框。</li>
-    <li>目标/系统支持动态多级下拉筛选。</li>
-    <li>批量更新时，优化性能。并行执行更新，默认线程数3次、失败重试次数3次。配置文件位置：~/.flux-deploy/config.toml。</li>
-    <li>批量更新遇到错误时，跳过并回滚问题包，继续更新其他包，并记录更新日志。</li>
-    <li>java文件强制编译，静态文件跳过编译。</li>
-    <li>jdk使用pom/父级pom中版本；mvn使用IDEA默认配置，不再强制环境变量。兼容windows/mac系统。</li>
-    <li>优化日志输出,增加阶段耗时、当前状态、问题原因、操作建议、更新清单。取消强制预检。</li>
-    <li>支持中途手动停止，弹出提示：继续、保留完成包并停止，全部回滚并停止。</li>
-    <li>长连接时FTP服务器有时出现断开、网络异常断开，增加无感重连。</li>
-    <li>版本记录文件兼容xxx.war_update_note.txt、xxx_update_note.txt。自动使用已存在的记录，不存在时则新建xxx.war_update_note.txt。</li>
-    <li>取消隐藏备份文件包逻辑，现在会显示路径所有包，支持自由勾选。</li>
-  </ol>
-</div>
+<!-- VERSIONS -->
+<!-- 此占位符由 Gradle 构建期从根目录 CHANGELOG.md 渲染替换；
+     v1.2.6 及以前为手写历史，保留在此文件中，新版本只编辑 CHANGELOG.md。 -->
 
 <div class="version-block">
   <div class="version-title">v1.2.6 <span class="date">2026-04-30</span></div>

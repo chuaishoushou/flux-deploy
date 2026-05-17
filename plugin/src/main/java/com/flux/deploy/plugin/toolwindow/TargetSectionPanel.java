@@ -50,6 +50,14 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     private final JButton refreshButton;
 
     /**
+     * FTP 状态条：[连接状态标签][刷新][⋯ 更多][连接(仅未连接时)]。
+     *
+     * <p>从 topPanel 第 0 行抽出，由 TargetContainerPanel 拿走挂到自绘 toggle bar 的
+     * 右侧空位，与「FTP 模式 / 本地模式」按钮同行渲染；切到本地模式时整条 setVisible(false)。</p>
+     */
+    private JPanel ftpStatusBar;
+
+    /**
      * 顶部表单区（FTP/项目/系统/子目录 行）的独立 GridBag 容器。
      *
      * <p>把这部分跟下面的"目标包树"分开放在两个 panel 里，是为了让它们的布局不再共享列宽：
@@ -62,6 +70,8 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     // ========== 子目录层级筛选（针对系统下含多层目录的项目，按需收窄扫描范围）==========
     /** "+" 按钮：在系统下拉右边，点击新增一层子目录筛选 */
     private JButton addLevelButton;
+    /** "🔍" 按钮：在项目下拉右边 col 2，点击 toggle 显示/隐藏 packageSearchField（默认隐藏） */
+    private JButton searchToggleButton;
     /** 当前已添加的子目录层级（按从浅到深的顺序） */
     private final List<SubdirLevel> extraLevels = new ArrayList<>();
 
@@ -154,7 +164,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         super(new BorderLayout());
         this.project = project;
 
-        this.connectionStatus = new JBLabel("未连接");
+        this.connectionStatus = new JBLabel("未登录");
         this.connectionStatus.setForeground(Color.RED);
         this.connectButton = new JButton("连接");
         connectButton.setToolTipText("连接到 FTP 服务器（使用已保存凭据或弹出登录框）");
@@ -211,6 +221,37 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 }
                 super.paintComponent(g);
             }
+
+            /**
+             * 把可打印字符键事件转发到面板的搜索框，并屏蔽 CheckboxTree / JTree 自带的
+             * "按键定位下一行"与 TreeSpeedSearch，让搜索入口唯一。
+             *
+             * <p>策略与左侧源工程文件树一致：</p>
+             * <ul>
+             *   <li>带 Ctrl / Alt / Cmd 修饰键 → 透传 super（允许导航与平台快捷键）</li>
+             *   <li>控制字符（方向键 / 回车 / Tab / Esc / Backspace 等）→ 透传 super</li>
+             *   <li>其余可打印字符 → 自动展开搜索框、追加该字符、聚焦输入；不调用 super，避免触发
+             *       JTree 默认的 "type-to-next-match" 与平台 SpeedSearch</li>
+             * </ul>
+             */
+            @Override
+            protected void processKeyEvent(java.awt.event.KeyEvent e) {
+                if (e.getID() == java.awt.event.KeyEvent.KEY_TYPED
+                        && !e.isControlDown() && !e.isAltDown() && !e.isMetaDown()
+                        && !Character.isISOControl(e.getKeyChar())) {
+                    char c = e.getKeyChar();
+                    if (!packageSearchField.isVisible()) {
+                        packageSearchField.setVisible(true);
+                        TargetSectionPanel.this.revalidate();
+                        TargetSectionPanel.this.repaint();
+                    }
+                    packageSearchField.setText(packageSearchField.getText() + c);
+                    TargetSectionPanel.this.focusSearchField();
+                    e.consume();
+                    return;
+                }
+                super.processKeyEvent(e);
+            }
         };
         packageTree.setRootVisible(false);
         packageTree.setShowsRootHandles(true);
@@ -237,16 +278,25 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         this.selectionSummary = new JBLabel("请选择项目和系统");
         this.packageCountLabel = new JBLabel(" ");
 
-        // SearchTextField 与左侧源工程文件搜索保持一致：常驻显示，× 清空，零 toggle
+        // SearchTextField 与左侧源工程文件搜索保持一致：默认隐藏，点 🔍 toggle 展开，失焦清空时自动收起
         this.packageSearchField = new SearchTextField(false);
         packageSearchField.getTextEditor().getEmptyText().setText("搜索目标包名或子目录");
         packageSearchField.getTextEditor().setToolTipText(
                 "<html>按包名或子目录过滤，支持空格分隔多个关键字与拼音"
                 + "<br>主目标（加粗显示）始终可见，不受过滤影响"
                 + "<br>已勾选但被过滤隐藏的包仍会被部署</html>");
+        packageSearchField.setVisible(false);
+        // removeUpdate 中识别"一次性多字符删除→空文本"为 ×（或 Cmd+A+Delete）一键清空，
+        // 这种"明确结束搜索"的动作直接收起搜索框；单字符 backspace 不触发收起，留给用户继续输入。
         packageSearchField.addDocumentListener(new javax.swing.event.DocumentListener() {
             @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) {
+                if (!suppressPackageSearchEvents && e.getLength() > 1
+                        && packageSearchField.getText().isEmpty()) {
+                    SwingUtilities.invokeLater(TargetSectionPanel.this::hideSearchField);
+                }
+                refresh();
+            }
             @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refresh(); }
             private void refresh() {
                 if (suppressPackageSearchEvents) return;
@@ -257,46 +307,63 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 });
             }
         });
-        // Esc：有内容→清空；已空→焦点回到树
+        // 失去焦点 + 文本为空 → 自动收起搜索框（与点 🔍 toggle 的语义对称）。
+        // 延后到事件分发完成后再判断，避免和 IDE 焦点管理器的中间态打架。
+        packageSearchField.getTextEditor().addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                SwingUtilities.invokeLater(() -> {
+                    if (packageSearchField.isVisible() && packageSearchField.getText().isEmpty()) {
+                        hideSearchField();
+                    }
+                });
+            }
+        });
+        // Esc：有内容→清空；已空→收起搜索框并把焦点交回包树
         packageSearchField.getTextEditor().registerKeyboardAction(
                 e -> {
                     if (!packageSearchField.getText().isEmpty()) {
                         packageSearchField.setText("");
                     } else {
+                        hideSearchField();
                         packageTree.requestFocusInWindow();
                     }
                 },
                 KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ESCAPE, 0),
                 JComponent.WHEN_FOCUSED);
 
+        this.ftpStatusBar = buildFtpStatusBar();
+
         initUI();
         initListeners();
         tryAutoConnect();
     }
 
-    /** 初始化 UI 布局：FTP 连接状态、项目/系统下拉、目标包树和选择摘要 */
-    private void initUI() {
-        // 上半部表单区，独立 GridBag。三列：col 0=label / col 1=combo / col 2=+- 按钮。
-        // 关键：上下两个 panel 物理隔离，下半部分树的 preferredWidth 不再影响这里的列宽。
-        topPanel = new JPanel(new GridBagLayout());
+    /**
+     * 构造 FTP 状态条：连接状态文字 + 刷新 + 更多操作 + 连接按钮。
+     *
+     * <p>外部由 TargetContainerPanel 挂到自绘 toggle bar 的右侧（BorderLayout.CENTER），
+     * 与「FTP 模式 / 本地模式」toggle 按钮同行渲染；切到本地模式时容器整条 setVisible(false)。</p>
+     *
+     * @return FTP 状态条面板
+     * @author xumanyi
+     * @date 2026-05-16
+     */
+    private JPanel buildFtpStatusBar() {
+        // 整条按 BorderLayout 排：状态文字在 CENTER（按需占满剩余宽度），
+        // 右侧固定挂 [刷新][⋯ 更多][连接(仅未连接时)] 三枚等高的紧凑按钮。
+        JPanel bar = new JPanel(new BorderLayout(6, 0));
+        bar.setOpaque(false);
+        // 与 tab 文字基本对齐：左右 8px 留白；竖向 1px 间距让 trailing 不顶满 tab strip
+        bar.setBorder(JBUI.Borders.empty(1, 8, 1, 8));
 
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(3, 2, 3, 2);
-        gbc.anchor = GridBagConstraints.WEST;
-
-        // FTP 状态：单行布局
-        //   [FTP：]  状态标签（填满剩余宽度）  [⋯ 更多操作]  [连接](仅断开时)
-        gbc.gridx = 0; gbc.gridy = 0;
-        topPanel.add(new JBLabel("FTP："), gbc);
-
-        JPanel statusRow = new JPanel(new BorderLayout(6, 0));
         connectionStatus.putClientProperty("html.disable", Boolean.TRUE);
-        statusRow.add(connectionStatus, BorderLayout.CENTER);
+        bar.add(connectionStatus, BorderLayout.CENTER);
 
         // 更多操作按钮（切换账号 / 注销 收到这里；刷新已独立为行内图标按钮）
         // 纯图标按钮：无边框、无填充背景、无边距、不可聚焦
         JButton moreButton = new JButton(com.intellij.icons.AllIcons.Actions.More);
-        moreButton.setToolTipText("更多操作：切换账号 / 注销");
+        moreButton.setToolTipText("更多操作:切换账号 / 注销");
         moreButton.setMargin(JBUI.emptyInsets());
         moreButton.setBorderPainted(false);
         moreButton.setContentAreaFilled(false);
@@ -310,26 +377,53 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         refreshButton.setPreferredSize(new Dimension(moreBtnSize, moreBtnSize));
 
         JPanel rightBox = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        rightBox.setOpaque(false);
         rightBox.add(refreshButton);
         rightBox.add(moreButton);
         // connectButton 仅在未连接时可见，位于 ⋯ 右侧以便快速建立连接
         rightBox.add(connectButton);
-        statusRow.add(rightBox, BorderLayout.EAST);
+        bar.add(rightBox, BorderLayout.EAST);
 
-        // FTP 行横跨 col 1+col 2（gridwidth=2）让按钮组贴到面板右边界。
-        // 这里允许 spanning 是因为 topPanel 已不再跟树共享列宽，col 2 的尺寸只取决于
-        // +/- 按钮和 FTP 行自己的 preferredWidth——结果是稳定的。
-        gbc.gridx = 1; gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        topPanel.add(statusRow, gbc);
-        gbc.gridwidth = 1;
+        return bar;
+    }
+
+    /**
+     * 暴露 FTP 状态条给 TargetContainerPanel 挂到自绘 toggle bar 上。
+     *
+     * @return FTP 状态条面板，永远非 null
+     * @author xumanyi
+     * @date 2026-05-16
+     */
+    public JPanel getFtpStatusBar() {
+        return ftpStatusBar;
+    }
+
+    /** 初始化 UI 布局：项目/系统下拉、目标包树和选择摘要 */
+    private void initUI() {
+        // 上半部表单区，独立 GridBag。三列：col 0=label / col 1=combo / col 2=+- 按钮。
+        // 关键：上下两个 panel 物理隔离，下半部分树的 preferredWidth 不再影响这里的列宽。
+        topPanel = new JPanel(new GridBagLayout());
+
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(3, 0, 3, 8);
+        gbc.anchor = GridBagConstraints.EAST;
+
+        // FTP 状态条已抽出到 buildFtpStatusBar()，由 TargetContainerPanel 挂到
+        // JTabbedPane 的 trailingComponent 槽位，与「FTP 模式 / 本地模式」tab 同行。
+        // 这里不再在 topPanel 第 0 行渲染连接状态；项目/系统行 gridy 保持 2/3 不变。
 
         // 项目选择：用 PickerComboBox（视觉=JComboBox / 点击=自定义弹窗）替换原 JButton，
         // 让控件边框、暗色背景、高度、下拉箭头与同面板的"系统"以及左侧"工程"完全一致；
         // 点击下拉时仍弹出项目搜索面板。
-        gbc.gridx = 0; gbc.gridy = 2; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        topPanel.add(new JBLabel("项目："), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
+        gbc.gridx = 0; gbc.gridy = 2;
+        gbc.anchor = GridBagConstraints.EAST;
+        gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
+        gbc.insets = new Insets(3, 0, 3, 8);
+        topPanel.add(PanelChromes.rightLabel("项目"), gbc);
+        gbc.gridx = 1;
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
+        gbc.insets = new Insets(3, 0, 3, 0);
         projectCombo = new PickerComboBox("请选择项目", this::showProjectSearchPopup);
         // 同 systemCombo：长项目名不应撑大首选/最小宽度（防御）。
         // PickerComboBox 模型只有 1 个元素（当前显示文本），prototype 优先于模型项参与尺寸计算。
@@ -337,14 +431,28 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         projectCombo.setToolTipText("选择客户项目（对应 FTP 根目录下 /开发/{项目}/），支持搜索");
         topPanel.add(projectCombo, gbc);
 
+        // 项目行 col 2：🔍 toggle 显示/隐藏目标包搜索框（默认隐藏，节省纵向空间）。
+        // 单按钮与下方动态子目录行的 ➖ 等宽对齐。
+        searchToggleButton = createCompactActionButton(
+                com.intellij.icons.AllIcons.Actions.Find,
+                "<html>展开 / 收起目标包搜索框<br>展开后立即聚焦输入；ESC 清空后再 ESC 自动收起</html>",
+                e -> toggleSearchField());
+        gbc.gridx = 2; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
+        topPanel.add(searchToggleButton, gbc);
+
         // 系统下拉
-        gbc.gridx = 0; gbc.gridy = 3; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        topPanel.add(new JBLabel("系统："), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
+        gbc.gridx = 0; gbc.gridy = 3;
+        gbc.anchor = GridBagConstraints.EAST;
+        gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
+        gbc.insets = new Insets(3, 0, 3, 8);
+        topPanel.add(PanelChromes.rightLabel("系统"), gbc);
+        gbc.gridx = 1;
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
+        gbc.insets = new Insets(3, 0, 3, 0);
         topPanel.add(systemCombo, gbc);
 
-        // "+" 按钮：独占 col 2，与下方动态子目录行的 "−" 按钮共占同一列宽，
-        // 让 项目/系统/子目录 三类 combo 的右边界自动对齐到 col 1 右边
+        // 系统行 col 2：➕ 新增子目录筛选层级。与下方动态子目录行的 ➖ 同列同宽。
         addLevelButton = createCompactActionButton(
                 com.intellij.icons.AllIcons.General.Add, "新增子目录筛选",
                 e -> addSubdirLevel());
@@ -370,6 +478,9 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         packagePanel = new JPanel(new BorderLayout(0, 4));
 
         treeScroll = new JBScrollPane(packageTree);
+        // 与左侧源工程树保持一致：去掉 JBScrollPane 默认细边与 viewport 边，与外层背景平齐
+        treeScroll.setBorder(JBUI.Borders.empty());
+        treeScroll.setViewportBorder(JBUI.Borders.empty());
         packagePanel.add(packageSearchField, BorderLayout.NORTH);
         packagePanel.add(treeScroll, BorderLayout.CENTER);
 
@@ -463,6 +574,56 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             loadingBar.setVisible(false);
             loadingBar.revalidate();
         }
+    }
+
+    /**
+     * 切换目标包搜索框显示状态。
+     *
+     * <p>展开时：自动聚焦输入并全选已有文本；收起时：清空筛选并把焦点交回包树。
+     * 与左侧源工程文件搜索的 toggle 行为完全一致。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-16
+     */
+    private void toggleSearchField() {
+        if (packageSearchField.isVisible()) {
+            hideSearchField();
+            packageTree.requestFocusInWindow();
+        } else {
+            packageSearchField.setVisible(true);
+            revalidate();
+            repaint();
+            focusSearchField();
+        }
+    }
+
+    /**
+     * 收起搜索框并清空筛选；调用方负责把焦点交回合适位置。
+     *
+     * @author xumanyi
+     * @date 2026-05-16
+     */
+    private void hideSearchField() {
+        if (!packageSearchField.getText().isEmpty()) {
+            packageSearchField.setText("");
+        }
+        packageSearchField.setVisible(false);
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * 把焦点放到搜索框输入区并全选已有文本。
+     *
+     * <p>由 toggle 按钮与树键盘转发共用：保证两条路径都得到一致的"展开后立即可输入"体验。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-16
+     */
+    private void focusSearchField() {
+        JTextField editor = packageSearchField.getTextEditor();
+        editor.requestFocusInWindow();
+        editor.selectAll();
     }
 
     /** 初始化事件监听：连接、注销、项目/系统级联选择、刷新、全选 WAR
@@ -567,8 +728,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
                         refreshing = false;
-                        connectionStatus.setText("刷新失败: " + ex.getMessage());
-                        connectionStatus.setForeground(Color.RED);
+                        setLoginFailed("刷新失败：" + ex.getMessage());
                         refreshButton.setEnabled(true);
                     });
                 } finally {
@@ -1223,8 +1383,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         connectedPassword = null;
 
         if (!silent) {
-            connectionStatus.setText("未连接");
-            connectionStatus.setForeground(Color.RED);
+            setLoggedOut();
             connectButton.setVisible(true);
             logoutButton.setVisible(false);
             refreshButton.setVisible(false);
@@ -1517,8 +1676,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
      */
     private void switchToAccount(com.flux.deploy.util.CredentialCache.CachedCredential acc) {
         doLogout(true);
-        connectionStatus.setText("正在切换至 " + acc.getUsername() + "...");
-        connectionStatus.setForeground(Color.ORANGE);
+        setLoggingIn("切换至 " + acc.getUsername());
         doConnect(acc.getHost(), acc.getPort(), acc.getUsername(), acc.getPassword());
     }
 
@@ -1548,15 +1706,40 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
 
     // ==================== FTP 连接 ====================
 
+    /** 设置"已登录"状态：文字精简成两个字，账号全文挪到 tooltip */
+    private void setLoggedIn(String username, String host, int port) {
+        connectionStatus.setText("已登录");
+        connectionStatus.setForeground(new Color(0, 128, 0));
+        connectionStatus.setToolTipText(username + "@" + host + ":" + port);
+    }
+
+    /** 设置"未登录"状态：清掉 tooltip，避免显示旧账号信息 */
+    private void setLoggedOut() {
+        connectionStatus.setText("未登录");
+        connectionStatus.setForeground(Color.RED);
+        connectionStatus.setToolTipText(null);
+    }
+
+    /** 设置"登录中"状态：橙色提示，tooltip 可附带目标账号（无则 null） */
+    private void setLoggingIn(String detail) {
+        connectionStatus.setText("登录中...");
+        connectionStatus.setForeground(Color.ORANGE);
+        connectionStatus.setToolTipText(detail);
+    }
+
+    /** 设置"登录失败"状态：文字仍为两个字，错误详情挪到 tooltip 避免溢出 */
+    private void setLoginFailed(String reason) {
+        connectionStatus.setText("登录失败");
+        connectionStatus.setForeground(Color.RED);
+        connectionStatus.setToolTipText(reason);
+    }
+
     /** 尝试使用缓存凭据自动连接 FTP */
     private void tryAutoConnect() {
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             CredentialCache.CachedCredential cached = CredentialBridge.loadCachedCredential();
             if (cached != null) {
-                SwingUtilities.invokeLater(() -> {
-                    connectionStatus.setText("正在连接...");
-                    connectionStatus.setForeground(Color.ORANGE);
-                });
+                SwingUtilities.invokeLater(() -> setLoggingIn(null));
                 doConnect(cached.getHost(), cached.getPort(),
                         cached.getUsername(), cached.getPassword());
             }
@@ -1567,8 +1750,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
     private void connect() {
         CredentialCache.CachedCredential cached = CredentialBridge.loadCachedCredential();
         if (cached != null) {
-            connectionStatus.setText("正在连接...");
-            connectionStatus.setForeground(Color.ORANGE);
+            setLoggingIn(null);
             doConnect(cached.getHost(), cached.getPort(), cached.getUsername(), cached.getPassword());
             return;
         }
@@ -1596,8 +1778,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             int port = Integer.parseInt(portField.getText().trim());
             String user = userField.getText().trim();
             String pass = new String(passField.getPassword());
-            connectionStatus.setText("正在连接...");
-            connectionStatus.setForeground(Color.ORANGE);
+            setLoggingIn(null);
             doConnectAndSave(host, port, user, pass);
         }
     }
@@ -1620,8 +1801,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                     CredentialBridge.saveCredential(host, port, username, password);
                     List<String> projects = browseService.listSubdirectories("/开发/");
                     SwingUtilities.invokeLater(() -> {
-                        connectionStatus.setText(username + "@" + host + ":" + port + " 已连接");
-                        connectionStatus.setForeground(new Color(0, 128, 0));
+                        setLoggedIn(username, host, port);
                         connectButton.setVisible(false);
                         logoutButton.setVisible(true);
                         refreshButton.setVisible(true);
@@ -1631,10 +1811,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         fireContextChange();
                     });
                 } catch (Exception ex) {
-                    SwingUtilities.invokeLater(() -> {
-                        connectionStatus.setText("连接失败: " + ex.getMessage());
-                        connectionStatus.setForeground(Color.RED);
-                    });
+                    SwingUtilities.invokeLater(() -> setLoginFailed(ex.getMessage()));
                 }
                 } // end synchronized(ftpLock)
             } finally {
@@ -1660,8 +1837,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                     connectedPassword = password;
                     List<String> projects = browseService.listSubdirectories("/开发/");
                     SwingUtilities.invokeLater(() -> {
-                        connectionStatus.setText(username + "@" + host + ":" + port + " 已连接");
-                        connectionStatus.setForeground(new Color(0, 128, 0));
+                        setLoggedIn(username, host, port);
                         connectButton.setVisible(false);
                         logoutButton.setVisible(true);
                         refreshButton.setVisible(true);
@@ -1671,10 +1847,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         fireContextChange();
                     });
                 } catch (Exception ex) {
-                    SwingUtilities.invokeLater(() -> {
-                        connectionStatus.setText("连接失败: " + ex.getMessage());
-                        connectionStatus.setForeground(Color.RED);
-                    });
+                    SwingUtilities.invokeLater(() -> setLoginFailed(ex.getMessage()));
                 }
                 } // end synchronized(ftpLock)
             } finally {
@@ -1727,7 +1900,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         }
                     } catch (Exception ignored) {}
                     SwingUtilities.invokeLater(() ->
-                            connectionStatus.setText("加载失败: " + ex.getMessage()));
+                            setLoginFailed("加载失败：" + ex.getMessage()));
                 }
             }
             } finally {
@@ -1796,7 +1969,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                     // 重连也失败
                 }
                 SwingUtilities.invokeLater(() ->
-                        connectionStatus.setText("加载失败: " + ex.getMessage()));
+                        setLoginFailed("加载失败：" + ex.getMessage()));
             }
             } // end synchronized(ftpLock)
             } finally {
@@ -2253,7 +2426,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                     }
                     if (browseService == null) {
                         SwingUtilities.invokeLater(() ->
-                                connectionStatus.setText("连接已断开，无法加载子目录"));
+                                setLoginFailed("连接已断开，无法加载子目录"));
                         return;
                     }
                     try {
@@ -2263,7 +2436,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         reconnectFtp();
                         if (browseService == null) {
                             SwingUtilities.invokeLater(() ->
-                                    connectionStatus.setText("连接已断开，无法加载子目录"));
+                                    setLoginFailed("连接已断开，无法加载子目录"));
                             return;
                         }
                         subdirs = browseService.listSubdirectories(parentPath);
@@ -2281,7 +2454,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() ->
-                        connectionStatus.setText("加载子目录失败: " + ex.getMessage()));
+                        setLoginFailed("加载子目录失败：" + ex.getMessage()));
             } finally {
                 SwingUtilities.invokeLater(this::hideLoading);
             }

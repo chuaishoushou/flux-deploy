@@ -94,10 +94,30 @@ public class BackupGate implements Gate {
             ops.mkdirs(backupFilePath.substring(0, lastSlash));
         }
 
-        // 6. 下载远程原包到本地临时文件，再上传到备份目录
-        Path tempBackup = Files.createTempFile("backup-", "-" + target.getPackageName());
+        // 6. "1 下 + 2 上"优化：
+        //    优先复用前序门禁（如 StagingPackageBuilder）已下载的本地原包字节，跳过远端下载；
+        //    缺失时回退到下载到本地 temp，并保留供后续门禁复用。
+        //    本地 temp 的最终清理由流水线收尾统一处理（DeployPipeline finally 阶段）。
+        Path reusable = target.getLocalOriginalCopy();
+        boolean reusedExistingCopy = reusable != null
+                && Files.isRegularFile(reusable) && Files.size(reusable) > 0;
+
+        Path tempBackup;
+        long downloadedSize;
+        boolean handedOff = false;
+        if (reusedExistingCopy) {
+            tempBackup = reusable;
+            downloadedSize = Files.size(tempBackup);
+        } else {
+            tempBackup = Files.createTempFile("backup-", "-" + target.getPackageName());
+            try {
+                downloadedSize = ops.download(target.getRemotePath(), tempBackup);
+            } catch (IOException | RuntimeException e) {
+                Files.deleteIfExists(tempBackup);
+                throw e;
+            }
+        }
         try {
-            long downloadedSize = ops.download(target.getRemotePath(), tempBackup);
             ops.upload(tempBackup, backupFilePath);
 
             // 5. 验证备份大小
@@ -108,13 +128,20 @@ public class BackupGate implements Gate {
             }
 
             target.setBackupRemotePath(backupFilePath);
+            target.setLocalOriginalCopy(tempBackup);
             target.setStatus(TargetPackage.Status.BACKED_UP);
+            handedOff = true;
 
             System.out.println("  [备份] " + target.getPackageName()
-                    + " → " + backupFilePath + " (" + formatSize(backupSize) + ")");
+                    + " → " + backupFilePath + " (" + formatSize(backupSize) + ")"
+                    + (reusedExistingCopy ? "（复用 staging 阶段本地副本）" : ""));
 
         } finally {
-            Files.deleteIfExists(tempBackup);
+            // 异常路径：本次自己下载的 temp 未交付 → 删除避免泄漏；
+            // 复用前序门禁的副本 → 由流水线收尾统一删，本方法不删。
+            if (!handedOff && !reusedExistingCopy) {
+                Files.deleteIfExists(tempBackup);
+            }
         }
     }
 

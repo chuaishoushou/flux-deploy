@@ -11,19 +11,13 @@ import java.util.regex.Pattern;
  * 用户偏好配置文件 ~/.flux-deploy/config.toml 的读取与校验
  *
  * <p>独立于 credentials.toml（凭证由 CLI 自动管理）。
- * 本文件由用户手动编辑，配置批量部署的并发数与失败策略。</p>
+ * 本文件由用户手动编辑，配置失败策略与重试次数。</p>
  *
- * <p>非法值（超出 [1,10]、未知策略名、类型错误）一律抛 {@link IllegalArgumentException}，
+ * <p>非法值（未知策略名、重试次数越界、类型错误）一律抛 {@link IllegalArgumentException}，
  * 不静默使用默认值，避免用户改错文件而不自知。</p>
  *
  * <p>示例：</p>
  * <pre>
- * [parallelism]
- * backup = 3            # 备份阶段并发数（默认 3，避免给 FTP 服务器过大压力）
- * embed = 3             # 嵌入阶段（CPU + 磁盘）并发数
- * embed_download = 3    # 嵌入阶段下载子池并发数（占用下行带宽）
- * embed_upload = 3      # 嵌入阶段上传子池并发数（占用上行带宽）
- *
  * [failure_strategy]
  * mode = "isolated"
  *
@@ -32,9 +26,17 @@ import java.util.regex.Pattern;
  * backup_max_retries = 1 # 备份阶段失败包的串行重试次数（默认 1，0 = 不重试）
  * </pre>
  *
- * <p>嵌入阶段使用三阶段流水线（{@code embed_download} → {@code embed} → {@code embed_upload}），
- * 在上下行带宽独立的链路上下载和上传可以重叠。
- * {@code embed_download} / {@code embed_upload} 缺省时回退到 {@code embed}（向后兼容）。</p>
+ * <p><b>已移除的 [parallelism] 块（自 2026-05-08 起）</b>：</p>
+ * <ul>
+ *   <li>FTP 操作（备份下载/上传、嵌入阶段上传）并发度统一固定为 3。
+ *       理由：FTP 服务端的 max-clients-per-ip 由运维配置，与本机硬件无关；
+ *       3 是对常见 FTP 服务端能拿到接近线性加速且不触发拒连的安全值。</li>
+ *   <li>本地补丁/嵌入并发度固定为 1（串行执行）。
+ *       理由：单包补丁是秒级本地操作（解 zip / 替换 class / 写回），
+ *       性能瓶颈在 FTP 上传，本地多线程也只是等 FTP，调大无收益。</li>
+ *   <li>存量配置文件中的 {@code [parallelism]} 块会被静默忽略，不再读取也不再校验，
+ *       不影响启动；新生成的默认模板里不再包含此块。</li>
+ * </ul>
  *
  * <p>重试机制：流水线主流程跑完后，对失败包按配置次数串行重试（每次完整 D-E-U）。
  * AUTH / ROLLBACK_FAILED 类错误不参与重试。</p>
@@ -47,14 +49,6 @@ public final class UserConfig {
     /** 默认配置文件路径 */
     private static final Path DEFAULT_PATH =
             Path.of(System.getProperty("user.home"), ".flux-deploy", "config.toml");
-
-    /** 并发数合法范围下界 */
-    private static final int MIN_PARALLELISM = 1;
-    /** 并发数合法范围上界 */
-    private static final int MAX_PARALLELISM = 10;
-
-    /** 默认并发数（从 5 降至 3，减少 FTP 服务器侧管理压力，避免高并发触发偶发连接异常） */
-    private static final int DEFAULT_PARALLELISM = 3;
 
     /** 重试次数合法范围下界（0 = 不重试） */
     private static final int MIN_RETRIES = 0;
@@ -76,12 +70,8 @@ public final class UserConfig {
             + "# 由用户手动编辑；非法值（越界/未知策略名/类型错误）会直接终止部署并提示\n"
             + "# 修改后无需重启 IDE，下次点击「打包并上传」立即生效\n"
             + "\n"
-            + "[parallelism]\n"
-            + "# 各阶段并发数（[1, 10] 范围内）\n"
-            + "backup = 3            # 备份阶段并发数\n"
-            + "embed = 3             # 嵌入阶段并发数\n"
-            + "embed_download = 3    # 嵌入流水线下载子池（占用下行带宽，缺省回退到 embed）\n"
-            + "embed_upload = 3      # 嵌入流水线上传子池（占用上行带宽，缺省回退到 embed）\n"
+            + "# 注：FTP 并发固定为 3（受服务端 max-clients 限制约束），本地补丁串行执行\n"
+            + "# （性能瓶颈在 FTP 上传，本地并发无收益）。无需配置并发参数。\n"
             + "\n"
             + "[failure_strategy]\n"
             + "# 失败策略：\n"
@@ -96,10 +86,6 @@ public final class UserConfig {
             + "embed_max_retries = 1   # 嵌入阶段重试次数\n"
             + "backup_max_retries = 1  # 备份阶段重试次数\n";
 
-    private final int backupParallelism;
-    private final int embedParallelism;
-    private final int embedDownloadParallelism;
-    private final int embedUploadParallelism;
     private final FailureStrategy failureStrategy;
     private final int embedMaxRetries;
     private final int backupMaxRetries;
@@ -107,22 +93,13 @@ public final class UserConfig {
     /**
      * 私有构造，外部通过 {@link #load()} / {@link #loadFrom(Path)} 创建
      *
-     * @param backup           备份阶段并发数
-     * @param embed            嵌入阶段（CPU + 磁盘）并发数
-     * @param embedDownload    嵌入阶段下载子池并发数
-     * @param embedUpload      嵌入阶段上传子池并发数
      * @param strategy         失败策略
      * @param embedMaxRetries  嵌入阶段失败包的串行重试次数（0 = 不重试）
      * @param backupMaxRetries 备份阶段失败包的串行重试次数（0 = 不重试）
      * @author claude
      * @date 2026-05-02
      */
-    private UserConfig(int backup, int embed, int embedDownload, int embedUpload,
-                       FailureStrategy strategy, int embedMaxRetries, int backupMaxRetries) {
-        this.backupParallelism = backup;
-        this.embedParallelism = embed;
-        this.embedDownloadParallelism = embedDownload;
-        this.embedUploadParallelism = embedUpload;
+    private UserConfig(FailureStrategy strategy, int embedMaxRetries, int backupMaxRetries) {
         this.failureStrategy = strategy;
         this.embedMaxRetries = embedMaxRetries;
         this.backupMaxRetries = backupMaxRetries;
@@ -213,9 +190,7 @@ public final class UserConfig {
      */
     public static UserConfig loadFrom(Path path) {
         if (path == null || !Files.isReadable(path)) {
-            return new UserConfig(DEFAULT_PARALLELISM, DEFAULT_PARALLELISM,
-                    DEFAULT_PARALLELISM, DEFAULT_PARALLELISM,
-                    FailureStrategy.defaultStrategy(),
+            return new UserConfig(FailureStrategy.defaultStrategy(),
                     DEFAULT_EMBED_MAX_RETRIES, DEFAULT_BACKUP_MAX_RETRIES);
         }
         String content;
@@ -225,16 +200,8 @@ public final class UserConfig {
             throw new IllegalArgumentException("无法读取配置文件: " + path + " - " + e.getMessage(), e);
         }
 
-        int backup = parseIntField(content, "parallelism", "backup", DEFAULT_PARALLELISM);
-        int embed = parseIntField(content, "parallelism", "embed", DEFAULT_PARALLELISM);
-        validateRange("parallelism.backup", backup);
-        validateRange("parallelism.embed", embed);
-
-        // 流水线子池：embed_download / embed_upload 缺省时回退到 embed（向后兼容旧配置）
-        int embedDownload = parseIntField(content, "parallelism", "embed_download", embed);
-        int embedUpload = parseIntField(content, "parallelism", "embed_upload", embed);
-        validateRange("parallelism.embed_download", embedDownload);
-        validateRange("parallelism.embed_upload", embedUpload);
+        // [parallelism] 块自 2026-05-08 起完全失效：旧配置中存在的字段被静默忽略，不再校验。
+        // FTP 并发固定为 3、本地补丁串行执行，详见 DeployExecutionService 与 PipelineExecutor 内部常量。
 
         String modeRaw = parseStringField(content, "failure_strategy", "mode");
         FailureStrategy strategy = (modeRaw == null)
@@ -249,56 +216,7 @@ public final class UserConfig {
                 DEFAULT_BACKUP_MAX_RETRIES);
         validateRetries("retry.backup_max_retries", backupMaxRetries);
 
-        return new UserConfig(backup, embed, embedDownload, embedUpload, strategy,
-                embedMaxRetries, backupMaxRetries);
-    }
-
-    /**
-     * 备份阶段并发数
-     *
-     * @return [1, 10] 范围内的整数
-     * @author claude
-     * @date 2026-05-02
-     */
-    public int getBackupParallelism() {
-        return backupParallelism;
-    }
-
-    /**
-     * 嵌入阶段（CPU + 磁盘）并发数
-     *
-     * @return [1, 10] 范围内的整数
-     * @author claude
-     * @date 2026-05-02
-     */
-    public int getEmbedParallelism() {
-        return embedParallelism;
-    }
-
-    /**
-     * 嵌入阶段下载子池并发数（占用下行带宽）
-     *
-     * <p>缺省时回退到 {@link #getEmbedParallelism()}。</p>
-     *
-     * @return [1, 10] 范围内的整数
-     * @author claude
-     * @date 2026-05-02
-     */
-    public int getEmbedDownloadParallelism() {
-        return embedDownloadParallelism;
-    }
-
-    /**
-     * 嵌入阶段上传子池并发数（占用上行带宽）
-     *
-     * <p>缺省时回退到 {@link #getEmbedParallelism()}。</p>
-     *
-     * @return [1, 10] 范围内的整数
-     * @author claude
-     * @date 2026-05-02
-     */
-    public int getEmbedUploadParallelism() {
-        return embedUploadParallelism;
+        return new UserConfig(strategy, embedMaxRetries, backupMaxRetries);
     }
 
     /**
@@ -332,22 +250,6 @@ public final class UserConfig {
      */
     public int getBackupMaxRetries() {
         return backupMaxRetries;
-    }
-
-    /**
-     * 校验并发数在合法范围
-     *
-     * @param fieldName 字段全名（如 parallelism.backup），用于错误提示
-     * @param value     实际值
-     * @throws IllegalArgumentException 越界
-     * @author claude
-     * @date 2026-05-02
-     */
-    private static void validateRange(String fieldName, int value) {
-        if (value < MIN_PARALLELISM || value > MAX_PARALLELISM) {
-            throw new IllegalArgumentException(
-                    fieldName + " 必须在 [1, 10] 范围内，当前值: " + value);
-        }
     }
 
     /**

@@ -52,6 +52,7 @@ public class DeployPipeline {
         // 1. 构建显式目标包列表（name 不为 null 的条目）
         List<TargetPackage> targets = buildTargets();
 
+        try {
         // 2. 连接 FTP
         try (FtpSession session = new FtpSession(config.getHost(), config.getPort())) {
             session.connect(config.getUsername(), config.getPassword());
@@ -132,8 +133,36 @@ public class DeployPipeline {
         } catch (IOException e) {
             result.addError("connection", "", "FTP 连接失败: " + e.getMessage());
         }
+        } finally {
+            // "1 下 + 2 上"优化：删除所有 staging / 备份阶段为复用而保留的本地原包 temp，
+            // 不论部署成功 / 失败 / 异常退出，避免 temp 残留。
+            cleanupLocalOriginalCopies(targets);
+        }
 
         return result;
+    }
+
+    /**
+     * 清理所有 target 上挂载的本地原包副本 temp 文件。
+     *
+     * <p>{@link com.flux.deploy.deploy.gates.BackupGate} 与
+     * {@link com.flux.deploy.plugin.service.StagingPackageBuilder#buildKeepingOriginal}
+     * 会在 target 上挂载本地原包副本路径用于跨门禁复用。
+     * 流水线收尾必须统一删除，避免 temp 文件累积。</p>
+     *
+     * @param targets 目标包列表
+     * @author claude
+     * @date 2026-05-08
+     */
+    private static void cleanupLocalOriginalCopies(List<TargetPackage> targets) {
+        if (targets == null) return;
+        for (TargetPackage t : targets) {
+            java.nio.file.Path local = t.getLocalOriginalCopy();
+            if (local != null) {
+                try { java.nio.file.Files.deleteIfExists(local); } catch (Exception ignored) {}
+                t.setLocalOriginalCopy(null);
+            }
+        }
     }
 
     /**
@@ -492,17 +521,21 @@ public class DeployPipeline {
                         target.getPackageName(),
                         changedFiles,
                         System.out::println);
-                Path staging = builder.build(
+                // "1 下 + 2 上"优化：用 buildKeepingOriginal 保留下载到本地的原包字节，
+                // 后续 BackupGate 直接复用，避免对同一字节再做一次远端下载。
+                StagingPackageBuilder.BuildResult res = builder.buildKeepingOriginal(
                         config.getHost(), config.getPort(),
                         config.getUsername(), config.getPassword(),
                         target.getRemotePath());
-                if (staging == null || !Files.isRegularFile(staging)) {
+                if (res == null || res.getStaging() == null
+                        || !Files.isRegularFile(res.getStaging())) {
                     result.addError("staging", target.getPackageName(),
                             "暂存包构建失败（可能未编译或未找到变更的 class）");
                     return false;
                 }
-                target.setLocalStagingFile(staging);
-                System.out.println("[staging] " + target.getPackageName() + " → " + staging);
+                target.setLocalStagingFile(res.getStaging());
+                target.setLocalOriginalCopy(res.getOriginalDownloaded());
+                System.out.println("[staging] " + target.getPackageName() + " → " + res.getStaging());
             } catch (IOException e) {
                 result.addError("staging", target.getPackageName(), "构建暂存包异常: " + e.getMessage());
                 return false;

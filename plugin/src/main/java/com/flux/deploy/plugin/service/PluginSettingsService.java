@@ -37,6 +37,15 @@ public final class PluginSettingsService implements PersistentStateComponent<Plu
     public static class State {
         /** 上次使用的操作人（FLUX 内同一开发常年同名，缓存有意义） */
         public String lastOperator;
+
+        /**
+         * 上次发邮件时填的收件人（顾问名字相对固定，跨项目跨任务记忆有意义）。
+         *
+         * <p>仅作为「通知邮件」弹窗的 {@code ${收件人}} 占位符初始值；
+         * 用户在弹窗里改了之后会回写到这里供下次使用。
+         * 不参与版本记录 / 部署流程，无需校验。</p>
+         */
+        public String lastEmailRecipient;
     }
 
     /**

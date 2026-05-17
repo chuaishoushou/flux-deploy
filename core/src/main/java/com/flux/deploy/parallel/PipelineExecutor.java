@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -51,29 +52,47 @@ public final class PipelineExecutor {
     }
 
     /**
+     * 嵌入池规模常量。
+     *
+     * <p>本地补丁是秒级 CPU + 磁盘操作，并发处理无收益（瓶颈在 FTP 上传）。
+     * 流水线的 embed 阶段始终单线程串行，避免一组生产者-消费者队列与并发副作用。</p>
+     */
+    private static final int EMBED_POOL_SIZE = 1;
+
+    /**
      * 执行选项
      *
      * @param downloadParallelism 下载池并发数（占用下行带宽，≥ 1）
-     * @param embedParallelism    嵌入池并发数（CPU + 磁盘 IO，≥ 1）
      * @param uploadParallelism   上传池并发数（占用上行带宽，≥ 1）
      * @param strategy            失败策略（决定单包失败是否传播取消）
      * @param token               取消令牌（用户主动停止）
      * @param phaseName           阶段名（用于线程命名 flux-deploy-&lt;phaseName&gt;-&lt;stage&gt;-&lt;seq&gt;）
+     * @param realTimeSink        实时日志输出回调，{@code null} 时落到 outcome.logSegment 由调用方统一 flush
      * @author claude
      * @date 2026-05-02
      */
     public record Options(
             int downloadParallelism,
-            int embedParallelism,
             int uploadParallelism,
             FailureStrategy strategy,
             CancellationToken token,
-            String phaseName
+            String phaseName,
+            Consumer<String> realTimeSink
     ) {
         public Options {
             Objects.requireNonNull(strategy, "strategy");
             Objects.requireNonNull(token, "token");
             Objects.requireNonNull(phaseName, "phaseName");
+            // realTimeSink 允许为 null：兼容旧调用，仍保留单包日志聚合到 outcome.logSegment
+        }
+
+        /** 未传 realTimeSink 时按 null 处理（即不开启实时 flush）。 */
+        public Options(int downloadParallelism,
+                       int uploadParallelism,
+                       FailureStrategy strategy,
+                       CancellationToken token,
+                       String phaseName) {
+            this(downloadParallelism, uploadParallelism, strategy, token, phaseName, null);
         }
     }
 
@@ -169,7 +188,6 @@ public final class PipelineExecutor {
         Objects.requireNonNull(keyMapper, "keyMapper");
         Objects.requireNonNull(stages, "stages");
         validateParallelism("downloadParallelism", opts.downloadParallelism());
-        validateParallelism("embedParallelism", opts.embedParallelism());
         validateParallelism("uploadParallelism", opts.uploadParallelism());
 
         Map<String, TargetOutcome> outcomes = new LinkedHashMap<>();
@@ -185,8 +203,9 @@ public final class PipelineExecutor {
 
         ExecutorService dPool = Executors.newFixedThreadPool(
                 Math.min(opts.downloadParallelism(), targets.size()), dTf);
+        // 嵌入池规模写死为 1：本地补丁是秒级操作，并发处理无收益（详见 EMBED_POOL_SIZE 注释）
         ExecutorService ePool = Executors.newFixedThreadPool(
-                Math.min(opts.embedParallelism(), targets.size()), eTf);
+                Math.min(EMBED_POOL_SIZE, targets.size()), eTf);
         ExecutorService uPool = Executors.newFixedThreadPool(
                 Math.min(opts.uploadParallelism(), targets.size()), uTf);
         try {
@@ -244,44 +263,46 @@ public final class PipelineExecutor {
             ExecutorService dPool, ExecutorService ePool, ExecutorService uPool) {
 
         StringBuilder log = new StringBuilder();
+        // 已实时 flush 到 sink 的字符位置，stage 完成时把新增片段按整行推给 sink
+        int[] flushedTo = {0};
         long startMs = System.currentTimeMillis();
         // 状态容器：用数组承载 D/E 中间结果，便于在 cleanup / handle 中访问
         Object[] state = new Object[2]; // [0]=downloaded, [1]=embedded
 
         CompletableFuture<D> downloadFuture = CompletableFuture.supplyAsync(() -> {
             checkCancelled(opts.token());
-            log.append("[流水线] ").append(Thread.currentThread().getName())
-                    .append(" 下载开始: ").append(formatHms(System.currentTimeMillis())).append('\n');
             try {
                 D d = stages.download(target, log);
                 state[0] = d;
                 return d;
             } catch (Exception e) {
                 throw new CompletionWrapper(e);
+            } finally {
+                flushDelta(log, flushedTo, opts.realTimeSink());
             }
         }, dPool);
 
         CompletableFuture<E> embedFuture = downloadFuture.thenApplyAsync(d -> {
             checkCancelled(opts.token());
-            log.append("[流水线] ").append(Thread.currentThread().getName())
-                    .append(" 嵌入开始: ").append(formatHms(System.currentTimeMillis())).append('\n');
             try {
                 E e = stages.embed(target, d, log);
                 state[1] = e;
                 return e;
             } catch (Exception ex) {
                 throw new CompletionWrapper(ex);
+            } finally {
+                flushDelta(log, flushedTo, opts.realTimeSink());
             }
         }, ePool);
 
         CompletableFuture<Void> uploadFuture = embedFuture.thenAcceptAsync(e -> {
             checkCancelled(opts.token());
-            log.append("[流水线] ").append(Thread.currentThread().getName())
-                    .append(" 上传开始: ").append(formatHms(System.currentTimeMillis())).append('\n');
             try {
                 stages.upload(target, e, log);
             } catch (Exception ex) {
                 throw new CompletionWrapper(ex);
+            } finally {
+                flushDelta(log, flushedTo, opts.realTimeSink());
             }
         }, uPool);
 
@@ -290,42 +311,77 @@ public final class PipelineExecutor {
             try {
                 stages.cleanup(target, (D) state[0], (E) state[1]);
             } catch (Throwable cleanupErr) {
-                log.append("[警告] cleanup 抛出异常: ").append(cleanupErr.getMessage()).append('\n');
+                log.append("WARN  [嵌入] cleanup 抛出异常：").append(cleanupErr.getMessage()).append('\n');
             }
 
             long elapsedMs = System.currentTimeMillis() - startMs;
             String elapsedStr = String.format(Locale.ROOT, "%.1f", elapsedMs / 1000.0);
 
             TargetOutcome out;
+            // 启用了实时 flush 的调用方：单包日志已边产边推给 sink，outcome.logSegment 留空避免重复
+            boolean realTime = opts.realTimeSink() != null;
             if (t == null) {
-                String diagLine = "[流水线] " + key + " 完成 (耗时 " + elapsedStr + "s)\n";
-                out = TargetOutcome.success(key, log.toString() + diagLine);
+                String diagLine = "INFO  [嵌入] " + key + " 完成，耗时 " + elapsedStr + "s\n";
+                log.append(diagLine);
+                out = TargetOutcome.success(key, realTime ? "" : log.toString());
             } else {
                 Throwable rootCause = unwrap(t);
                 if (rootCause instanceof CancellationToken.CancellationException) {
-                    String diagLine = "[流水线] " + key + " 已取消 (耗时 " + elapsedStr + "s)\n";
-                    out = TargetOutcome.cancelled(key, log.toString() + diagLine);
+                    String diagLine = "WARN  [嵌入] " + key + " 已取消，耗时 " + elapsedStr + "s\n";
+                    log.append(diagLine);
+                    out = TargetOutcome.cancelled(key, realTime ? "" : log.toString());
                 } else {
                     FtpErrorKind kind = FtpErrorClassifier.classify(rootCause);
                     String stage = inferFailedStage(state);
                     String reason = rootCause.getMessage() != null
                             ? rootCause.getMessage() : rootCause.getClass().getSimpleName();
-                    // 失败 → 明确显示"失败 + 阶段 + 错误信息"，避免被误读为"完成"
-                    String diagLine = "[流水线] ✗ " + key + " " + stage + "失败 (耗时 "
-                            + elapsedStr + "s) — " + reason + "\n";
-                    out = TargetOutcome.failed(key, rootCause, kind, log.toString() + diagLine);
-                    // 失败传播：根据 strategy + errorKind 决定是否触发 token cancel
+                    String diagLine = "ERROR [嵌入] " + key + " " + stage + "失败，耗时 "
+                            + elapsedStr + "s，原因：" + reason + "\n";
+                    log.append(diagLine);
+                    out = TargetOutcome.failed(key, rootCause, kind, realTime ? "" : log.toString());
                     if (decideCancel(opts.strategy(), kind)) {
                         tryCancel(opts.token());
                     }
                 }
             }
 
+            // 把 handle 阶段追加的诊断行也实时 flush 出去
+            flushDelta(log, flushedTo, opts.realTimeSink());
+
             synchronized (outcomes) {
                 outcomes.put(key, out);
             }
             return null;
         });
+    }
+
+    /**
+     * 把 log 缓冲中尚未 flush 的整行片段实时推给 sink
+     *
+     * <p>若 sink 为 {@code null}（旧调用），则只推进 flushedTo 索引，等同于禁用实时 flush。
+     * 仅 flush 包含完整换行的片段；末尾未换行的尾巴留待下次。</p>
+     *
+     * @param log       共享日志缓冲
+     * @param flushedTo 一元数组承载已 flush 字符位置（in/out 参数）
+     * @param sink      实时输出回调，可为 {@code null}
+     * @author claude
+     * @date 2026-05-07
+     */
+    private static void flushDelta(StringBuilder log, int[] flushedTo, Consumer<String> sink) {
+        if (sink == null) return;
+        int len;
+        String chunk;
+        synchronized (log) {
+            len = log.length();
+            if (len <= flushedTo[0]) return;
+            int lastNewline = log.lastIndexOf("\n", len - 1);
+            if (lastNewline < flushedTo[0]) return;
+            chunk = log.substring(flushedTo[0], lastNewline + 1);
+            flushedTo[0] = lastNewline + 1;
+        }
+        for (String line : chunk.split("\n", -1)) {
+            if (!line.isEmpty()) sink.accept(line);
+        }
     }
 
     /**

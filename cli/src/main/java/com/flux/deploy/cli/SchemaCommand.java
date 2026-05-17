@@ -195,7 +195,7 @@ final class SchemaCommand {
 
         Map<String, Object> metaProps = ordered();
         metaProps.put("taskId", prop("string",
-                "Task ID appended to *_update_note.txt."));
+                "Task ID appended to *_update_notes.txt."));
         metaProps.put("customerId", prop("string",
                 "Customer service ID."));
         metaProps.put("operator", prop("string",

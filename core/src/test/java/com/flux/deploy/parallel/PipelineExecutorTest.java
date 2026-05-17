@@ -61,7 +61,7 @@ class PipelineExecutorTest {
     void allSuccess_eachStageRunsForEachTarget() {
         SimpleStages stages = new SimpleStages(0, 0, 0);
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b", "c"), s -> s, stages);
@@ -95,7 +95,7 @@ class PipelineExecutorTest {
         // 至少应该明显 < 串行
         SimpleStages stages = new SimpleStages(200, 10, 200);
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                1, 1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "pipe");
+                1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "pipe");
 
         long t0 = System.currentTimeMillis();
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
@@ -128,7 +128,7 @@ class PipelineExecutorTest {
             }
         };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b", "c"), s -> s, stages);
@@ -155,7 +155,7 @@ class PipelineExecutorTest {
             }
         };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b", "c"), s -> s, stages);
@@ -182,7 +182,7 @@ class PipelineExecutorTest {
             }
         };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b", "c"), s -> s, stages);
@@ -218,7 +218,7 @@ class PipelineExecutorTest {
             }
         };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         PipelineExecutor.execute(opts, List.of("a", "b", "c"), s -> s, stages);
 
@@ -244,7 +244,7 @@ class PipelineExecutorTest {
             }
         };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                1, 1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b", "c"), s -> s, stages);
@@ -265,7 +265,7 @@ class PipelineExecutorTest {
         token.cancel();
         SimpleStages stages = new SimpleStages(0, 0, 0);
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, token, "test");
+                2, 2, FailureStrategy.ISOLATED, token, "test");
 
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of("a", "b"), s -> s, stages);
@@ -278,7 +278,7 @@ class PipelineExecutorTest {
     @Test
     void invalidParallelism_throws() {
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                0, 1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                0, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
         assertThatThrownBy(() -> PipelineExecutor.execute(
                 opts, List.of("a"), s -> s, new SimpleStages(0, 0, 0)))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -288,7 +288,7 @@ class PipelineExecutorTest {
     @Test
     void emptyTargets_returnsEmptyMap() {
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                2, 2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
+                2, 2, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "test");
         Map<String, TargetOutcome> outcomes = PipelineExecutor.execute(
                 opts, List.of(), (Object s) -> s.toString(),
                 new PipelineExecutor.PipelineStages<Object, Object, Object>() {
@@ -320,7 +320,7 @@ class PipelineExecutorTest {
                     }
                 };
         PipelineExecutor.Options opts = new PipelineExecutor.Options(
-                1, 1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "naming");
+                1, 1, FailureStrategy.ISOLATED, new CancellationToken.Simple(), "naming");
 
         PipelineExecutor.execute(opts, List.of("a"), s -> s, stages);
 

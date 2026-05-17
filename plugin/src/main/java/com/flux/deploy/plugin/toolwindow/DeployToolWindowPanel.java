@@ -1,5 +1,10 @@
 package com.flux.deploy.plugin.toolwindow;
 
+import com.flux.deploy.email.EmailDraftManager;
+import com.flux.deploy.email.EmailTemplateStore;
+import com.flux.deploy.model.DeployResult;
+import com.flux.deploy.plugin.email.EmailDialog;
+import com.flux.deploy.plugin.email.EmailRuntimeData;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.flux.deploy.plugin.model.DeployTargetMode;
 import com.flux.deploy.plugin.model.FtpTargetSelection;
@@ -9,7 +14,15 @@ import com.flux.deploy.plugin.service.DeployExecutionService;
 import com.flux.deploy.plugin.service.GitChangeDetector;
 import com.flux.deploy.plugin.service.LocalPackagePatchService;
 import com.flux.deploy.plugin.service.MavenArtifactResolver;
+import com.flux.deploy.plugin.util.ArtifactPresenceValidator;
+import com.flux.deploy.plugin.util.BackupTargetGuard;
+import com.flux.deploy.plugin.util.DeployRunLogger;
+import com.flux.deploy.plugin.util.DeployRunMeta;
+import com.flux.deploy.plugin.util.DeployRunStatus;
 import com.intellij.icons.AllIcons;
+import com.intellij.ide.plugins.PluginManagerCore;
+import com.intellij.openapi.application.ApplicationInfo;
+import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -28,10 +41,16 @@ import java.awt.Desktop;
 import java.awt.event.AWTEventListener;
 import java.awt.event.MouseEvent;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * FLUX 客服更新主面板
@@ -42,7 +61,8 @@ import java.util.Set;
  * @author xumanyi
  * @date 2026-03-27
  */
-public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
+public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
+        implements EmailRuntimeData {
 
     /** FTP 模式按钮卡片键 */
     private static final String CARD_FTP = "ftp";
@@ -54,7 +74,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private static final String ROOT_DOCS = "docs";
     /** 右列初始分割比例：目标区占比 */
     private static final float RIGHT_SPLIT_DEFAULT_PROPORTION = 0.66f;
-    /** 日志关闭时目标区占比（留极窄条给折叠标题） */
+    /** 日志最小化时右侧分割条的比例：让目标区拿 97%、日志槽位只剩标题栏 */
     private static final float RIGHT_SPLIT_LOG_CLOSED_PROPORTION = 0.97f;
 
     /** 根卡片布局：在部署面板与文档面板之间切换 */
@@ -70,6 +90,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private final TargetSectionPanel targetSection;
     private final InfoSectionPanel infoSection;
     private final LogSectionPanel logSection;
+
+    /**
+     * 通知邮件 draft 管理器（in-memory，per-panel = per-project）。
+     *
+     * <p>持有当前邮件工作副本、监听项目变化 / 重置 / 部署完成事件。
+     * 不依赖 IDE Platform，可在测试中独立验证逻辑。</p>
+     */
+    private final EmailDraftManager emailDraftManager =
+            new EmailDraftManager(new EmailTemplateStore());
 
     // FTP 模式按钮
     private final JButton preCheckButton;
@@ -98,12 +127,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
     /** 部署视图根容器，用于日志全屏切换时替换内容 */
     private JPanel deployCard;
-    /** 部署主分割器（左列｜右列），全屏退出时还原回 deployCard */
+    /** 部署主分割器（左列｜右列），固定 50/50 不可拖动；日志全屏退出时还原回 deployCard */
     private OnePixelSplitter mainSplit;
     /** 日志是否处于插件级全屏状态（占满整个 deployCard） */
     private boolean logFullscreen = false;
-    /** 全屏 / 取消全屏切换按钮 */
-    private JButton fullscreenToggleButton;
+
+    // 日志卡片头部三按钮：清空 / 全屏 / 最小化。
+    // 展开态（logCard）与折叠态（logClosedBar）各持有一组（同一 JButton 实例不能跨容器复用），
+    // 通过 refreshHeaderIcons 统一刷新 6 个按钮的图标与 tooltip，确保两套头部状态一致。
+    private JButton logHeaderClearButton;
+    private JButton logHeaderFullscreenButton;
+    private JButton logHeaderMinimizeButton;
+    private JButton logClosedClearButton;
+    private JButton logClosedFullscreenButton;
+    private JButton logClosedMinimizeButton;
 
     /** 模式感知的按钮卡片容器 */
     private JPanel buttonsCard;
@@ -165,6 +202,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         this.targetSection = targetContainer.getFtpPanel();
         this.infoSection = new InfoSectionPanel(project, backupCheckBox);
         this.logSection = new LogSectionPanel();
+        // 横幅：打开 ToolWindow 时在日志顶端记录当前版本，便于排查问题第一眼对版本。
+        // 实际打包动作（打包并上传 / 打包不上传 / 本地打包）的起头另带 (vX) 后缀；预检不打。
+        logSection.appendLog("INFO  [版本] FLUX Deploy v" + currentPluginVersion());
 
         this.preCheckButton = new JButton("预检");
         this.deployButton = new JButton("打包并上传");
@@ -202,10 +242,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             }
         });
         // 项目/系统/连接变化时：清空本次 session 的自定义备份根（避免跨系统误用），
-        // 再刷新"备份至"行显示最新默认派生路径
+        // 再刷新"备份至"行显示最新默认派生路径；同时让邮件 draft 管理器判定项目是否真变了
+        // ——只有项目本身变化才会清空 draft，系统切换 / 连接刷新保留 draft 累积成果。
         this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(() -> {
             this.infoSection.clearSessionBackupRoot();
             this.infoSection.refreshBackupLocationLabel();
+            this.emailDraftManager.onProjectMaybeChanged(
+                    this.targetSection.getCurrentProjectDir());
         }));
 
         initUI();
@@ -227,22 +270,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             }
             docsPanel.prewarm();
         });
+
+        // 日志栏默认展开：首启就能看到「[版本] FLUX Deploy vX.X.X」横幅和后续运行日志，
+        // 用户若想腾出纵向空间可手动点日志卡片头部的最小化图标折叠。
     }
 
     private void initUI() {
         setMinimumSize(new Dimension(520, 400));
 
-        // ═══ 执行卡片（按内容自适应高度，固定在右列底部） ═══
-        JPanel execCard = new JPanel(new BorderLayout(0, 4));
-        execCard.setBorder(BorderFactory.createCompoundBorder(
-                new RoundedBorder(8), JBUI.Borders.empty(4, 8)));
-
-        JBLabel execTitle = new JBLabel("执行操作");
-        styleCardTitle(execTitle);
-        execCard.add(execTitle, BorderLayout.NORTH);
-
+        // ═══ 执行卡片：infoSection + 分隔线 + 按钮组（CardLayout 切 FTP / 本地） ═══
         JPanel execContent = new JPanel();
         execContent.setLayout(new BoxLayout(execContent, BoxLayout.Y_AXIS));
+        execContent.setBorder(JBUI.Borders.empty(4, 8, 4, 8));
 
         infoSection.setAlignmentX(Component.LEFT_ALIGNMENT);
         execContent.add(infoSection);
@@ -275,67 +314,60 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         buttonsCard.add(buildLocalButtons(), CARD_LOCAL);
         execContent.add(buttonsCard);
 
-        execCard.add(execContent, BorderLayout.CENTER);
+        JPanel execCard = createCardPanel("执行操作", execContent);
+        // 下排面板自己画 1px 顶边线，跟 deployCard 顶部那条 customLine 同款
+        execCard.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0));
 
         // ═══ 目标卡片 ═══
-        JPanel targetCard = createCardPanel("部署目标", targetContainer);
+        // targetContainer 自己（JTabbedPane）没有左右 padding，直接交给 createCardPanel
+        // 会让内容贴着卡片边框。这里包一层 4/8/4/8 的留白，跟 execContent 同款。
+        JPanel targetContent = new JPanel(new BorderLayout());
+        targetContent.setBorder(JBUI.Borders.empty(4, 8, 4, 8));
+        targetContent.add(targetContainer, BorderLayout.CENTER);
+        JPanel targetCard = createCardPanel("部署目标", targetContent);
 
-        // ═══ 日志卡片 ═══
-        logCard = new JPanel(new BorderLayout(0, 4));
-        logCard.setBorder(BorderFactory.createCompoundBorder(
-                new RoundedBorder(8), JBUI.Borders.empty(4, 5)));
-        JPanel logHeader = new JPanel(new BorderLayout());
-        JBLabel logTitle = new JBLabel("运行日志");
-        styleCardTitle(logTitle);
-        logHeader.add(logTitle, BorderLayout.WEST);
+        // ═══ 日志卡片：标题栏右侧三个图标（清空 / 全屏 / 最小化），三态常驻 ═══
+        // 三个按钮在「展开 / 最小化 / 全屏」三态下都常驻显示，每次点击一步到位：
+        //   - 清空：始终清空日志正文，不切换状态；
+        //   - 全屏：非全屏 → 全屏（含最小化态直达）；全屏 → 还原展开态；
+        //   - 最小化：非最小化 → 最小化（含全屏态直达）；最小化 → 展开。
+        // 展开态与折叠态各有一组按钮，通过 refreshHeaderIcons 同步图标/tooltip。
+        logHeaderClearButton = createHeaderClearButton();
+        logHeaderFullscreenButton = createHeaderFullscreenButton();
+        logHeaderMinimizeButton = createHeaderMinimizeButton();
+        logClosedClearButton = createHeaderClearButton();
+        logClosedFullscreenButton = createHeaderFullscreenButton();
+        logClosedMinimizeButton = createHeaderMinimizeButton();
 
-        // 日志头部右侧操作区：清空日志 + 全屏切换 + 最小化
-        JButton clearLogButton = new JButton(AllIcons.Actions.GC);
-        styleIconToggle(clearLogButton);
-        clearLogButton.setToolTipText("清空运行日志");
-        clearLogButton.addActionListener(e -> logSection.clear());
-
-        fullscreenToggleButton = new JButton(AllIcons.General.ExpandComponent);
-        fullscreenToggleButton.setRolloverIcon(AllIcons.General.ExpandComponentHover);
-        styleIconToggle(fullscreenToggleButton);
-        fullscreenToggleButton.setToolTipText("全屏运行日志窗口（占满插件区域）");
-        fullscreenToggleButton.addActionListener(e -> toggleLogFullscreen());
-
-        // 最小化按钮：图标为一条横线（"—"），视觉上贴近窗口最小化按钮
-        JButton minimizeButton = new JButton();
-        minimizeButton.setIcon(buildMinimizeDashIcon(false));
-        minimizeButton.setRolloverIcon(buildMinimizeDashIcon(true));
-        styleIconToggle(minimizeButton);
-        minimizeButton.setToolTipText("最小化运行日志窗口（日志仍会继续记录）");
-        minimizeButton.addActionListener(e -> closeLogWindow());
-
-        JPanel logHeaderActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-        logHeaderActions.setOpaque(false);
-        logHeaderActions.add(clearLogButton);
-        logHeaderActions.add(fullscreenToggleButton);
-        logHeaderActions.add(minimizeButton);
-        logHeader.add(logHeaderActions, BorderLayout.EAST);
-
-        logCard.add(logHeader, BorderLayout.NORTH);
-        logCard.add(logSection, BorderLayout.CENTER);
+        logCard = createCardPanel("运行日志", logSection,
+                logHeaderClearButton, logHeaderFullscreenButton, logHeaderMinimizeButton);
+        // 与 execCard 同款 1px 顶边线，下排两块面板顶部就是一条连贯的横线
+        logCard.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0));
         logClosedBar = buildLogClosedBar();
 
+        // 初次按当前状态刷新一遍图标（默认 NORMAL：全屏=⤢、最小化=∨）
+        refreshHeaderIcons();
+
         // ═══ 右列：目标 ↕ 日志 可拖动（带抓取手柄） ═══
-        // 初始比例占位 0.66，真正数值在首次 componentResized 时按 execCard 的首选高度动态计算
+        // 上下分割器：dividerWidth=1 + 关掉 controls / icon → 1px 极细线；
+        // 视觉上的"上排↔下排"分隔由下排面板自己的 1px 顶边线提供（execCard / logCard 都有 customLine）。
+        // 拖动通过 JLayer<ExtendedSplitterHitZoneUI> 扩展的 4px 隐形命中区抓取。
         rightSplit = new JBSplitter(true, RIGHT_SPLIT_DEFAULT_PROPORTION);
-        rightSplit.setShowDividerControls(true);
-        rightSplit.setShowDividerIcon(true);
-        rightSplit.setDividerWidth(2);
+        rightSplit.setShowDividerControls(false);
+        rightSplit.setShowDividerIcon(false);
+        rightSplit.setDividerWidth(1);
         rightSplit.setFirstComponent(targetCard);
         rightSplit.setSecondComponent(logCard);
         rightSplit.setProportion(RIGHT_SPLIT_DEFAULT_PROPORTION);
 
-        // ═══ 左列：源 ↕ 执行 可上下拖动（带抓取手柄） ═══
+        // ═══ 左列：源 ↕ 执行 可上下拖动（拖动通过 JLayer 隐形命中区实现） ═══
         JBSplitter leftSplit = new JBSplitter(true, 0.66f);
-        leftSplit.setShowDividerControls(true);
-        leftSplit.setShowDividerIcon(true);
-        leftSplit.setDividerWidth(2);
-        leftSplit.setFirstComponent(createCardPanel("源工程", sourceSection));
+        leftSplit.setShowDividerControls(false);
+        leftSplit.setShowDividerIcon(false);
+        leftSplit.setDividerWidth(1);
+        // 源工程面板自己渲染圆角外框 + 标题栏 + 状态行（PanelChromes / SourceSectionPanel#initUI），
+        // 不再用 createCardPanel 再包一层标题与边框
+        leftSplit.setFirstComponent(sourceSection);
         leftSplit.setSecondComponent(execCard);
         JPanel leftColumn = new JPanel(new BorderLayout());
         // 用 JLayer 包一层 → 在 divider 上下各 4px 范围加"幽灵命中区"，
@@ -360,19 +392,33 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                         (totalH - execH) / (float) totalH));
                 leftSplit.setProportion(prop);
                 rightSplitRestoreProportion = prop;
+                // 折叠态走 0.97 让日志槽位只剩标题栏；展开态与左列同款比例，
+                // 保证上下分割条 Y 位置一致，视觉上是一条整齐的横线穿过两列。
                 rightSplit.setProportion(logClosed ? RIGHT_SPLIT_LOG_CLOSED_PROPORTION : prop);
                 done = true;
             }
         });
 
-        // ═══ 主分割：左列 | 右列（可左右拖动） ═══
+        // 右列与左列结构对称：JPanel(BorderLayout) + JLayer<JBSplitter>，
+        // 这样 mainSplit 给两侧分配的内部高度完全一致，
+        // 上下分割条的 Y 位置才能严格对齐，不会出现 1-2px 错位。
+        JPanel rightColumn = new JPanel(new BorderLayout());
+        rightColumn.add(new JLayer<>(rightSplit, new ExtendedSplitterHitZoneUI()),
+                BorderLayout.CENTER);
+
+        // ═══ 主分割：左列 | 右列，OnePixelSplitter 自带 1px 线 ═══
+        // 不再硬指定 setResizeEnabled / divider 颜色——保留 IDEA 默认行为，避免不同
+        // 平台版本下空内容渲染问题。左右仍是 50/50 起始；拖动用户可以微调。
         mainSplit = new OnePixelSplitter(false, 0.5f);
         mainSplit.setFirstComponent(leftColumn);
-        // 同 leftSplit：JLayer 包装扩展 rightSplit 的拖动命中区
-        mainSplit.setSecondComponent(new JLayer<>(rightSplit, new ExtendedSplitterHitZoneUI()));
+        mainSplit.setSecondComponent(rightColumn);
 
         deployCard = new JPanel(new BorderLayout());
-        deployCard.setBorder(JBUI.Borders.empty(4));
+        // 顶部加 1px 线把"IDEA 工具窗 header"和"我们的 4 格内容"分开；
+        // 左右下三边交给 IDEA 工具窗自己的窗框做边界，不在这里重复画。
+        deployCard.setBorder(BorderFactory.createCompoundBorder(
+                JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0),
+                JBUI.Borders.empty(4)));
         deployCard.add(mainSplit, BorderLayout.CENTER);
 
         // 根卡片：部署视图 / 文档视图
@@ -489,7 +535,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private void initListeners() {
         // ── FTP 模式按钮 ──
         preCheckButton.addActionListener(e -> {
-            logSection.appendLog("[操作] 点击「预检」");
+            logSection.appendLog("INFO  [界面] 点击「预检」");
             // 预检：轻量校验，仅输出日志，不弹窗阻断
             executeDeploy(true);
             hasPreChecked = true;
@@ -497,18 +543,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         deployButton.addActionListener(e -> {
             // 三态分发：RUNNING 时按钮变身"停止"，弹收尾选择对话框；STOPPING 已请求停止，忽略
             if (deployButtonState == DeployButtonState.RUNNING) {
-                logSection.appendLog("[操作] 点击「停止」");
+                logSection.appendLog("INFO  [界面] 点击「停止」");
                 showStopDialogAndDispatch();
                 return;
             }
             if (deployButtonState == DeployButtonState.STOPPING) {
                 return;
             }
-            logSection.appendLog("[操作] 点击「打包并上传」");
+            logSection.appendLog("INFO  [界面] 点击「打包并上传」");
             // 打包并上传：硬性前置校验，任何缺失都弹窗阻断
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
-                logSection.appendLog("[错误] 前置条件未满足：" + String.join("；", missing));
+                logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
                 showPrerequisiteDialog(missing, "打包并上传");
                 return;
             }
@@ -520,30 +566,30 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             }
         });
         localOnlyButton.addActionListener(e -> {
-            logSection.appendLog("[操作] 点击「打包不上传」");
+            logSection.appendLog("INFO  [界面] 点击「打包不上传」");
             // 打包不上传：同样强制校验（需要 FTP 下载远端原包）
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
-                logSection.appendLog("[错误] 前置条件未满足：" + String.join("；", missing));
+                logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
                 showPrerequisiteDialog(missing, "打包不上传");
                 return;
             }
             if (!confirmFtpLocalBuild()) {
-                logSection.appendLog("[操作] 用户取消打包不上传");
+                logSection.appendLog("INFO  [界面] 用户取消打包不上传");
                 return;
             }
-            logSection.appendLog("[操作] 确认打包不上传");
+            logSection.appendLog("INFO  [界面] 确认打包不上传");
             executeDeploy(false, null, true);
         });
         resetButton.addActionListener(e -> resetFtpMode());
         rollbackButton.addActionListener(e -> {
-            logSection.appendLog("[操作] 点击「回滚」");
+            logSection.appendLog("INFO  [界面] 点击「回滚」");
             doRollback();
         });
 
         // ── 本地模式按钮 ──
         localBuildButton.addActionListener(e -> {
-            logSection.appendLog("[操作] 点击「本地打包」（本地模式）");
+            logSection.appendLog("INFO  [界面] 点击「本地打包」（本地模式）");
             doLocalBuild();
         });
         localResetButton.addActionListener(e -> resetLocalMode());
@@ -570,7 +616,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             revalidate();
             repaint();
         });
-        logSection.appendLog("[模式] 切换至" + mode.getDisplayName());
+        logSection.appendLog("INFO  [界面] 切换至" + mode.getDisplayName());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -585,13 +631,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         LocalTargetSelection lt = targetContainer.getLocalPanel().getSelection();
         List<String> files = sourceSection.getSelectedFiles();
 
+        // 编译产物存在性校验：插件不再触发任何 mvn / IDE 编译；
+        // 缺少 .class 或 target/<artifact> 时弹窗提示用户先 Build/mvn package 后重试。
+        // 本地模式不存在 WAR 嵌入目标，hasEmbedTargets 恒为 false
+        if (!verifyArtifactsOrPrompt(sourceSection.getMode(), files, false)) {
+            return;
+        }
+
         // 打包前预检以获取清单供用户确认
         LocalPackagePatchService.PreCheckResult pre = LocalPackagePatchService.preCheck(
                 sourceSection.getMode(),
                 currentModulePath, currentArtifactFileName, files,
                 lt.getPackagePath(), logSection::appendLog);
         if (!pre.isOk()) {
-            logSection.appendLog("[本地][预检失败] " + pre.getErrorMessage());
+            logSection.appendLog("ERROR [本地] 预检失败：" + pre.getErrorMessage());
             JOptionPane.showMessageDialog(this,
                     "预检失败：\n" + pre.getErrorMessage(),
                     "无法打包", JOptionPane.WARNING_MESSAGE);
@@ -607,12 +660,45 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         LocalPreCheckDialog dialog = new LocalPreCheckDialog(
                 project, pre, pkgName, lt.getOutputDir());
         if (!dialog.showAndGet()) {
-            logSection.appendLog("[操作] 用户取消本地打包");
+            logSection.appendLog("INFO  [界面] 用户取消本地打包");
             return;
         }
-        logSection.appendLog("[操作] 确认打包");
+        logSection.appendLog("INFO  [界面] 确认打包");
 
         runLocalBuild(lt, files);
+    }
+
+    /**
+     * 调用 {@link ArtifactPresenceValidator} 校验当前模块的编译产物是否就绪。
+     *
+     * <p>FULL 模式校验 {@code target/<artifactFileName>} 是否存在；
+     * INCREMENTAL 校验勾选清单中每个 .java 是否在 {@code target/classes} 下有对应 .class；
+     * INCREMENTAL+嵌入目标 + 空 {@code files} 时才叠加 {@code target/<artifactFileName>} 存在性
+     * 校验，对齐 {@code DeployExecutionService.executeWarEmbed} 在 {@code canPatch=false} 时的
+     * "整包兜底"约束（{@code files} 非空走 patchExistingJar，含纯静态文件场景，不消费源 artifact）。
+     * 缺失时弹窗中止本次操作，仅显示前若干条；用户需手动 Build/mvn package 后重试。</p>
+     *
+     * @param mode             当前部署模式
+     * @param files            勾选清单（含 VCS 状态前缀，由本面板的源 section 直接收集）
+     * @param hasEmbedTargets  本次部署是否包含 WAR 嵌入目标；LOCAL 模式恒为 false
+     * @return true 表示校验通过、可继续；false 表示已弹窗、调用方应 return
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    private boolean verifyArtifactsOrPrompt(DeployMode mode, List<String> files, boolean hasEmbedTargets) {
+        ArtifactPresenceValidator.Result r = ArtifactPresenceValidator.validate(
+                mode, currentModulePath, currentArtifactFileName, files, hasEmbedTargets);
+        if (r.isOk()) return true;
+
+        logSection.appendLog("ERROR [界面] 编译产物缺失 " + r.missing.size() + " 个，已中止本次操作：");
+        for (String rel : r.missing) {
+            logSection.appendLog(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                    + "            " + rel);
+        }
+        logSection.appendLog("INFO [界面] 请手动执行编译/打包后重试");
+        JOptionPane.showMessageDialog(this, "编译产物缺失，请手动执行编译/打包后重试。",
+                "请手动执行编译/打包", JOptionPane.WARNING_MESSAGE);
+        return false;
     }
 
     /** 实际执行本地打包的异步任务 */
@@ -625,14 +711,23 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         config.setMode(sourceSection.getMode());
         config.setChangedFiles(files);
         config.setLocalTarget(lt);
-        config.setSkipCompile(!sourceSection.needsCompile());
 
-        logSection.appendLog("[本地] 开始打包...");
+        logSection.appendLog("INFO  [本地] 开始打包... (v" + currentPluginVersion() + ")");
         setLocalButtonsEnabled(false);
         logSection.setProgressVisible(true);
 
-        DeployExecutionService.executeLocalMode(project, config, logSection::appendLog,
+        final DeployRunLogger runLogger = openRunLoggerOrNull(config);
+        Consumer<String> teeCallback = line -> {
+            logSection.appendLog(line);
+            if (runLogger != null) runLogger.info(line);
+        };
+
+        DeployExecutionService.executeLocalMode(project, config, teeCallback,
                 result -> SwingUtilities.invokeLater(() -> {
+                    if (runLogger != null) {
+                        runLogger.closeWith(result != null && result.isSuccess()
+                                ? DeployRunStatus.OK : DeployRunStatus.FAIL);
+                    }
                     logSection.setProgressVisible(false);
                     setLocalButtonsEnabled(true);
                     if (result != null && result.isSuccess()) {
@@ -654,7 +749,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         } else if (choice == 1) {
             Toolkit.getDefaultToolkit().getSystemClipboard()
                     .setContents(new StringSelection(out.toString()), null);
-            logSection.appendLog("[本地] 已复制路径到剪贴板");
+            logSection.appendLog("INFO  [本地] 已复制路径到剪贴板");
         }
     }
 
@@ -666,7 +761,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 Desktop.getDesktop().open(parent);
             }
         } catch (Exception ex) {
-            logSection.appendLog("[本地] 打开目录失败: " + ex.getMessage());
+            logSection.appendLog("INFO  [本地] 打开目录失败: " + ex.getMessage());
         }
     }
 
@@ -740,11 +835,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         hasPreChecked = false;
         pendingPostPrecheckAction = null;
         rollbackButton.setEnabled(false);
+        // 邮件 draft 跟随主面板「重置」一起清空：从头开始一封新邮件
+        emailDraftManager.onReset();
     }
 
     private void doRollback() {
         if (!DeployExecutionService.hasRollbackData()) {
-            logSection.appendLog("[回滚] 没有可回滚的部署记录");
+            logSection.appendLog("INFO  [回滚] 没有可回滚的部署记录");
             rollbackButton.setEnabled(false);
             return;
         }
@@ -758,10 +855,10 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 + "⚠ 请确认当前没有其他人正在更新同一系统的包。",
                 "确认回滚", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (confirm != JOptionPane.YES_OPTION) {
-            logSection.appendLog("[操作] 用户取消回滚");
+            logSection.appendLog("INFO  [界面] 用户取消回滚");
             return;
         }
-        logSection.appendLog("[操作] 确认回滚");
+        logSection.appendLog("INFO  [界面] 确认回滚");
 
         rollbackButton.setEnabled(false);
         setButtonsEnabled(false);
@@ -803,7 +900,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
 
         // 禁用按钮 + 日志提示
         setButtonsEnabled(false);
-        logSection.appendLog("[备份] 正在检查当天是否已有备份...");
+        logSection.appendLog("INFO  [备份] 正在检查当天是否已有备份...");
 
         com.intellij.openapi.application.ApplicationManager.getApplication()
                 .executeOnPooledThread(() -> {
@@ -816,7 +913,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                         msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
-                    logSection.appendLog("[备份] 检查失败（忽略此步骤继续）: " + ex.getMessage());
+                    logSection.appendLog("INFO  [备份] 检查失败（忽略此步骤继续）: " + ex.getMessage());
                     setButtonsEnabled(true);
                     proceedToDeployOrPreCheck();
                 });
@@ -825,7 +922,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             SwingUtilities.invokeLater(() -> {
                 setButtonsEnabled(true);
                 if (conflicts.isEmpty()) {
-                    logSection.appendLog("[备份] 检查完成：无冲突");
+                    logSection.appendLog("INFO  [备份] 检查完成：无冲突");
                     proceedToDeployOrPreCheck();
                 } else {
                     BackupConflictDialog dialog = new BackupConflictDialog(project, conflicts);
@@ -833,15 +930,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                         com.flux.deploy.plugin.model.BackupConflictStrategy strategy =
                                 dialog.getSelectedStrategy();
                         if (strategy == null) {
-                            logSection.appendLog("[备份] 未选择处理方式，已取消");
+                            logSection.appendLog("INFO  [备份] 未选择处理方式，已取消");
                             return;
                         }
                         pendingBackupStrategy = strategy;
-                        logSection.appendLog("[备份] 冲突处理：" + strategy.getDisplayName()
+                        logSection.appendLog("INFO  [备份] 冲突处理：" + strategy.getDisplayName()
                                 + "（" + conflicts.size() + " 个冲突）");
                         proceedToDeployOrPreCheck();
                     } else {
-                        logSection.appendLog("[备份] 用户取消，未执行更新");
+                        logSection.appendLog("INFO  [备份] 用户取消，未执行更新");
                     }
                 }
             });
@@ -865,7 +962,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
      */
     private void proceedToDeployOrPreCheck() {
         if (!hasPreChecked) {
-            logSection.appendLog("[操作] 自动执行预检（预检通过后将自动进入部署确认）");
+            logSection.appendLog("INFO  [界面] 自动执行预检（预检通过后将自动进入部署确认）");
             // 预检通过后自动继续部署，串接成无缝流程。
             // 预检失败时该 action 仍会被消费但不会重复触发部署（onComplete 内会判断 result.isSuccess）。
             pendingPostPrecheckAction = this::showConfirmAndDeploy;
@@ -1029,26 +1126,50 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             remotePath = sb.toString();
         }
 
+        // 安全前置校验：勾选的目标包是否落在备份目录（backup/backups/bak）下。
+        // 命中即先弹窗拦截，避免用户在主确认对话框里走完一长串流程后才被拦下。
+        List<BackupTargetGuard.Hit> backupHits = BackupTargetGuard.scan(
+                mainTargets, targetSection.getEmbedTargets());
+        if (!backupHits.isEmpty()) {
+            String msg;
+            if (backupHits.size() == 1) {
+                BackupTargetGuard.Hit h = backupHits.get(0);
+                msg = "勾选的目标包路径包含「" + h.matchedSegment + "」，疑似备份目录。\n\n"
+                        + "是否确认更新？";
+            } else {
+                msg = "勾选的 " + backupHits.size() + " 个目标包路径疑似备份目录。\n\n"
+                        + "是否确认更新？";
+            }
+            int warn = JOptionPane.showConfirmDialog(this, msg,
+                    "目标包疑似备份目录", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (warn != JOptionPane.YES_OPTION) {
+                logSection.appendLog("INFO  [界面] 用户取消（目标包位于备份目录的安全警告）");
+                return;
+            }
+            logSection.appendLog("WARN  [界面] 用户确认：将更新到备份目录下的目标包");
+        }
+
         DeployConfirmDialog dialog = new DeployConfirmDialog(
                 project, targetPkg, remotePath, mode, files);
 
         if (dialog.showAndGet()) {
-            logSection.appendLog("[操作] 部署确认对话框：确认");
+            logSection.appendLog("INFO  [界面] 部署确认对话框：确认");
+
             if (!backupCheckBox.isSelected()) {
                 int warn = JOptionPane.showConfirmDialog(this,
                         "⚠ 未勾选「执行备份」，更新失败后将无法自动回滚！\n\n"
                         + "确定不备份直接更新到 FTP？",
                         "安全警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
                 if (warn != JOptionPane.YES_OPTION) {
-                    logSection.appendLog("[操作] 用户取消（未勾选备份的安全警告）");
+                    logSection.appendLog("INFO  [界面] 用户取消（未勾选备份的安全警告）");
                     return;
                 }
-                logSection.appendLog("[操作] 用户确认：不备份直接更新");
+                logSection.appendLog("INFO  [界面] 用户确认：不备份直接更新");
             }
             List<String> selectedFiles = dialog.getSelectedFiles();
             executeDeploy(false, selectedFiles);
         } else {
-            logSection.appendLog("[操作] 用户取消部署确认");
+            logSection.appendLog("INFO  [界面] 用户取消部署确认");
         }
     }
 
@@ -1063,7 +1184,10 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     private void executeDeploy(boolean dryRun, List<String> selectedFiles, boolean localOnly) {
         // 不再清空日志：保留前置步骤（前置校验、备份冲突检查）的输出，
         // 方便用户在失败时往上滚动看到完整上下文。想清空可点日志区「清空」按钮。
-        logSection.appendLog("────── 开始新一轮" + (dryRun ? "预检" : localOnly ? "打包不上传" : "打包并上传") + " ──────");
+        // 版本后缀只在"实际打包"动作里加（打包并上传 / 打包不上传），预检不打：预检不消费本地产物
+        String roundLabel = dryRun ? "预检" : localOnly ? "打包不上传" : "打包并上传";
+        String versionSuffix = dryRun ? "" : " (v" + currentPluginVersion() + ")";
+        logSection.appendLog("INFO  [界面] 开始新一轮" + roundLabel + versionSuffix);
 
         PluginDeployConfig pluginConfig = new PluginDeployConfig();
         pluginConfig.setTargetMode(DeployTargetMode.FTP);
@@ -1076,7 +1200,6 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         pluginConfig.setDryRun(dryRun);
         pluginConfig.setLocalOnly(localOnly);
         pluginConfig.setSkipBackup(!backupCheckBox.isSelected());
-        pluginConfig.setSkipCompile(!sourceSection.needsCompile());
 
         // 注入用户在本次 session 内选定的自定义备份根（仅 session 级，不持久化）
         String sessionBackupRoot = infoSection.getSessionBackupRoot();
@@ -1099,30 +1222,41 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         pluginConfig.setOperator(infoSection.getOperator());
 
         if (pluginConfig.getModulePath() == null || pluginConfig.getModulePath().isEmpty()) {
-            logSection.appendLog("[错误] 请先选择工程");
+            logSection.appendLog("ERROR [界面] 请先选择工程");
             return;
         }
         if (!targetSection.isFtpConnected()) {
-            logSection.appendLog("[错误] FTP 未连接，请先点击连接按钮");
+            logSection.appendLog("ERROR [界面] FTP 未连接，请先点击连接按钮");
             return;
         }
         if (pluginConfig.getMainTargets().isEmpty()
                 && (pluginConfig.getEmbedTargets() == null || pluginConfig.getEmbedTargets().isEmpty())) {
-            logSection.appendLog("[错误] 请选择目标（项目 / 系统 / 目标包）");
+            logSection.appendLog("ERROR [界面] 请选择目标（项目 / 系统 / 目标包）");
             return;
         }
         if (updateNote) {
             boolean taskEmpty = pluginConfig.getTaskId() == null || pluginConfig.getTaskId().isEmpty();
             boolean customerEmpty = pluginConfig.getCustomerId() == null || pluginConfig.getCustomerId().isEmpty();
             if (taskEmpty && customerEmpty) {
-                logSection.appendLog("[错误] 勾选了更新版本记录，请至少填写任务或客服之一");
+                logSection.appendLog("ERROR [界面] 勾选了更新版本记录，请至少填写任务或客服之一");
                 return;
             }
         }
         boolean needOperator = updateNote || backupCheckBox.isSelected();
         if (needOperator
                 && (pluginConfig.getOperator() == null || pluginConfig.getOperator().isEmpty())) {
-            logSection.appendLog("[错误] 勾选了版本记录或执行备份，请填写开发");
+            logSection.appendLog("ERROR [界面] 勾选了版本记录或执行备份，请填写开发");
+            return;
+        }
+
+        // 编译产物存在性校验：dryRun 不需要本地产物，仅做 FTP 状态预检；其他流程必须要求
+        // target/<artifact> 与 .class 提前就绪（插件不再触发任何编译）。
+        // INCREMENTAL+嵌入目标 时 validator 会额外校验 target/<artifact>，对齐 executeWarEmbed
+        // 的"整包兜底"约束，避免到嵌入阶段才报"本地 JAR 文件不存在"。
+        boolean hasEmbedTargetsForValidate = pluginConfig.getEmbedTargets() != null
+                && !pluginConfig.getEmbedTargets().isEmpty();
+        if (!dryRun && !verifyArtifactsOrPrompt(pluginConfig.getMode(),
+                pluginConfig.getChangedFiles(), hasEmbedTargetsForValidate)) {
             return;
         }
 
@@ -1131,11 +1265,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         enterRunningState();
         logSection.setProgressVisible(true);
 
+        final DeployRunLogger runLogger = openRunLoggerOrNull(pluginConfig);
+        Consumer<String> teeCallback = line -> {
+            logSection.appendLog(line);
+            if (runLogger != null) runLogger.info(line);
+        };
+
         DeployExecutionService.execute(project, pluginConfig,
                 targetSection.getConnectedHost(), targetSection.getConnectedPort(),
                 targetSection.getConnectedUsername(), targetSection.getConnectedPassword(),
-                logSection::appendLog,
+                teeCallback,
                 result -> SwingUtilities.invokeLater(() -> {
+                    if (runLogger != null) {
+                        runLogger.closeWith(resolveRunStatus(result));
+                    }
                     exitToIdleState();
                     logSection.setProgressVisible(false);
                     // KEEP_SUCCEEDED 路径下 service 已登记 lastUpdatedPackages，启用回滚按钮
@@ -1151,13 +1294,35 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                     // 一次部署结束后重置备份冲突策略为默认，避免污染下次操作
                     pendingBackupStrategy = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
 
+                    // 通知邮件 draft 累积：只有"打包并上传"且整体成功才累积。
+                    // 任务号与 draft.ownerTaskId 一致 → 在锚点上追加新的更新包 / FTP 路径；
+                    // 不一致 → 推倒重建（视为一封新邮件）。
+                    if (result != null && result.isSuccess() && !dryRun && !localOnly) {
+                        List<String> newPkgs = new ArrayList<>();
+                        List<String> newFtpPaths = new ArrayList<>();
+                        if (result.getTargets() != null) {
+                            for (DeployResult.TargetResult t : result.getTargets()) {
+                                if (t == null || !t.isVerified()) continue;
+                                String name = t.getPackageName();
+                                if (name != null && !name.isBlank()) newPkgs.add(name);
+                                String remote = t.getRemotePath();
+                                if (remote != null && !remote.isBlank()) newFtpPaths.add(remote);
+                            }
+                        }
+                        emailDraftManager.onDeploySucceeded(
+                                infoSection.getTaskId(),
+                                targetSection.getCurrentProjectDir(),
+                                newPkgs, newFtpPaths,
+                                collectFieldValues());
+                    }
+
                     // 消费"预检后自动继续部署"的 pending action：
                     // 仅在预检 + 通过 + 非本地打包 时触发，避免在常规部署完成后误触
                     Runnable postAction = pendingPostPrecheckAction;
                     pendingPostPrecheckAction = null;
                     if (dryRun && !localOnly && result != null && result.isSuccess()
                             && postAction != null) {
-                        logSection.appendLog("[操作] 预检通过，自动进入部署确认");
+                        logSection.appendLog("INFO  [界面] 预检通过，自动进入部署确认");
                         postAction.run();
                     }
                 }));
@@ -1254,7 +1419,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 null, options, options[0]);
         // 0 = 继续 / -1 = ESC 关闭：都视为继续
         if (choice <= 0) {
-            logSection.appendLog("[操作] 用户取消停止，继续部署");
+            logSection.appendLog("INFO  [界面] 用户取消停止，继续部署");
             return;
         }
         DeployExecutionService.CancelMode mode;
@@ -1265,7 +1430,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         } else {
             mode = DeployExecutionService.CancelMode.ROLLBACK_ALL;
         }
-        logSection.appendLog("[操作] 请求停止：" + (
+        logSection.appendLog("INFO  [界面] 请求停止：" + (
                 mode == DeployExecutionService.CancelMode.KEEP_SUCCEEDED
                         ? "保留已成功的包" : "回滚已成功的包"));
         DeployExecutionService.requestStop(mode);
@@ -1273,87 +1438,136 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
     }
 
     /**
-     * 标题栏图标切换按钮样式：透明底、无边框、紧凑尺寸，贴近 IntelliJ ToolWindow 头部图标。
+     * 创建「清空」按钮（展开态 / 折叠态各一份）。
      *
-     * @param button 待设置样式的按钮
+     * <p>点击始终清空日志正文，不切换面板状态。</p>
+     *
+     * @return 已挂监听的按钮实例
      */
-    private void styleIconToggle(JButton button) {
-        button.setBorderPainted(false);
-        button.setContentAreaFilled(false);
-        button.setFocusPainted(false);
-        button.setFocusable(false);
-        button.setMargin(JBUI.emptyInsets());
-        int size = 22;
-        button.setPreferredSize(new Dimension(size, size));
+    private JButton createHeaderClearButton() {
+        JButton btn = new JButton(AllIcons.Actions.GC);
+        PanelChromes.styleHeaderIconButton(btn);
+        btn.setToolTipText("清空运行日志");
+        btn.addActionListener(e -> logSection.clear());
+        return btn;
     }
 
     /**
-     * 构造一条 16×16 的横线图标，作为最小化按钮的视觉，模拟系统窗口的"—"最小化键。
+     * 创建「全屏 / 退出全屏」按钮（展开态 / 折叠态各一份）。
      *
-     * @param hover 是否为悬停态（悬停时颜色更亮）
-     * @return 图标实例
+     * <p>图标 / Tooltip 由 {@link #refreshHeaderIcons} 按当前状态统一刷新。</p>
+     *
+     * @return 已挂监听的按钮实例
      */
-    private Icon buildMinimizeDashIcon(boolean hover) {
-        return new Icon() {
-            @Override public int getIconWidth() { return 16; }
-            @Override public int getIconHeight() { return 16; }
-            @Override
-            public void paintIcon(Component c, Graphics g, int x, int y) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                try {
-                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                    Color base = JBColor.foreground();
-                    int alpha = hover ? 255 : 180;
-                    g2.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), alpha));
-                    g2.setStroke(new BasicStroke(1.4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-                    int midY = y + getIconHeight() / 2;
-                    g2.drawLine(x + 3, midY, x + getIconWidth() - 3, midY);
-                } finally {
-                    g2.dispose();
-                }
-            }
-        };
+    private JButton createHeaderFullscreenButton() {
+        JButton btn = new JButton();
+        PanelChromes.styleHeaderIconButton(btn);
+        btn.addActionListener(e -> toggleLogFullscreen());
+        return btn;
     }
 
     /**
-     * 构造日志关闭后的折叠条。
+     * 创建「最小化 / 展开」按钮（展开态 / 折叠态各一份）。
      *
-     * <p>只保留「运行日志」标题 + 展开图标，视觉上与 logCard 头部完全一致，
-     * 关闭/展开像是同一条标题栏被折叠/展开，不引入额外提示文字。</p>
+     * <p>图标 / Tooltip 由 {@link #refreshHeaderIcons} 按当前状态统一刷新。</p>
      *
-     * @return 日志折叠条面板
+     * @return 已挂监听的按钮实例
+     */
+    private JButton createHeaderMinimizeButton() {
+        JButton btn = new JButton();
+        PanelChromes.styleHeaderIconButton(btn);
+        btn.addActionListener(e -> toggleLogMinimized());
+        return btn;
+    }
+
+    /**
+     * 按当前 {@code logFullscreen} / {@code logClosed} 状态，刷新展开态与折叠态
+     * 两套按钮共 6 个的图标与 Tooltip，保证视觉与点击语义同步。
+     *
+     * <p>规则：</p>
+     * <ul>
+     *   <li>清空：图标恒为 GC，不随状态变化。</li>
+     *   <li>全屏：全屏态显示 ⤡（CollapseComponent），其他状态显示 ⤢（ExpandComponent）。</li>
+     *   <li>最小化：展开 / 全屏态显示 IDEA 标准 HideToolWindow（向下收起），最小化态
+     *       显示 ArrowUp（向上展开）——和 IDEA 工具窗 hide/show 同款语义。</li>
+     * </ul>
+     */
+    private void refreshHeaderIcons() {
+        Icon fsIcon = logFullscreen ? AllIcons.General.CollapseComponent
+                                    : AllIcons.General.ExpandComponent;
+        Icon fsHover = logFullscreen ? AllIcons.General.CollapseComponentHover
+                                     : AllIcons.General.ExpandComponentHover;
+        String fsTip = logFullscreen ? "退出全屏" : "全屏运行日志窗口（占满插件区域）";
+        for (JButton b : new JButton[]{logHeaderFullscreenButton, logClosedFullscreenButton}) {
+            if (b == null) continue;
+            b.setIcon(fsIcon);
+            b.setRolloverIcon(fsHover);
+            b.setToolTipText(fsTip);
+        }
+
+        Icon minIcon = logClosed ? AllIcons.General.ArrowUp
+                                 : AllIcons.General.HideToolWindow;
+        String minTip = logClosed ? "展开运行日志窗口"
+                                  : "最小化运行日志窗口（日志仍会继续记录）";
+        for (JButton b : new JButton[]{logHeaderMinimizeButton, logClosedMinimizeButton}) {
+            if (b == null) continue;
+            b.setIcon(minIcon);
+            b.setRolloverIcon(minIcon);
+            b.setToolTipText(minTip);
+        }
+    }
+
+    /**
+     * 构造日志最小化态的折叠条。
+     *
+     * <p>结构与 {@code logCard} 头部完全一致：1px 顶边线 + 标题栏（含同款三按钮），
+     * 视觉上像是 logCard 的标题栏单独保留下来。三按钮与展开态分别持有各自的 JButton
+     * 实例（同一 JButton 不能跨容器复用），状态通过 {@link #refreshHeaderIcons} 同步。</p>
+     *
+     * @return 折叠条面板
      */
     private JPanel buildLogClosedBar() {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(BorderFactory.createCompoundBorder(
-                new RoundedBorder(8), JBUI.Borders.empty(2, 5)));
-
-        JBLabel title = new JBLabel("运行日志");
-        styleCardTitle(title);
-        panel.add(title, BorderLayout.WEST);
-
-        JButton expandButton = new JButton(AllIcons.General.ExpandComponent);
-        expandButton.setRolloverIcon(AllIcons.General.ExpandComponentHover);
-        styleIconToggle(expandButton);
-        expandButton.setToolTipText("展开运行日志窗口");
-        expandButton.addActionListener(e -> restoreLogWindow());
-        panel.add(expandButton, BorderLayout.EAST);
-
-        // 限制最大高度等于首选高度，JBSplitter 分配空间时折叠条不会被拉高
-        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, panel.getPreferredSize().height));
-        return panel;
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0));
+        wrap.add(PanelChromes.buildTitleBar("运行日志", null,
+                        logClosedClearButton, logClosedFullscreenButton, logClosedMinimizeButton),
+                BorderLayout.NORTH);
+        return wrap;
     }
 
     /**
-     * 折叠日志窗口，只保留顶部折叠条
+     * 「最小化」按钮的统一动作：当前已最小化 → 展开；否则 → 最小化。
+     *
+     * <p>从全屏态直接点最小化按钮也走这里：{@link #closeLogWindow} 会先关闭全屏再折叠，
+     * 用户视觉上是一次点击完成「全屏 → 折叠」。</p>
+     */
+    private void toggleLogMinimized() {
+        if (logClosed) {
+            restoreLogWindow();
+        } else {
+            closeLogWindow();
+        }
+    }
+
+    /**
+     * 折叠日志窗口，只保留顶部折叠条。
+     *
+     * <p>关键：必须把 rightSplit 比例改成 {@link #RIGHT_SPLIT_LOG_CLOSED_PROPORTION}（=0.97），
+     * 否则 logClosedBar 会继承之前的 34% 槽位高度，看起来是「标题栏 + 大片空白」，
+     * 而不是真正的最小化条。</p>
+     *
+     * <p>从全屏态进入折叠态时，先把 logCard 从 deployCard 摘回 mainSplit，再把
+     * rightSplit 第二槽换成 logClosedBar——一次 repaint 完成「全屏 → 折叠」。</p>
      */
     private void closeLogWindow() {
-        // 全屏状态下先退出全屏，再执行最小化
-        if (logFullscreen) {
-            toggleLogFullscreen();
-        }
         if (rightSplit == null || logClosed) {
             return;
+        }
+        if (logFullscreen) {
+            deployCard.remove(logCard);
+            deployCard.add(mainSplit, BorderLayout.CENTER);
+            logFullscreen = false;
+            deployCard.revalidate();
         }
         rightSplitRestoreProportion = rightSplit.getProportion();
         logClosed = true;
@@ -1361,45 +1575,44 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         rightSplit.setProportion(RIGHT_SPLIT_LOG_CLOSED_PROPORTION);
         rightSplit.revalidate();
         rightSplit.repaint();
+        deployCard.repaint();
+        refreshHeaderIcons();
     }
 
     /**
-     * 切换日志全屏：全屏时日志卡片占满整个 deployCard（左列与目标区临时隐藏）；
-     * 取消全屏时还原回主分割器布局。
+     * 切换日志全屏：全屏时 logCard 占满 deployCard；退出全屏一律回到 NORMAL 态。
+     *
+     * <p>从最小化态点全屏按钮也走这里：直接把 rightSplit 第二槽位换成空 panel，
+     * logCard 搬进 deployCard，一次点击就到全屏，不经过中间「先展开 → 再点全屏」。</p>
      */
     private void toggleLogFullscreen() {
         if (deployCard == null || logCard == null) {
             return;
         }
-        // 最小化状态下进入全屏前先恢复
-        if (!logFullscreen && logClosed) {
-            restoreLogWindow();
-        }
-        if (!logFullscreen) {
-            // 进入全屏：把 logCard 从 rightSplit 摘出，放进 deployCard
+        if (logFullscreen) {
+            // 退出全屏：logCard 还回 rightSplit，恢复 NORMAL 态
+            deployCard.remove(logCard);
+            deployCard.add(mainSplit, BorderLayout.CENTER);
+            rightSplit.setSecondComponent(logCard);
+            rightSplit.setProportion(rightSplitRestoreProportion);
+            logFullscreen = false;
+            logClosed = false;
+        } else {
+            // 进入全屏：rightSplit 第二槽位先填空 panel 占位（无论当前是 NORMAL 还是
+            // MINIMIZED 都直接覆盖），logCard 移入 deployCard
             rightSplit.setSecondComponent(new JPanel());
             deployCard.remove(mainSplit);
             deployCard.add(logCard, BorderLayout.CENTER);
             logFullscreen = true;
-            fullscreenToggleButton.setIcon(AllIcons.General.CollapseComponent);
-            fullscreenToggleButton.setRolloverIcon(AllIcons.General.CollapseComponentHover);
-            fullscreenToggleButton.setToolTipText("退出全屏");
-        } else {
-            // 退出全屏：把 logCard 还回 rightSplit，恢复 mainSplit
-            deployCard.remove(logCard);
-            deployCard.add(mainSplit, BorderLayout.CENTER);
-            rightSplit.setSecondComponent(logCard);
-            logFullscreen = false;
-            fullscreenToggleButton.setIcon(AllIcons.General.ExpandComponent);
-            fullscreenToggleButton.setRolloverIcon(AllIcons.General.ExpandComponentHover);
-            fullscreenToggleButton.setToolTipText("全屏运行日志窗口（占满插件区域）");
+            logClosed = false;
         }
+        refreshHeaderIcons();
         deployCard.revalidate();
         deployCard.repaint();
     }
 
     /**
-     * 展开日志窗口，恢复到折叠前的高度
+     * 展开日志窗口，恢复到折叠前的高度。
      */
     private void restoreLogWindow() {
         if (rightSplit == null || !logClosed) {
@@ -1410,6 +1623,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         rightSplit.setProportion(rightSplitRestoreProportion);
         rightSplit.revalidate();
         rightSplit.repaint();
+        refreshHeaderIcons();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1464,7 +1678,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
             List<String> displayFiles = mergeAutoDetectFiles(allFiles, changedFiles);
             Set<String> selectedPaths = normalizeSelectedPaths(changedFiles);
             selectedPaths.addAll(prevSelected);
-            sourceSection.setChangedFiles(displayFiles, false, selectedPaths, true);
+            // expandChangedFoldersOnly：有 Git 变更时只展开变更分支（保留原行为）；
+            // 无 Git 变更时让面板全部展开，避免用户拿到一个全部折叠的列表还得手动一层层点开。
+            sourceSection.setChangedFiles(displayFiles, false, selectedPaths, !changedFiles.isEmpty());
             lastFilesLoadedForModule = modulePath;
 
             if (displayFiles.isEmpty()) {
@@ -1575,20 +1791,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         sourceSection.setChangedFiles(allFiles, false, selectedPaths);
     }
 
-    private JPanel createCardPanel(String title, JComponent content) {
-        JPanel panel = new JPanel(new BorderLayout(0, 4));
-        panel.setBorder(BorderFactory.createCompoundBorder(
-                new RoundedBorder(8), JBUI.Borders.empty(4, 8)));
-        JBLabel titleLabel = new JBLabel(title);
-        styleCardTitle(titleLabel);
-        panel.add(titleLabel, BorderLayout.NORTH);
+    /**
+     * 复用 {@link PanelChromes#buildTitleBar} 给「部署目标 / 执行操作 / 运行日志」三张卡套上
+     * 与「源工程」同款的 chrome（主色短条 + 14pt 粗体 + 底分隔线）。
+     *
+     * <p>外框边框统一交给后续 Step 4 决策——这里只负责标题栏 + 内容区组合。</p>
+     */
+    private static JPanel createCardPanel(String title, JComponent content,
+                                          JComponent... headerActions) {
+        // 不画独立圆角外框：四块面板紧贴主 / 上下分割器的 1px 线条做区域分隔，
+        // 每张卡片只靠标题栏底分隔线圈出 header 区。
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.add(PanelChromes.buildTitleBar(title, null, headerActions), BorderLayout.NORTH);
         panel.add(content, BorderLayout.CENTER);
         return panel;
-    }
-
-    /** 卡片标题统一样式：仅加粗，颜色使用主题默认 */
-    private static void styleCardTitle(JBLabel label) {
-        label.setFont(label.getFont().deriveFont(Font.BOLD, 13f));
     }
 
     /** 主题感知的主色蓝（亮/暗色自适应） */
@@ -1647,19 +1863,103 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
         return c instanceof JTextComponent && ((JTextComponent) c).isEditable();
     }
 
-    private static class RoundedBorder extends javax.swing.border.AbstractBorder {
-        private final int radius;
-        RoundedBorder(int radius) { this.radius = radius; }
-        @Override
-        public void paintBorder(Component c, Graphics g, int x, int y, int w, int h) {
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setColor(UIManager.getColor("Component.borderColor"));
-            g2.drawRoundRect(x, y, w - 1, h - 1, radius, radius);
-            g2.dispose();
+    /**
+     * 打开 DeployRunLogger，失败时返回 null（不阻塞部署）。
+     *
+     * <p>失败原因不写工具窗口，避免给用户造成"日志失败 = 部署失败"的误读；
+     * IDE 的 idea.log 会有底层 IOException 留痕。</p>
+     *
+     * @param pluginConfig 插件配置（用于构造 meta）
+     * @return 已打开的 logger，meta 不可识别或 IO 失败时为 null
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    private static DeployRunLogger openRunLoggerOrNull(PluginDeployConfig pluginConfig) {
+        DeployRunMeta meta = buildRunMeta(pluginConfig);
+        if (meta == null) return null;
+        try {
+            return DeployRunLogger.open(meta);
+        } catch (IOException ioe) {
+            return null;
         }
-        @Override
-        public Insets getBorderInsets(Component c) { return JBUI.insets(1); }
+    }
+
+    /**
+     * 从 IDEA 插件管理器读取本插件版本号，用于日志开头横幅、每次操作起头后缀以及
+     * RunLogger 元数据三处共享。
+     *
+     * <p>取不到 descriptor（极少数沙盒/调试态）时回退 {@code "unknown"}，让日志仍然可读，
+     * 而不是抛 NPE 中断面板初始化。</p>
+     *
+     * @return 形如 {@code "1.2.8"} 的版本字符串
+     * @author xumanyi
+     * @date 2026-05-08
+     */
+    private static String currentPluginVersion() {
+        var plugin = PluginManagerCore.getPlugin(PluginId.getId("com.flux.deploy.plugin"));
+        return plugin != null ? plugin.getVersion() : "unknown";
+    }
+
+    /**
+     * 从 PluginDeployConfig 提取一次部署的元数据，用于 DeployRunLogger.open。
+     *
+     * <p>包名拿法按目标模式分支：FTP 模式取 mainTargets[0].targetName，
+     * 本地模式取 localTarget.packagePath 的文件名部分。</p>
+     *
+     * @param pluginConfig 插件配置
+     * @return 元数据；packageFileName 为 null 表示无法识别
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    private static DeployRunMeta buildRunMeta(PluginDeployConfig pluginConfig) {
+        String packageFileName = null;
+        String remoteTarget = "";
+        if (pluginConfig.getTargetMode() == DeployTargetMode.LOCAL
+                && pluginConfig.getLocalTarget() != null) {
+            String pkgPath = pluginConfig.getLocalTarget().getPackagePath();
+            if (pkgPath != null && !pkgPath.isBlank()) {
+                packageFileName = Path.of(pkgPath).getFileName().toString();
+                remoteTarget = "local:" + pkgPath;
+            }
+        } else if (pluginConfig.getTarget() != null) {
+            packageFileName = pluginConfig.getTarget().getTargetName();
+            remoteTarget = pluginConfig.getTarget().getRemoteDir();
+        }
+        if (packageFileName == null || packageFileName.isBlank()) {
+            return null;
+        }
+
+        String ideVersion = "IntelliJ IDEA " + ApplicationInfo.getInstance().getFullVersion();
+        String pluginVersion = "flux-deploy-plugin (unknown)";
+        var plugin = PluginManagerCore.getPlugin(PluginId.getId("com.flux.deploy.plugin"));
+        if (plugin != null) {
+            pluginVersion = "flux-deploy-plugin " + plugin.getVersion();
+        }
+        return new DeployRunMeta(
+                packageFileName,
+                pluginConfig.getOperator() == null ? "" : pluginConfig.getOperator(),
+                remoteTarget,
+                ideVersion,
+                pluginVersion,
+                LocalDateTime.now()
+        );
+    }
+
+    /**
+     * 把 DeployResult 映射成 DeployRunStatus，作为日志文件名后缀。
+     *
+     * @param result 部署结果（可能为 null：用户配置非法等提前返回路径）
+     * @return 终态（OK / FAIL / FAIL_RB / CANCEL）
+     * @author xumanyi
+     * @date 2026-05-07
+     */
+    private static DeployRunStatus resolveRunStatus(DeployResult result) {
+        if (result == null) return DeployRunStatus.FAIL;
+        if (result.isCancelled()) return DeployRunStatus.CANCEL;
+        if (result.isSuccess()) return DeployRunStatus.OK;
+        DeployResult.RollbackResult rb = result.getRollback();
+        if (rb != null && rb.isAttempted() && rb.isSuccess()) return DeployRunStatus.FAIL_RB;
+        return DeployRunStatus.FAIL;
     }
 
     /**
@@ -1819,5 +2119,126 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel> {
                 cursorOverrideOn = null;
             }
         }
+    }
+
+    // ============================================================
+    //  通知邮件入口
+    // ============================================================
+
+    /**
+     * 打开「通知邮件」弹窗（由 {@code ShowEmailAction} 标题栏图标触发）
+     *
+     * <p>弹窗会从 {@link #emailDraftManager} 取出当前 draft；若 draft 为空（首次打开 /
+     * 项目刚切 / 重置后），用主面板当前字段值 + 选中模板渲染一个新 draft。</p>
+     *
+     * @author claude
+     * @date 2026-05-17
+     */
+    public void openEmailDialog() {
+        new EmailDialog(project, emailDraftManager, this).show();
+    }
+
+    /**
+     * 实现 {@link EmailRuntimeData#collectFieldValues()}：从主面板字段拼一个 key → 值的 map
+     *
+     * <p>插件能自动填的字段：任务号 / 客服编号 / 开发 / 项目名 / 备份包 / 收件人 / 日期。
+     * 未提供的字段（资源来源 / 更新方式 / 是否重启 / SQL / 影响范围 等）由
+     * {@code EmailTemplateRenderer.renderInitial} 保留为 {@code ${字段名}} 字面量。</p>
+     *
+     * <p>"更新包" 和 "FTP版本来源" 这两个累积字段在首次渲染时为空字符串，
+     * 锚点仍会生成（空内容），后续部署成功会通过 {@link EmailDraftManager#onDeploySucceeded}
+     * 在锚点里追加实际值。</p>
+     *
+     * @return 字段值字典
+     * @author claude
+     * @date 2026-05-17
+     */
+    @Override
+    public Map<String, String> collectFieldValues() {
+        // 模板只有 4 个绑定变量，这里只填这 4 个 key。其他字段（资源来源 / 更新方式 /
+        // 是否重启 / SQL / 影响范围 / FTP 版本来源 等）在模板里是写好的字面默认值，
+        // 用户在弹窗的编辑区里手改后通过「保存到模板」持久化。
+        // 更新包不自动预填——用户主动点弹窗里的「导入选中包」按钮才追加，避免
+        // "勾错包" 等情况下污染 draft。
+        Map<String, String> v = new HashMap<>();
+        v.put("任务号", nullToEmpty(infoSection.getTaskId()));
+        v.put("客服编号", nullToEmpty(infoSection.getCustomerId()));
+        v.put("备份包", computeBackupRootForEmail());
+        v.put("更新包", "");
+        return v;
+    }
+
+    /**
+     * 实现 {@link EmailRuntimeData#getCurrentSelectedPackageNames()}：
+     * 返回主面板当前勾选的所有目标包文件名列表（按勾选顺序）。
+     *
+     * <p>由邮件弹窗的「导入选中包」按钮调用，把当前选择追加到 draft 的
+     * {@code ${更新包}} 锚点。</p>
+     *
+     * @return 包文件名列表（永不为 null）
+     * @author claude
+     * @date 2026-05-17
+     */
+    @Override
+    public List<String> getCurrentSelectedPackageNames() {
+        List<String> result = new ArrayList<>();
+        List<FtpTargetSelection> mts = targetSection.getMainTargets();
+        if (mts != null) {
+            for (FtpTargetSelection mt : mts) {
+                if (mt == null) continue;
+                String name = mt.getTargetName();
+                if (name != null && !name.isBlank()) {
+                    result.add(name);
+                }
+            }
+        }
+        return result;
+    }
+
+
+    @Override
+    public String getCurrentProjectDir() {
+        return targetSection.getCurrentProjectDir();
+    }
+
+    /**
+     * 计算邮件正文里"备份包"字段应填什么
+     *
+     * <p>优先用 {@code InfoSectionPanel.sessionBackupRoot}（用户在备份位置弹窗里
+     * 自定义过的路径）；否则用 InfoSectionPanel 内部 {@code computeDefaultBackupRoot}
+     * 的派生规则。这里直接调用主面板对外暴露的 {@code refreshBackupLocationLabel}
+     * 不合适——那是 UI 刷新方法，没返回值。简化处理：复用 sessionBackupRoot 即可，
+     * 默认派生路径由邮件正文的接收方（顾问）按惯例理解。</p>
+     *
+     * @return 备份包路径或空串
+     * @author claude
+     * @date 2026-05-17
+     */
+    private String computeBackupRootForEmail() {
+        String custom = infoSection.getSessionBackupRoot();
+        if (custom != null && !custom.isBlank()) return custom;
+        // 默认派生：跟 InfoSectionPanel.computeDefaultBackupRoot 同款规则
+        List<FtpTargetSelection> mts = targetSection.getMainTargets();
+        String basePath;
+        if (mts != null && !mts.isEmpty() && mts.get(0).getRemoteDir() != null) {
+            basePath = mts.get(0).getRemoteDir();
+        } else {
+            basePath = targetSection.getCurrentContextDir();
+        }
+        if (basePath == null || basePath.isBlank()) return "";
+        String trimmed = basePath.replaceAll("^/+", "").replaceAll("/+$", "");
+        String[] parts = trimmed.split("/");
+        String systemRoot = parts.length >= 3
+                ? "/" + parts[0] + "/" + parts[1] + "/" + parts[2] + "/"
+                : "/" + trimmed + "/";
+        // 备份目录格式与 DeployExecutionService 保持一致：yyyyMMdd_<operator>
+        String today = java.time.LocalDate.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+        String operator = nullToEmpty(infoSection.getOperator());
+        return systemRoot + "backup/" + today + "_" + operator + "/";
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
     }
 }
