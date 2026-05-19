@@ -167,16 +167,16 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         this.connectionStatus = new JBLabel("未登录");
         this.connectionStatus.setForeground(Color.RED);
         this.connectButton = new JButton("连接");
-        connectButton.setToolTipText("连接到 FTP 服务器（使用已保存凭据或弹出登录框）");
+        connectButton.setToolTipText("连接到 FTP 服务器");
         this.switchAccountButton = new JButton("账号 ▾");
-        switchAccountButton.setToolTipText("切换 / 删除 / 添加已保存账号");
+        switchAccountButton.setToolTipText("管理已保存账号");
         switchAccountButton.setMargin(new Insets(2, 8, 2, 8));
         this.logoutButton = new JButton("注销");
-        logoutButton.setToolTipText("断开当前连接（不删除账号）");
+        logoutButton.setToolTipText("断开当前连接");
         logoutButton.setVisible(false);
         // 纯图标按钮：无边框、无填充背景、无边距、不可聚焦
         this.refreshButton = new JButton(com.intellij.icons.AllIcons.Actions.Refresh);
-        refreshButton.setToolTipText("重连 FTP 并刷新项目 / 系统 / 目标包列表");
+        refreshButton.setToolTipText("重连 FTP 并刷新列表");
         refreshButton.setMargin(JBUI.emptyInsets());
         refreshButton.setBorderPainted(false);
         refreshButton.setContentAreaFilled(false);
@@ -189,7 +189,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         // OnePixelSplitter 影响主分割条比例，并把项目/系统下拉框挤窄。
         // 用极短原型参与尺寸计算，实际渲染宽度由 GridBag (weightx=1.0 + fill=HORIZONTAL) 决定。
         systemCombo.setPrototypeDisplayValue("XXXXXXXXXX");
-        systemCombo.setToolTipText("选择系统，对应 /开发/{项目}/{系统}/ 下的目标包");
+        systemCombo.setToolTipText("选择目标系统");
 
         this.packageTreeRoot = new CheckedTreeNode("目标包");
         // CheckPolicy: 仅启用父→子传播（点文件夹联动所有子节点）。
@@ -281,10 +281,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         // SearchTextField 与左侧源工程文件搜索保持一致：默认隐藏，点 🔍 toggle 展开，失焦清空时自动收起
         this.packageSearchField = new SearchTextField(false);
         packageSearchField.getTextEditor().getEmptyText().setText("搜索目标包名或子目录");
-        packageSearchField.getTextEditor().setToolTipText(
-                "<html>按包名或子目录过滤，支持空格分隔多个关键字与拼音"
-                + "<br>主目标（加粗显示）始终可见，不受过滤影响"
-                + "<br>已勾选但被过滤隐藏的包仍会被部署</html>");
+        packageSearchField.getTextEditor().setToolTipText("过滤目标包，支持空格分隔关键字或拼音");
         packageSearchField.setVisible(false);
         // removeUpdate 中识别"一次性多字符删除→空文本"为 ×（或 Cmd+A+Delete）一键清空，
         // 这种"明确结束搜索"的动作直接收起搜索框；单字符 backspace 不触发收起，留给用户继续输入。
@@ -354,8 +351,11 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         // 右侧固定挂 [刷新][⋯ 更多][连接(仅未连接时)] 三枚等高的紧凑按钮。
         JPanel bar = new JPanel(new BorderLayout(6, 0));
         bar.setOpaque(false);
-        // 与 tab 文字基本对齐：左右 8px 留白；竖向 1px 间距让 trailing 不顶满 tab strip
-        bar.setBorder(JBUI.Borders.empty(1, 8, 1, 8));
+        // 与 tab 文字基本对齐：左 8px 留白；右 0px 让 [刷新][⋯ 更多] 贴 targetContent
+        // 右内边缘，加上外层 targetContent 的 8px right padding，trailing icon 中心
+        // 距 panel 右边缘 ≈ 16px——刚好跟 IDE 右侧 stripe icon 中心线（stripe 宽 ~28,
+        // icon 16x16 居中）对齐。竖向 1px 间距让 trailing 不顶满 tab strip。
+        bar.setBorder(JBUI.Borders.empty(1, 8, 1, 0));
 
         connectionStatus.putClientProperty("html.disable", Boolean.TRUE);
         bar.add(connectionStatus, BorderLayout.CENTER);
@@ -363,7 +363,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         // 更多操作按钮（切换账号 / 注销 收到这里；刷新已独立为行内图标按钮）
         // 纯图标按钮：无边框、无填充背景、无边距、不可聚焦
         JButton moreButton = new JButton(com.intellij.icons.AllIcons.Actions.More);
-        moreButton.setToolTipText("更多操作:切换账号 / 注销");
+        moreButton.setToolTipText("更多操作");
         moreButton.setMargin(JBUI.emptyInsets());
         moreButton.setBorderPainted(false);
         moreButton.setContentAreaFilled(false);
@@ -428,14 +428,14 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         // 同 systemCombo：长项目名不应撑大首选/最小宽度（防御）。
         // PickerComboBox 模型只有 1 个元素（当前显示文本），prototype 优先于模型项参与尺寸计算。
         projectCombo.setPrototypeDisplayValue("XXXXXXXXXX");
-        projectCombo.setToolTipText("选择客户项目（对应 FTP 根目录下 /开发/{项目}/），支持搜索");
+        projectCombo.setToolTipText("选择客户项目");
         topPanel.add(projectCombo, gbc);
 
         // 项目行 col 2：🔍 toggle 显示/隐藏目标包搜索框（默认隐藏，节省纵向空间）。
         // 单按钮与下方动态子目录行的 ➖ 等宽对齐。
         searchToggleButton = createCompactActionButton(
                 com.intellij.icons.AllIcons.Actions.Find,
-                "<html>展开 / 收起目标包搜索框<br>展开后立即聚焦输入；ESC 清空后再 ESC 自动收起</html>",
+                "展开或收起搜索框",
                 e -> toggleSearchField());
         gbc.gridx = 2; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
         topPanel.add(searchToggleButton, gbc);
@@ -1607,7 +1607,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         JButton deleteBtn = new JButton("删除");
         deleteBtn.setMargin(new Insets(2, 10, 2, 10));
         deleteBtn.setFocusPainted(false);
-        deleteBtn.setToolTipText("删除此账号" + (isCurrent ? "（同时断开当前连接）" : ""));
+        deleteBtn.setToolTipText(isCurrent ? "删除此账号并断开连接" : "删除此账号");
         deleteBtn.addActionListener(e -> {
             int confirm = JOptionPane.showConfirmDialog(parent,
                     "确认删除账号 " + acc.getUsername() + "@" + acc.getHost() + "？\n"

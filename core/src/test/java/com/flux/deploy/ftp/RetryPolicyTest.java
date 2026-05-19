@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * RetryPolicy 单元测试。
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-03
  */
 class RetryPolicyTest {

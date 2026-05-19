@@ -89,7 +89,7 @@ public class ResidualLockResolver {
      * @param remoteDir 目标目录
      * @return 已清理的路径列表（即便部分 delete 失败也尽量返回成功的部分）
      * @throws IOException 列目录失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public List<String> cleanupResidualUploads(String remoteDir) throws IOException {

@@ -40,7 +40,7 @@ import java.util.function.Function;
  *   <li>三个池均在 finally 中 shutdown + awaitTermination，不强中断 IO</li>
  * </ul>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public final class PipelineExecutor {
@@ -68,7 +68,7 @@ public final class PipelineExecutor {
      * @param token               取消令牌（用户主动停止）
      * @param phaseName           阶段名（用于线程命名 flux-deploy-&lt;phaseName&gt;-&lt;stage&gt;-&lt;seq&gt;）
      * @param realTimeSink        实时日志输出回调，{@code null} 时落到 outcome.logSegment 由调用方统一 flush
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public record Options(
@@ -105,7 +105,7 @@ public final class PipelineExecutor {
      * @param <T> 目标类型（如 FtpTargetSelection）
      * @param <D> download 阶段输出类型（通常封装 tempDir + downloadedFile）
      * @param <E> embed 阶段输出类型（通常封装 tempDir + outputFile）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public interface PipelineStages<T, D, E> {
@@ -116,7 +116,7 @@ public final class PipelineExecutor {
          * @param log    单包日志 buffer，调用方追加内容由执行器统一 flush
          * @return 下载结果，传给 embed 阶段
          * @throws Exception IO 失败 / 校验失败
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         D download(T target, StringBuilder log) throws Exception;
@@ -129,7 +129,7 @@ public final class PipelineExecutor {
          * @param log        单包日志 buffer
          * @return 嵌入结果，传给 upload 阶段
          * @throws Exception 嵌入失败
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         E embed(T target, D downloaded, StringBuilder log) throws Exception;
@@ -141,7 +141,7 @@ public final class PipelineExecutor {
          * @param embedded embed 阶段的输出
          * @param log      单包日志 buffer
          * @throws Exception IO 失败 / 校验失败
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         void upload(T target, E embedded, StringBuilder log) throws Exception;
@@ -155,7 +155,7 @@ public final class PipelineExecutor {
          * @param target     当前目标
          * @param downloaded download 阶段的输出（可能为 null）
          * @param embedded   embed 阶段的输出（可能为 null）
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         default void cleanup(T target, D downloaded, E embedded) {
@@ -175,7 +175,7 @@ public final class PipelineExecutor {
      * @param <E>       embed 阶段输出类型
      * @return Map&lt;targetKey, Outcome&gt;，输入顺序保留
      * @throws IllegalArgumentException 任一并发数 &lt; 1
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static <T, D, E> Map<String, TargetOutcome> execute(
@@ -252,7 +252,7 @@ public final class PipelineExecutor {
      * @param <D>      download 输出类型
      * @param <E>      embed 输出类型
      * @return 完成时填充 outcomes 的 future
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     @SuppressWarnings("unchecked")
@@ -364,7 +364,7 @@ public final class PipelineExecutor {
      * @param log       共享日志缓冲
      * @param flushedTo 一元数组承载已 flush 字符位置（in/out 参数）
      * @param sink      实时输出回调，可为 {@code null}
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-07
      */
     private static void flushDelta(StringBuilder log, int[] flushedTo, Consumer<String> sink) {
@@ -396,7 +396,7 @@ public final class PipelineExecutor {
      *
      * @param state 中间状态数组 [downloaded, embedded]
      * @return "下载阶段" / "嵌入阶段" / "上传阶段"
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String inferFailedStage(Object[] state) {
@@ -412,7 +412,7 @@ public final class PipelineExecutor {
      * @param stageName 子阶段（"download" / "embed" / "upload"）
      * @param seq       全局自增序号
      * @return 线程工厂
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static ThreadFactory nameFactory(String phaseName, String stageName, AtomicInteger seq) {
@@ -430,7 +430,7 @@ public final class PipelineExecutor {
      * @param fieldName 字段名
      * @param value     值
      * @throws IllegalArgumentException &lt; 1
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void validateParallelism(String fieldName, int value) {
@@ -444,7 +444,7 @@ public final class PipelineExecutor {
      *
      * @param pool      线程池
      * @param stageName 阶段名（用于警告日志）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void shutdownPool(ExecutorService pool, String stageName) {
@@ -464,7 +464,7 @@ public final class PipelineExecutor {
      *
      * @param token 取消令牌
      * @throws CancellationToken.CancellationException 已取消
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void checkCancelled(CancellationToken token) {
@@ -479,7 +479,7 @@ public final class PipelineExecutor {
      * @param strategy 失败策略
      * @param kind     错误分类
      * @return true 表示应触发 cancel
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static boolean decideCancel(FailureStrategy strategy, FtpErrorKind kind) {
@@ -494,7 +494,7 @@ public final class PipelineExecutor {
      * 触发取消令牌（仅 {@link CancellationToken.Simple} 暴露 cancel 方法）
      *
      * @param token 取消令牌
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void tryCancel(CancellationToken token) {
@@ -508,7 +508,7 @@ public final class PipelineExecutor {
      *
      * @param t 原始异常
      * @return 根因
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static Throwable unwrap(Throwable t) {
@@ -532,7 +532,7 @@ public final class PipelineExecutor {
      *
      * @param epochMs epoch 毫秒
      * @return HH:mm:ss
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String formatHms(long epochMs) {
@@ -544,7 +544,7 @@ public final class PipelineExecutor {
     /**
      * 内部异常包装类：把 stage 函数抛的 checked 异常运送过 CompletableFuture 链
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static final class CompletionWrapper extends RuntimeException {

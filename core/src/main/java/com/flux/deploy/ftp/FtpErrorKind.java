@@ -14,7 +14,7 @@ package com.flux.deploy.ftp;
  * {@link FtpErrorClassifier#isGlobal} 给出"是否全局"判定；
  * {@link FtpErrorClassifier#suggestionFor} 给出可执行建议（不带具体数字，避免误导）。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public enum FtpErrorKind {

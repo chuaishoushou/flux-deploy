@@ -71,7 +71,7 @@ public class FtpLock {
      * @param operator    操作人英文 id
      * @param ttlMinutes  TTL 分钟数（&gt; 0）
      * @return 锁文件名
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public static String buildLockName(String packageName, String operator, int ttlMinutes) {
@@ -149,7 +149,7 @@ public class FtpLock {
      *
      * @param lockFileName 锁文件名
      * @return 过期时间；时间戳无法解析时返回 {@code null}
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public static LocalDateTime parseExpireAt(String lockFileName) {

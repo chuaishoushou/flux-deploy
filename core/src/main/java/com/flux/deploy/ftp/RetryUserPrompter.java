@@ -15,7 +15,7 @@ package com.flux.deploy.ftp;
  * <p>实现方应保证<strong>串行化</strong>：并发场景下多个目标同时触发提示，
  * 不能同时弹多个 dialog（IDEA 体验灾难），必须排队。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-03
  */
 public interface RetryUserPrompter {
@@ -23,7 +23,7 @@ public interface RetryUserPrompter {
     /**
      * 用户在重试弹窗上的两种选择。
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     enum Decision {
@@ -41,7 +41,7 @@ public interface RetryUserPrompter {
      * @param lastError      最后一次错误的人类可读信息
      * @param errorKind      错误分类，可用来给文案补"网络异常 / 服务器拒绝"等附加提示
      * @return 用户决定
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     Decision askRetryOrAbort(String targetKey, int attemptedTimes, String lastError, FtpErrorKind errorKind);
@@ -52,7 +52,7 @@ public interface RetryUserPrompter {
      * <p>用于 CLI、单元测试，以及 plugin 在 headless 模式下的回退。</p>
      *
      * @return 永远返回 ABORT 的 prompter
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     static RetryUserPrompter abortAll() {
@@ -64,7 +64,7 @@ public interface RetryUserPrompter {
      *
      * @param maxRetries 总共可调用 askRetryOrAbort 几次返回 RETRY，再调返回 ABORT
      * @return 测试 prompter
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     static RetryUserPrompter retryNTimes(int maxRetries) {

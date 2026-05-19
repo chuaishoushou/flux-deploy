@@ -43,8 +43,8 @@ public class TargetContainerPanel extends JBPanel<TargetContainerPanel> {
         tabs.setTabPlacement(JTabbedPane.TOP);
         tabs.addTab(DeployTargetMode.FTP.getDisplayName(), ftpPanel);
         tabs.addTab(DeployTargetMode.LOCAL.getDisplayName(), localPanel);
-        tabs.setToolTipTextAt(0, "连接 FTP，从远端选择目标包并上传更新");
-        tabs.setToolTipTextAt(1, "不连 FTP，对本地 jar/war 直接打补丁生成新包");
+        tabs.setToolTipTextAt(0, "连接 FTP 上传更新包");
+        tabs.setToolTipTextAt(1, "对本地包打补丁生成新包");
         refreshUnselectedTabBackground();
 
         this.statusBar = ftpPanel.getFtpStatusBar();

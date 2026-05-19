@@ -16,7 +16,7 @@ import javax.swing.Icon;
  *
  * <p>放在标题栏图标顺序的最前（{@code [✉ 邮件] [📘 使用手册] [📜 版本记录]}）。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-17
  */
 public class ShowEmailAction extends AnAction {

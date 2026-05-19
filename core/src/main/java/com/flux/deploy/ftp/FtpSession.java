@@ -108,7 +108,7 @@ public class FtpSession implements Closeable {
      * <p>未曾成功 connect 过的实例调用本方法直接抛 {@link IOException}，避免误用。</p>
      *
      * @throws IOException 重连失败（凭证还没设、目标主机彻底不可达等）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public void reconnect() throws IOException {

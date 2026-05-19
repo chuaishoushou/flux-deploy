@@ -14,6 +14,7 @@ import com.flux.deploy.plugin.service.DeployExecutionService;
 import com.flux.deploy.plugin.service.GitChangeDetector;
 import com.flux.deploy.plugin.service.LocalPackagePatchService;
 import com.flux.deploy.plugin.service.MavenArtifactResolver;
+import com.flux.deploy.plugin.util.ArtifactFreshnessValidator;
 import com.flux.deploy.plugin.util.ArtifactPresenceValidator;
 import com.flux.deploy.plugin.util.BackupTargetGuard;
 import com.flux.deploy.plugin.util.DeployRunLogger;
@@ -99,6 +100,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      */
     private final EmailDraftManager emailDraftManager =
             new EmailDraftManager(new EmailTemplateStore());
+
+    /**
+     * 部署历史缓存：每次"打包并上传成功"追加一条记录，"重置"按钮清空，IDE 重启自然丢失。
+     *
+     * <p>邮件弹窗的「导入」按钮按当前 FTP 项目目录过滤本缓存，把命中的所有包名 + 备份目录
+     * 写入模板的 {@code ${更新包}} / {@code ${备份包}} 字段。</p>
+     */
+    private final com.flux.deploy.email.DeployHistoryCache deployHistoryCache =
+            new com.flux.deploy.email.DeployHistoryCache();
 
     // FTP 模式按钮
     private final JButton preCheckButton;
@@ -206,9 +216,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         // 实际打包动作（打包并上传 / 打包不上传 / 本地打包）的起头另带 (vX) 后缀；预检不打。
         logSection.appendLog("INFO  [版本] FLUX Deploy v" + currentPluginVersion());
 
+        // preCheckButton 字段保留：UI 按钮不再添加到面板，但部署内部"先预检后部署"
+        // 状态机仍引用其 setEnabled() 做联动（见 setButtonsEnabled / rollback cleanup）。
+        // 这是 dead-no-op，保留是为了不破坏现有状态机；后续重构时一并移除。
         this.preCheckButton = new JButton("预检");
-        this.deployButton = new JButton("打包并上传");
-        this.localOnlyButton = new JButton("打包不上传");
+        this.deployButton = new JButton("执行更新");
+        this.localOnlyButton = new JButton("本地打包");
         this.rollbackButton = new JButton("回滚");
         this.resetButton = new JButton("重置");
 
@@ -242,13 +255,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             }
         });
         // 项目/系统/连接变化时：清空本次 session 的自定义备份根（避免跨系统误用），
-        // 再刷新"备份至"行显示最新默认派生路径；同时让邮件 draft 管理器判定项目是否真变了
-        // ——只有项目本身变化才会清空 draft，系统切换 / 连接刷新保留 draft 累积成果。
+        // 再刷新"备份至"行显示最新默认派生路径。
+        // 邮件部署历史缓存不在此处理项目切换——缓存内部按项目目录过滤，跨项目记录互不污染；
+        // 用户主动点"重置"按钮才清空整个缓存。
         this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(() -> {
             this.infoSection.clearSessionBackupRoot();
             this.infoSection.refreshBackupLocationLabel();
-            this.emailDraftManager.onProjectMaybeChanged(
-                    this.targetSection.getCurrentProjectDir());
         }));
 
         initUI();
@@ -473,39 +485,53 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         }
     }
 
-    /** FTP 模式的按钮行：全部按钮单行排列 */
+    /** FTP 模式的按钮行：执行更新 / 本地打包 / 回滚 / 重置 [...glue...] 邮件（贴右边框） */
     private JPanel buildFtpButtons() {
         JPanel p = new JPanel(new GridBagLayout());
         GridBagConstraints gc = new GridBagConstraints();
-        gc.gridy = 0; gc.insets = JBUI.insets(4, 0, 4, 6);
+        // 按钮间距 4px，整体按钮 padding (3,8)；主操作 deployButton 单独 (3,10) 保留权重差
+        gc.gridy = 0; gc.insets = JBUI.insets(4, 0, 4, 4);
         gc.anchor = GridBagConstraints.WEST;
 
-        preCheckButton.setMargin(JBUI.insets(3, 10));
-        preCheckButton.setToolTipText("检查 FTP 连接和目标包状态，不执行实际操作");
-        gc.gridx = 0; p.add(preCheckButton, gc);
+        // 注：「预检」按钮已下线 UI（hasPreChecked / pendingPostPrecheckAction 状态机
+        // 在部署流程内部仍保留，"先预检再部署"逻辑由 executeDeploy 自驱）
 
         deployButton.putClientProperty("JButton.buttonType", "default");
         deployButton.setFont(deployButton.getFont().deriveFont(Font.BOLD));
         deployButtonIdleColor = accentBlue();
         deployButton.setForeground(deployButtonIdleColor);
-        deployButton.setMargin(JBUI.insets(3, 12));
-        deployButton.setToolTipText("合并本地 Maven 编译产物，生成新包上传到 FTP 服务器");
-        gc.gridx = 1; p.add(deployButton, gc);
+        deployButton.setMargin(JBUI.insets(3, 10));
+        deployButton.setToolTipText("生成新包并上传到 FTP");
+        gc.gridx = 0; p.add(deployButton, gc);
 
-        localOnlyButton.setMargin(JBUI.insets(3, 10));
-        localOnlyButton.setToolTipText("合并本地 Maven 编译产物，生成新包保存到本地");
-        gc.gridx = 2; p.add(localOnlyButton, gc);
+        localOnlyButton.setMargin(JBUI.insets(3, 8));
+        localOnlyButton.setToolTipText("生成新包保存到本地");
+        gc.gridx = 1; p.add(localOnlyButton, gc);
 
-        rollbackButton.setMargin(JBUI.insets(3, 10));
-        rollbackButton.setToolTipText("回滚上次部署，恢复备份版本");
-        gc.gridx = 3; p.add(rollbackButton, gc);
+        rollbackButton.setMargin(JBUI.insets(3, 8));
+        rollbackButton.setToolTipText("回滚上次部署");
+        gc.gridx = 2; p.add(rollbackButton, gc);
 
-        resetButton.setMargin(JBUI.insets(3, 10));
-        resetButton.setToolTipText("清空所有选择，恢复初始状态");
-        gc.gridx = 4; p.add(resetButton, gc);
+        resetButton.setMargin(JBUI.insets(3, 8));
+        resetButton.setToolTipText("重置所有选择");
+        gc.gridx = 3; p.add(resetButton, gc);
 
-        gc.gridx = 5; gc.weightx = 1.0; gc.fill = GridBagConstraints.HORIZONTAL;
+        // glue 把"邮件"按钮推到最右
+        gc.gridx = 4; gc.weightx = 1.0; gc.fill = GridBagConstraints.HORIZONTAL;
         p.add(Box.createHorizontalGlue(), gc);
+
+        // 邮件按钮贴右：right inset = 0 紧贴 execContent 右内边框
+        JButton emailTemplateButton = new JButton("邮件模版");
+        emailTemplateButton.setMargin(JBUI.insets(3, 8));
+        emailTemplateButton.setToolTipText("打开邮件模板");
+        emailTemplateButton.addActionListener(e -> openEmailDialog());
+        gc.gridx = 5;
+        gc.weightx = 0;
+        gc.fill = GridBagConstraints.NONE;
+        gc.anchor = GridBagConstraints.EAST;
+        gc.insets = JBUI.insets(4, 0, 4, 0);
+        p.add(emailTemplateButton, gc);
+
         return p;
     }
 
@@ -513,17 +539,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private JPanel buildLocalButtons() {
         JPanel p = new JPanel(new GridBagLayout());
         GridBagConstraints gc = new GridBagConstraints();
-        gc.gridy = 0; gc.insets = JBUI.insets(4, 0, 4, 6);
+        // 按钮间距 / padding 跟 buildFtpButtons 对齐，FTP / 本地两套按钮风格统一
+        gc.gridy = 0; gc.insets = JBUI.insets(4, 0, 4, 4);
         gc.anchor = GridBagConstraints.WEST;
 
         localBuildButton.putClientProperty("JButton.buttonType", "default");
         localBuildButton.setFont(localBuildButton.getFont().deriveFont(Font.BOLD));
         localBuildButton.setForeground(accentBlue());
-        localBuildButton.setMargin(JBUI.insets(3, 12));
-        localBuildButton.setToolTipText("对本地 jar/war 打补丁并输出新包（打包前会弹出变更清单供确认）");
+        localBuildButton.setMargin(JBUI.insets(3, 10));
+        localBuildButton.setToolTipText("对本地包打补丁生成新包");
         gc.gridx = 0; p.add(localBuildButton, gc);
 
-        localResetButton.setMargin(JBUI.insets(3, 10));
+        localResetButton.setMargin(JBUI.insets(3, 8));
         localResetButton.setToolTipText("清空本地模式选择");
         gc.gridx = 1; p.add(localResetButton, gc);
 
@@ -534,12 +561,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
     private void initListeners() {
         // ── FTP 模式按钮 ──
-        preCheckButton.addActionListener(e -> {
-            logSection.appendLog("INFO  [界面] 点击「预检」");
-            // 预检：轻量校验，仅输出日志，不弹窗阻断
-            executeDeploy(true);
-            hasPreChecked = true;
-        });
+        // 注：preCheckButton 已下线 UI，listener 不再注册；"先预检后部署"由 executeDeploy
+        // 内部 hasPreChecked / pendingPostPrecheckAction 状态机驱动
         deployButton.addActionListener(e -> {
             // 三态分发：RUNNING 时按钮变身"停止"，弹收尾选择对话框；STOPPING 已请求停止，忽略
             if (deployButtonState == DeployButtonState.RUNNING) {
@@ -550,12 +573,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             if (deployButtonState == DeployButtonState.STOPPING) {
                 return;
             }
-            logSection.appendLog("INFO  [界面] 点击「打包并上传」");
-            // 打包并上传：硬性前置校验，任何缺失都弹窗阻断
+            logSection.appendLog("INFO  [界面] 点击「执行更新」");
+            // 执行更新：硬性前置校验，任何缺失都弹窗阻断
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
                 logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
-                showPrerequisiteDialog(missing, "打包并上传");
+                showPrerequisiteDialog(missing, "执行更新");
                 return;
             }
             // 已勾选备份时：异步查 FTP 是否已存在当天同开发的备份，存在则弹冲突对话框
@@ -566,19 +589,19 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             }
         });
         localOnlyButton.addActionListener(e -> {
-            logSection.appendLog("INFO  [界面] 点击「打包不上传」");
-            // 打包不上传：同样强制校验（需要 FTP 下载远端原包）
+            logSection.appendLog("INFO  [界面] 点击「本地打包」（FTP 模式产出本地包）");
+            // 本地打包（FTP 模式）：同样强制校验（需要 FTP 下载远端原包）
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
                 logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
-                showPrerequisiteDialog(missing, "打包不上传");
+                showPrerequisiteDialog(missing, "本地打包");
                 return;
             }
             if (!confirmFtpLocalBuild()) {
-                logSection.appendLog("INFO  [界面] 用户取消打包不上传");
+                logSection.appendLog("INFO  [界面] 用户取消本地打包");
                 return;
             }
-            logSection.appendLog("INFO  [界面] 确认打包不上传");
+            logSection.appendLog("INFO  [界面] 确认本地打包");
             executeDeploy(false, null, true);
         });
         resetButton.addActionListener(e -> resetFtpMode());
@@ -688,7 +711,27 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private boolean verifyArtifactsOrPrompt(DeployMode mode, List<String> files, boolean hasEmbedTargets) {
         ArtifactPresenceValidator.Result r = ArtifactPresenceValidator.validate(
                 mode, currentModulePath, currentArtifactFileName, files, hasEmbedTargets);
-        if (r.isOk()) return true;
+        if (r.isOk()) {
+            ArtifactFreshnessValidator.Outcome f = ArtifactFreshnessValidator.verifyOrPrompt(
+                    this, mode, currentModulePath, currentArtifactFileName, files);
+            switch (f.decision) {
+                case USER_CONFIRMED_STALE:
+                    logSection.appendLog("WARN  [界面] 编译产物比源代码旧 " + f.staleSources.size()
+                            + " 个，用户确认继续：");
+                    for (String rel : f.staleSources) {
+                        logSection.appendLog(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                + "            " + rel);
+                    }
+                    return true;
+                case CANCELED:
+                    logSection.appendLog("INFO  [界面] 用户取消部署：编译产物比源代码旧 "
+                            + f.staleSources.size() + " 个");
+                    return false;
+                case FRESH:
+                default:
+                    return true;
+            }
+        }
 
         logSection.appendLog("ERROR [界面] 编译产物缺失 " + r.missing.size() + " 个，已中止本次操作：");
         for (String rel : r.missing) {
@@ -835,8 +878,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         hasPreChecked = false;
         pendingPostPrecheckAction = null;
         rollbackButton.setEnabled(false);
-        // 邮件 draft 跟随主面板「重置」一起清空：从头开始一封新邮件
-        emailDraftManager.onReset();
+        // 部署历史缓存跟随主面板「重置」一起清空：邮件弹窗的「导入」按钮从此显示空
+        deployHistoryCache.clear();
     }
 
     private void doRollback() {
@@ -957,7 +1000,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * 同一 session 内首次部署自动跑一次预检（确认 FTP 状态），通过后自动进入部署确认；
      * 预检已跑过则直接进部署确认。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private void proceedToDeployOrPreCheck() {
@@ -1046,7 +1089,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         StringBuilder html = new StringBuilder();
         html.append("<html><body style='width:460px;'>");
-        html.append("<b>即将执行「打包不上传」</b><br><br>");
+        html.append("<b>即将执行「本地打包」</b><br><br>");
 
         html.append("模式：<code>").append(mode == null ? "未选" : mode.name()).append("</code><br>");
 
@@ -1074,7 +1117,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         Object[] options = {"开始打包", "取消"};
         int choice = JOptionPane.showOptionDialog(this, html.toString(),
-                "打包不上传确认",
+                "本地打包确认",
                 JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE,
                 null, options, options[0]);
         return choice == 0;
@@ -1185,7 +1228,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         // 不再清空日志：保留前置步骤（前置校验、备份冲突检查）的输出，
         // 方便用户在失败时往上滚动看到完整上下文。想清空可点日志区「清空」按钮。
         // 版本后缀只在"实际打包"动作里加（打包并上传 / 打包不上传），预检不打：预检不消费本地产物
-        String roundLabel = dryRun ? "预检" : localOnly ? "打包不上传" : "打包并上传";
+        String roundLabel = dryRun ? "预检" : localOnly ? "本地打包" : "执行更新";
         String versionSuffix = dryRun ? "" : " (v" + currentPluginVersion() + ")";
         logSection.appendLog("INFO  [界面] 开始新一轮" + roundLabel + versionSuffix);
 
@@ -1294,26 +1337,41 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                     // 一次部署结束后重置备份冲突策略为默认，避免污染下次操作
                     pendingBackupStrategy = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
 
-                    // 通知邮件 draft 累积：只有"打包并上传"且整体成功才累积。
-                    // 任务号与 draft.ownerTaskId 一致 → 在锚点上追加新的更新包 / FTP 路径；
-                    // 不一致 → 推倒重建（视为一封新邮件）。
+                    // 通知邮件「导入」缓存累积：只有"打包并上传"且整体成功才记。
+                    // 直接读 pluginConfig.getMainTargets() + getEmbedTargets()——这是用户实际选的所有目标，
+                    // 而 result.getTargets() 在多主目标循环里会被反复覆盖（DeployExecutionService:1350），
+                    // 又不含 embed 阶段处理的 war 目标，会漏记。
                     if (result != null && result.isSuccess() && !dryRun && !localOnly) {
-                        List<String> newPkgs = new ArrayList<>();
-                        List<String> newFtpPaths = new ArrayList<>();
-                        if (result.getTargets() != null) {
-                            for (DeployResult.TargetResult t : result.getTargets()) {
-                                if (t == null || !t.isVerified()) continue;
-                                String name = t.getPackageName();
-                                if (name != null && !name.isBlank()) newPkgs.add(name);
-                                String remote = t.getRemotePath();
-                                if (remote != null && !remote.isBlank()) newFtpPaths.add(remote);
+                        List<String> packagePaths = new ArrayList<>();
+                        java.util.List<com.flux.deploy.plugin.model.FtpTargetSelection> mts =
+                                pluginConfig.getMainTargets();
+                        if (mts != null) {
+                            for (com.flux.deploy.plugin.model.FtpTargetSelection mt : mts) {
+                                if (mt == null) continue;
+                                String dir = mt.getRemoteDir();
+                                String rel = mt.getRelativePath();
+                                if (dir == null) dir = "";
+                                if (rel == null) rel = "";
+                                packagePaths.add(dir + rel);
                             }
                         }
-                        emailDraftManager.onDeploySucceeded(
-                                infoSection.getTaskId(),
-                                targetSection.getCurrentProjectDir(),
-                                newPkgs, newFtpPaths,
-                                collectFieldValues());
+                        java.util.List<com.flux.deploy.plugin.model.FtpTargetSelection> ets =
+                                pluginConfig.getEmbedTargets();
+                        if (ets != null) {
+                            for (com.flux.deploy.plugin.model.FtpTargetSelection et : ets) {
+                                if (et == null) continue;
+                                String dir = et.getRemoteDir();
+                                String rel = et.getRelativePath();
+                                if (dir == null) dir = "";
+                                if (rel == null) rel = "";
+                                packagePaths.add(dir + rel);
+                            }
+                        }
+                        // 备份目录：勾选了"备份"才记；否则留空表示没有备份
+                        String backupDir = backupCheckBox.isSelected()
+                                ? computeBackupRootForEmail() : null;
+                        deployHistoryCache.recordDeploy(
+                                targetSection.getCurrentProjectDir(), packagePaths, backupDir);
                     }
 
                     // 消费"预检后自动继续部署"的 pending action：
@@ -1355,7 +1413,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         deployButton.setEnabled(true);
         deployButton.setText("停止");
         deployButton.setForeground(JBColor.RED);
-        deployButton.setToolTipText("点击停止当前部署：将弹出对话框选择如何处理已成功的包");
+        deployButton.setToolTipText("停止当前部署");
     }
 
     /**
@@ -1373,9 +1431,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      */
     private void exitToIdleState() {
         deployButtonState = DeployButtonState.IDLE;
-        deployButton.setText("打包并上传");
+        deployButton.setText("执行更新");
         deployButton.setForeground(deployButtonIdleColor);
-        deployButton.setToolTipText("合并本地 Maven 编译产物，生成新包上传到 FTP 服务器");
+        deployButton.setToolTipText("生成新包并上传到 FTP");
         setButtonsEnabled(true);
     }
 
@@ -1497,7 +1555,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                                     : AllIcons.General.ExpandComponent;
         Icon fsHover = logFullscreen ? AllIcons.General.CollapseComponentHover
                                      : AllIcons.General.ExpandComponentHover;
-        String fsTip = logFullscreen ? "退出全屏" : "全屏运行日志窗口（占满插件区域）";
+        String fsTip = logFullscreen ? "退出全屏" : "全屏显示日志";
         for (JButton b : new JButton[]{logHeaderFullscreenButton, logClosedFullscreenButton}) {
             if (b == null) continue;
             b.setIcon(fsIcon);
@@ -1507,8 +1565,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         Icon minIcon = logClosed ? AllIcons.General.ArrowUp
                                  : AllIcons.General.HideToolWindow;
-        String minTip = logClosed ? "展开运行日志窗口"
-                                  : "最小化运行日志窗口（日志仍会继续记录）";
+        String minTip = logClosed ? "展开日志窗口" : "最小化日志窗口";
         for (JButton b : new JButton[]{logHeaderMinimizeButton, logClosedMinimizeButton}) {
             if (b == null) continue;
             b.setIcon(minIcon);
@@ -1563,13 +1620,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         if (rightSplit == null || logClosed) {
             return;
         }
+        boolean wasFullscreen = logFullscreen;
         if (logFullscreen) {
             deployCard.remove(logCard);
             deployCard.add(mainSplit, BorderLayout.CENTER);
             logFullscreen = false;
             deployCard.revalidate();
         }
-        rightSplitRestoreProportion = rightSplit.getProportion();
+        // 仅 NORMAL→MIN 时刷新展开比例：从全屏直达折叠时 rightSplit 在 FS 期间未显示，
+        // 其 getProportion() 可能仍是上一轮 MIN 残留的 0.97（来源：MIN→FS 不重置比例）；
+        // 若误把 0.97 当成"展开比例"保存，再次展开就只剩 3% 高度，看起来像日志栏无法打开。
+        // 此时直接复用 toggleLogFullscreen 在进入 FS 前已记录的 rightSplitRestoreProportion。
+        if (!wasFullscreen) {
+            rightSplitRestoreProportion = rightSplit.getProportion();
+        }
         logClosed = true;
         rightSplit.setSecondComponent(logClosedBar);
         rightSplit.setProportion(RIGHT_SPLIT_LOG_CLOSED_PROPORTION);
@@ -1598,7 +1662,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             logFullscreen = false;
             logClosed = false;
         } else {
-            // 进入全屏：rightSplit 第二槽位先填空 panel 占位（无论当前是 NORMAL 还是
+            // 进入全屏前先把"当前展开比例"记到 rightSplitRestoreProportion，退出全屏 / 折叠时还原。
+            // 仅 NORMAL 态记录：MINIMIZED 态此时 rightSplit 比例是临时占位值 0.97，
+            // 不能当作展开比例保存——否则后续 MIN→FS→MIN→展开会只剩 3% 高度。
+            if (!logClosed) {
+                rightSplitRestoreProportion = rightSplit.getProportion();
+            }
+            // rightSplit 第二槽位先填空 panel 占位（无论当前是 NORMAL 还是
             // MINIMIZED 都直接覆盖），logCard 移入 deployCard
             rightSplit.setSecondComponent(new JPanel());
             deployCard.remove(mainSplit);
@@ -2131,40 +2201,51 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * <p>弹窗会从 {@link #emailDraftManager} 取出当前 draft；若 draft 为空（首次打开 /
      * 项目刚切 / 重置后），用主面板当前字段值 + 选中模板渲染一个新 draft。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public void openEmailDialog() {
-        new EmailDialog(project, emailDraftManager, this).show();
+        if (!com.intellij.ui.jcef.JBCefApp.isSupported()) {
+            com.intellij.openapi.ui.Messages.showWarningDialog(
+                    project,
+                    "通知邮件需要 IDE 内置浏览器（JCEF）支持。当前检测到 JCEF 不可用。\n\n"
+                            + "请到 Help → Find Action → Registry，把 ide.browser.jcef.enabled 设为 true，"
+                            + "重启 IDE 后再试。",
+                    "JCEF 不可用");
+            return;
+        }
+        new EmailDialog(project, emailDraftManager, this, deployHistoryCache).show();
     }
+
 
     /**
      * 实现 {@link EmailRuntimeData#collectFieldValues()}：从主面板字段拼一个 key → 值的 map
      *
-     * <p>插件能自动填的字段：任务号 / 客服编号 / 开发 / 项目名 / 备份包 / 收件人 / 日期。
-     * 未提供的字段（资源来源 / 更新方式 / 是否重启 / SQL / 影响范围 等）由
-     * {@code EmailTemplateRenderer.renderInitial} 保留为 {@code ${字段名}} 字面量。</p>
+     * <p>插件提供的字段：{@code 任务} / {@code 客服}（来自主面板的"任务号""客服号"输入框）。
+     * 模板里其他占位符（如 {@code 更新包} / {@code 备份包} / {@code 项目} /
+     * {@code 资源来源} 等）：</p>
+     * <ul>
+     *   <li>{@code 更新包} / {@code 备份包} / {@code 项目}：由邮件弹窗的「导入」按钮从
+     *       {@link com.flux.deploy.email.DeployHistoryCache} 拉取，跟本方法返回的
+     *       任务 / 客服 合并后一并刷到对应 chip</li>
+     *   <li>其他：模板里的字面占位符，在编辑器里以空 chip 形态显示，由用户手填</li>
+     * </ul>
      *
-     * <p>"更新包" 和 "FTP版本来源" 这两个累积字段在首次渲染时为空字符串，
-     * 锚点仍会生成（空内容），后续部署成功会通过 {@link EmailDraftManager#onDeploySucceeded}
-     * 在锚点里追加实际值。</p>
+     * <p><b>调用时机</b>：仅在邮件弹窗的「导入」按钮回调里调用一次（弹窗打开时<b>不</b>调用），
+     * 避免主面板的任务 / 客服 在用户没点导入前就提前出现在邮件 chip 里。</p>
      *
      * @return 字段值字典
-     * @author claude
-     * @date 2026-05-17
+     * @author xumanyi
+     * @date 2026-05-18
      */
     @Override
     public Map<String, String> collectFieldValues() {
-        // 模板只有 4 个绑定变量，这里只填这 4 个 key。其他字段（资源来源 / 更新方式 /
-        // 是否重启 / SQL / 影响范围 / FTP 版本来源 等）在模板里是写好的字面默认值，
-        // 用户在弹窗的编辑区里手改后通过「保存到模板」持久化。
-        // 更新包不自动预填——用户主动点弹窗里的「导入选中包」按钮才追加，避免
-        // "勾错包" 等情况下污染 draft。
+        // 只填"用户在主面板表单输入的字段"——任务、客服。
+        // 项目 / 备份包 / 更新包 都是"部署后才有的数据"，跟 任务 / 客服 一起由邮件弹窗
+        // 的「导入」按钮拉取 —— 用户没点导入前 chip 一律保持占位符。
         Map<String, String> v = new HashMap<>();
-        v.put("任务号", nullToEmpty(infoSection.getTaskId()));
-        v.put("客服编号", nullToEmpty(infoSection.getCustomerId()));
-        v.put("备份包", computeBackupRootForEmail());
-        v.put("更新包", "");
+        v.put("任务", nullToEmpty(infoSection.getTaskId()));
+        v.put("客服", nullToEmpty(infoSection.getCustomerId()));
         return v;
     }
 
@@ -2176,7 +2257,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * {@code ${更新包}} 锚点。</p>
      *
      * @return 包文件名列表（永不为 null）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     @Override
@@ -2211,7 +2292,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * 默认派生路径由邮件正文的接收方（顾问）按惯例理解。</p>
      *
      * @return 备份包路径或空串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     private String computeBackupRootForEmail() {

@@ -19,7 +19,7 @@ package com.flux.deploy.config;
  * <p>本类不处理"如何回滚"，只负责"何时回滚"。具体回滚动作（preUnlockAll /
  * abortPartial / restoreLock）是 FTP IO 操作，由调用方按返回值决定走哪条分支。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-04
  */
 public enum EmbedFailureDecision {
@@ -36,7 +36,7 @@ public enum EmbedFailureDecision {
      * @param userRequestedStop 是否由用户主动停止（取消令牌触发或显式 stop 按钮）；
      *                          true 时一律 ABORT_BATCH，无视策略
      * @return 处置决策
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-04
      */
     public static EmbedFailureDecision decide(FailureStrategy strategy, boolean userRequestedStop) {

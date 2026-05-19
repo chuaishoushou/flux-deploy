@@ -91,7 +91,7 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
         // ── 输出位置 ──
         this.outputDirField = new JBTextField();
         this.outputDirField.getEmptyText().setText("先选源包后自动生成 patched_{时间戳}/ 子目录");
-        this.outputDirField.setToolTipText("打补丁后新包的输出目录，默认 <包所在目录>/patched_{时间戳}/");
+        this.outputDirField.setToolTipText("新包的输出目录");
         this.pickOutputButton = new JButton(AllIcons.Nodes.Folder);
         this.pickOutputButton.setMargin(JBUI.emptyInsets());
         this.pickOutputButton.setFocusable(false);

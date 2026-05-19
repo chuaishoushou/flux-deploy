@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
  * <p>重试机制：流水线主流程跑完后，对失败包按配置次数串行重试（每次完整 D-E-U）。
  * AUTH / ROLLBACK_FAILED 类错误不参与重试。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public final class UserConfig {
@@ -96,7 +96,7 @@ public final class UserConfig {
      * @param strategy         失败策略
      * @param embedMaxRetries  嵌入阶段失败包的串行重试次数（0 = 不重试）
      * @param backupMaxRetries 备份阶段失败包的串行重试次数（0 = 不重试）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private UserConfig(FailureStrategy strategy, int embedMaxRetries, int backupMaxRetries) {
@@ -113,7 +113,7 @@ public final class UserConfig {
      *
      * @return 配置实例（文件不存在 / 创建失败时返回默认值）
      * @throws IllegalArgumentException 文件存在但内容非法
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static UserConfig load() {
@@ -127,7 +127,7 @@ public final class UserConfig {
      * 默认配置文件是否存在（供调用方判断是否首次使用，便于打"已生成模板"日志）
      *
      * @return 默认路径下文件是否可读
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static boolean defaultConfigExists() {
@@ -138,7 +138,7 @@ public final class UserConfig {
      * 默认配置文件路径
      *
      * @return ~/.flux-deploy/config.toml 的绝对路径
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static Path defaultConfigPath() {
@@ -152,7 +152,7 @@ public final class UserConfig {
      * 任何失败都吞掉，不影响调用方流程。</p>
      *
      * @param path 目标路径
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void tryCreateDefaultTemplate(Path path) {
@@ -185,7 +185,7 @@ public final class UserConfig {
      * @param path TOML 文件路径
      * @return 配置实例
      * @throws IllegalArgumentException 内容非法
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static UserConfig loadFrom(Path path) {
@@ -223,7 +223,7 @@ public final class UserConfig {
      * 失败策略
      *
      * @return ISOLATED / ROLLBACK_ALL / KEEP_SUCCEEDED
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public FailureStrategy getFailureStrategy() {
@@ -234,7 +234,7 @@ public final class UserConfig {
      * 嵌入阶段失败包的串行重试次数
      *
      * @return [0, 5] 范围内的整数（0 = 不重试）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public int getEmbedMaxRetries() {
@@ -245,7 +245,7 @@ public final class UserConfig {
      * 备份阶段失败包的串行重试次数
      *
      * @return [0, 5] 范围内的整数（0 = 不重试）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public int getBackupMaxRetries() {
@@ -258,7 +258,7 @@ public final class UserConfig {
      * @param fieldName 字段全名
      * @param value     实际值
      * @throws IllegalArgumentException 越界
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void validateRetries(String fieldName, int value) {
@@ -277,7 +277,7 @@ public final class UserConfig {
      * @param defaultValue section 或 key 不存在时使用
      * @return 解析得到的整数
      * @throws IllegalArgumentException 字段存在但不是合法整数
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static int parseIntField(String content, String section, String key, int defaultValue) {
@@ -298,7 +298,7 @@ public final class UserConfig {
      * @param section 章节名
      * @param key     字段名
      * @return 字段值（不含引号）；不存在返回 null
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String parseStringField(String content, String section, String key) {
@@ -315,7 +315,7 @@ public final class UserConfig {
      * @param section 章节名
      * @param key     字段名
      * @return 字段值（去除可能的引号 + 行尾注释）；不存在返回 null
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String parseStringOrIntField(String content, String section, String key) {
@@ -345,7 +345,7 @@ public final class UserConfig {
      *
      * @param s 原始值字符串（可能含行尾注释）
      * @return 去掉注释后的字符串；无注释返回原串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String stripLineComment(String s) {

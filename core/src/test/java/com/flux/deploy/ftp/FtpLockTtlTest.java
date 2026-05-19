@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * FtpLock TTL 相关行为的单元测试。
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-03
  */
 class FtpLockTtlTest {

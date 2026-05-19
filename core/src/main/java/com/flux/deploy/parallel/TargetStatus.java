@@ -3,7 +3,7 @@ package com.flux.deploy.parallel;
 /**
  * 单个目标在并行批次中的执行状态
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public enum TargetStatus {

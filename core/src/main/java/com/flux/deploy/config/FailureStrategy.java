@@ -10,7 +10,7 @@ package com.flux.deploy.config;
  *   <li>KEEP_SUCCEEDED - 任一失败 → 中止 + 保留已成功的，备份目录保留供手动回滚</li>
  * </ul>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public enum FailureStrategy {
@@ -24,7 +24,7 @@ public enum FailureStrategy {
      * @param raw 配置文件原始值（大小写不敏感，下划线分隔）
      * @return 对应的策略枚举
      * @throws IllegalArgumentException raw 为 null 或不识别的值
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static FailureStrategy fromString(String raw) {
@@ -47,7 +47,7 @@ public enum FailureStrategy {
      * 配置文件不存在或缺省时使用的默认策略
      *
      * @return ISOLATED
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static FailureStrategy defaultStrategy() {

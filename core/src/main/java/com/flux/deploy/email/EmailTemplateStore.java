@@ -4,9 +4,13 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -25,7 +29,7 @@ import java.util.stream.Stream;
  *
  * <p>所有方法把 I/O 失败包装为 {@link IOException}，由上层决定如何提示用户。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-17
  */
 public final class EmailTemplateStore {
@@ -37,32 +41,29 @@ public final class EmailTemplateStore {
     private static final String FILE_EXT = ".html";
 
     /**
-     * 内置默认模板源串
+     * 内置默认模板源串（HTML 片段）
      *
-     * <p>设计原则：<b>只 4 个绑定变量</b>（{@code ${任务号}}、{@code ${客服编号}}、
-     * {@code ${更新包}}、{@code ${备份包}}），其他字段是写好的字面默认值
-     * （如"是否重启：需要"），用户在弹窗的富文本编辑区里手改 → 点「保存到模板」
-     * 后下次开邮件保留这些字面值。</p>
+     * <p>4 个绑定变量（{@code ${任务}}、{@code ${客服}}、{@code ${更新包}}、{@code ${备份包}}）
+     * 由主面板 / 部署历史缓存自动填；其他字段是占位标签，用户在邮件弹窗里手填。</p>
      *
-     * <p>对照客户端邮件例子的格式：富文本 HTML（{@code <br>} 强制换行、{@code &nbsp;}
-     * 缩进），渲染后再粘到 Outlook / Foxmail / Web 邮箱仍保留两格缩进与换行。
-     * 占位符语法 {@code ${字段名}} 由 {@link EmailTemplateRenderer#renderInitial} 解释。</p>
+     * <p>首行 {@code XX，} 是收件人占位，每次发邮件由用户自己改。后续行用 4 个
+     * {@code &nbsp;} 缩进（约 1 个中文字宽），跟首行 "XX，" 视觉错开。占位符语法
+     * {@code ${字段名}} 由 {@link EmailTemplateRenderer#renderInitialPlain} 解释。</p>
      */
     public static final String BUILTIN_DEFAULT_TEMPLATE =
-            "你好！<br>"
-                    + "&nbsp;&nbsp;项目需要进行下局部更新<br>"
-                    + "&nbsp;&nbsp;更新内容: <br>"
-                    + "&nbsp;&nbsp;客服编号：${客服编号}<br>"
-                    + "&nbsp;&nbsp;任务编号：${任务号}<br>"
-                    + "&nbsp;&nbsp;资源来源：<br>"
-                    + "&nbsp;&nbsp;FTP版本来源：<br>"
-                    + "&nbsp;&nbsp;备份包：${备份包}<br>"
-                    + "&nbsp;&nbsp;更新方式：局部更新<br>"
-                    + "&nbsp;&nbsp;是否重启：需要<br>"
-                    + "&nbsp;&nbsp;浏览器缓存刷新：不需要<br>"
-                    + "&nbsp;&nbsp;影响范围：<br>"
-                    + "&nbsp;&nbsp;SQL: 无<br>"
-                    + "&nbsp;&nbsp;更新包: ${更新包}<br>";
+            "XX，<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;你好！<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;【${项目}】项目已更新到FTP，麻烦更新下<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新内容：<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;任务：${任务}<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;客服：${客服}<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新包：${更新包}<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;备份包：${备份包}<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新方式：<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;是否重启：<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;浏览器缓存刷新：<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;影响范围：<br>"
+                    + "&nbsp;&nbsp;&nbsp;&nbsp;SQL:<br>";
 
     /**
      * v1 时代的"老占位符"集合 —— 检测到 {@code default.html} 内容包含这里任一项
@@ -100,7 +101,7 @@ public final class EmailTemplateStore {
     /**
      * 用默认路径 {@code ~/.flux-deploy/email_templates/} 构造
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public EmailTemplateStore() {
@@ -111,7 +112,7 @@ public final class EmailTemplateStore {
      * 用指定根目录构造（供测试注入）
      *
      * @param rootDir 模板存储根目录
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public EmailTemplateStore(Path rootDir) {
@@ -125,23 +126,32 @@ public final class EmailTemplateStore {
      * 内部都会先调一次本方法，无须外部显式触发。</p>
      *
      * @throws IOException 创建目录或写文件失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public void ensureInitialized() throws IOException {
         if (!Files.exists(rootDir)) {
             Files.createDirectories(rootDir);
         }
+        // 一次性迁移：扫所有 .html 模板，把已重命名的占位符（${任务号} → ${任务}、
+        // ${客服编号} → ${客服}）就地替换。保留其他内容不动，老用户自定义模板也能直接用新字段。
+        migrateRenamedPlaceholders();
+
         Path defaultPath = pathOf(DEFAULT_TEMPLATE_NAME);
         if (!Files.exists(defaultPath)) {
             Files.writeString(defaultPath, BUILTIN_DEFAULT_TEMPLATE, StandardCharsets.UTF_8);
             return;
         }
-        // 自动升级：fuzzy 检测——只要现存 default.html 包含任何 v1 时代的老占位符，
-        // 就视为老模板自动覆盖。覆盖前先备份到 default.legacy.bak（不进入下拉），
-        // 万一误判用户可以手动恢复。
+        // 自动升级 / 修复：
+        //   1. 文件为空或全空白 → 历史误操作清空过，直接恢复内置默认
+        //   2. 含 v1 时代老占位符 → 模板已过期，备份到 default.legacy.bak 后覆盖
         try {
             String existing = Files.readString(defaultPath, StandardCharsets.UTF_8);
+            if (existing.trim().isEmpty()) {
+                Files.writeString(defaultPath, BUILTIN_DEFAULT_TEMPLATE,
+                        StandardCharsets.UTF_8);
+                return;
+            }
             if (existing.equals(BUILTIN_DEFAULT_TEMPLATE)) {
                 return;
             }
@@ -157,6 +167,48 @@ public final class EmailTemplateStore {
     }
 
     /**
+     * 已重命名的占位符映射：旧名 → 新名（运行时一次性迁移用）
+     */
+    private static final Map<String, String> RENAMED_PLACEHOLDERS = Map.of(
+            "${任务号}", "${任务}",
+            "${客服编号}", "${客服}"
+    );
+
+    /**
+     * 扫描所有模板文件，把已重命名的占位符（{@link #RENAMED_PLACEHOLDERS}）就地替换
+     *
+     * <p>纯字面替换，不影响模板里其他 HTML / 文本。失败时静默跳过（启动不应被任何 I/O 错误阻挡）。</p>
+     *
+     * @author xumanyi
+     * @date 2026-05-18
+     */
+    private void migrateRenamedPlaceholders() {
+        if (!Files.exists(rootDir)) return;
+        try (Stream<Path> s = Files.list(rootDir)) {
+            s.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(FILE_EXT))
+                    .forEach(this::migrateOneFile);
+        } catch (IOException ignored) {
+            // 列目录失败：跳过迁移，继续启动
+        }
+    }
+
+    private void migrateOneFile(Path path) {
+        try {
+            String content = Files.readString(path, StandardCharsets.UTF_8);
+            String migrated = content;
+            for (Map.Entry<String, String> e : RENAMED_PLACEHOLDERS.entrySet()) {
+                migrated = migrated.replace(e.getKey(), e.getValue());
+            }
+            if (!migrated.equals(content)) {
+                Files.writeString(path, migrated, StandardCharsets.UTF_8);
+            }
+        } catch (IOException ignored) {
+            // 单文件迁移失败：跳过，保留原文件
+        }
+    }
+
+    /**
      * 检测内容是否包含 v1 时代的任一老占位符
      *
      * <p>用于 {@link #ensureInitialized()} 的 fuzzy 自动升级；也由
@@ -164,7 +216,7 @@ public final class EmailTemplateStore {
      *
      * @param content 模板源串或 draft HTML
      * @return 含 {@link #LEGACY_PLACEHOLDER_TOKENS} 中任一占位符返回 true
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public static boolean containsAnyLegacyPlaceholder(String content) {
@@ -187,20 +239,33 @@ public final class EmailTemplateStore {
      *
      * @return 模板名列表（永不为空，至少含 {@code default}）
      * @throws IOException I/O 失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public List<String> listNames() throws IOException {
         ensureInitialized();
-        List<String> names = new ArrayList<>();
+        // 按文件 creationTime 升序：新创建的模板排到列表末尾，跟用户"看到新建的在后面"
+        // 直觉一致。ext4 等没有 birth time 的 FS 上 JDK 回落到 lastModifiedTime，
+        // 也大体上能反映"较新"的顺序。
+        Map<String, FileTime> createdAt = new HashMap<>();
         try (Stream<Path> s = Files.list(rootDir)) {
             s.filter(Files::isRegularFile)
-                    .map(p -> p.getFileName().toString())
-                    .filter(n -> n.endsWith(FILE_EXT))
-                    .map(n -> n.substring(0, n.length() - FILE_EXT.length()))
-                    .forEach(names::add);
+                    .filter(p -> p.getFileName().toString().endsWith(FILE_EXT))
+                    .forEach(p -> {
+                        String name = p.getFileName().toString();
+                        name = name.substring(0, name.length() - FILE_EXT.length());
+                        FileTime ft;
+                        try {
+                            ft = Files.readAttributes(p, BasicFileAttributes.class)
+                                    .creationTime();
+                        } catch (IOException ignore) {
+                            ft = FileTime.fromMillis(0);
+                        }
+                        createdAt.put(name, ft);
+                    });
         }
-        Collections.sort(names);
+        List<String> names = new ArrayList<>(createdAt.keySet());
+        names.sort(Comparator.comparing(createdAt::get));
         // default 永远排第一
         if (names.remove(DEFAULT_TEMPLATE_NAME)) {
             names.add(0, DEFAULT_TEMPLATE_NAME);
@@ -216,7 +281,7 @@ public final class EmailTemplateStore {
      *
      * @param name 模板名（不含 {@code .html} 后缀）
      * @return 模板源串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public String loadOrDefault(String name) {
@@ -233,6 +298,37 @@ public final class EmailTemplateStore {
     }
 
     /**
+     * 「恢复默认」按钮的核心逻辑 —— default 与其他模板语义不同
+     *
+     * <p>设计意图：把 "default" 模板当作"用户自己的默认模板"（可定制），
+     * 其他自定义模板视为"从默认模板派生"。所以：</p>
+     * <ul>
+     *   <li>name = "default" → 用插件内置的 {@link #BUILTIN_DEFAULT_TEMPLATE} 覆盖
+     *       （回到出厂状态）</li>
+     *   <li>name = 其他 → 用<b>当前 default 模板的内容</b>覆盖（即用户定制过的"默认"，
+     *       而不是出厂状态）。让自定义模板"重置"成跟默认一致的起点。</li>
+     * </ul>
+     *
+     * @param name 待恢复的模板名
+     * @throws IOException I/O 失败
+     * @throws IllegalArgumentException 名字非法
+     * @author xumanyi
+     * @date 2026-05-18
+     */
+    public void restoreToBuiltinDefault(String name) throws IOException {
+        validateName(name);
+        ensureInitialized();
+        String content;
+        if (DEFAULT_TEMPLATE_NAME.equals(name)) {
+            content = BUILTIN_DEFAULT_TEMPLATE;
+        } else {
+            // 其他模板恢复成当前 default 的内容（默认模板用户可能已经定制过）
+            content = loadOrDefault(DEFAULT_TEMPLATE_NAME);
+        }
+        Files.writeString(pathOf(name), content, StandardCharsets.UTF_8);
+    }
+
+    /**
      * 保存模板内容（已存在则覆盖）
      *
      * <p>给「保存到模板」按钮用：用户当前在弹窗里选中的模板被覆盖。
@@ -242,7 +338,7 @@ public final class EmailTemplateStore {
      * @param content 模板源串
      * @throws IOException             I/O 失败
      * @throws IllegalArgumentException 名字非法（含路径分隔符 / 空白 / 空字符串）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public void save(String name, String content) throws IOException {
@@ -263,7 +359,7 @@ public final class EmailTemplateStore {
      * @throws IOException              I/O 失败
      * @throws IllegalArgumentException 名字非法
      * @throws IllegalStateException    已存在
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public void createNew(String name, String content) throws IOException {
@@ -285,7 +381,7 @@ public final class EmailTemplateStore {
      * @param name 模板名
      * @throws IOException              I/O 失败
      * @throws IllegalArgumentException 名字非法或试图删 default
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public void delete(String name) throws IOException {
@@ -302,7 +398,7 @@ public final class EmailTemplateStore {
      *
      * @param name 模板名
      * @return 该模板的绝对路径
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     private Path pathOf(String name) {
@@ -316,7 +412,7 @@ public final class EmailTemplateStore {
      *
      * @param name 模板名
      * @throws IllegalArgumentException 不合法
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     private static void validateName(String name) {

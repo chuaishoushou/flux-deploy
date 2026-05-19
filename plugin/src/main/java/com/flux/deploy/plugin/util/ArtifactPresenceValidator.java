@@ -62,7 +62,7 @@ public final class ArtifactPresenceValidator {
      *   <li>{@link DeployMode#INCREMENTAL}：要求 {@code changedFiles} 中每个 {@code .java}
      *       在 {@code <modulePath>/target/classes/...} 下都有对应 {@code .class}；
      *       静态资源不做校验（{@link com.flux.deploy.plugin.service.StagingPackageBuilder}
-     *       内部按"target/classes 优先、缺失回退源文件"自行解析）；
+     *       内部直读源文件，不依赖 target/classes）；
      *       当 {@code hasEmbedTargets=true} 且 {@code changedFiles} 为空时，叠加 FULL 同款
      *       {@code target/<artifactFileName>} 存在性校验，原因详见下方</li>
      * </ul>
@@ -72,9 +72,8 @@ public final class ArtifactPresenceValidator {
      * {@code canPatch=false}（即 {@code changedFiles} 为空）时才会把
      * {@code target/<artifactFileName>} 当作整包兜底；只要 {@code changedFiles} 有任意条目
      * （全 .java / 全静态 / 混合），都会走 "extract WAR → patchExistingJar" 路径，
-     * 源 artifact 不消费——其中静态资源还会按 "target/classes 优先、缺失回退 src 源文件"
-     * 自行解析，因此"只勾静态文件"在没做 {@code mvn package} 时也能正常嵌入。
-     * 把校验收窄为"空 changedFiles"，避免误伤静态-only 部署。</p>
+     * 源 artifact 不消费——其中静态资源直接从源文件读取，因此"只勾静态文件"在没做
+     * {@code mvn package} 时也能正常嵌入。把校验收窄为"空 changedFiles"，避免误伤静态-only 部署。</p>
      *
      * <p>INCREMENTAL+主目标 不依赖本地源 artifact（{@code StagingPackageBuilder.build} 从 FTP
      * 下原包），故全程不叠加。</p>
@@ -154,7 +153,7 @@ public final class ArtifactPresenceValidator {
     /**
      * 增量模式：校验每个勾选 .java 是否都有对应 .class。
      *
-     * <p>仅校验 .java，不校验静态资源（静态资源缺失时 StagingPackageBuilder 会自动回退源文件）。
+     * <p>仅校验 .java，不校验静态资源（静态资源由 StagingPackageBuilder 直读源文件，无需编译）。
      * 内部类 / 嵌套类的 .class 不单独校验：只要顶层 .class 存在就视为该 .java 已编译过。</p>
      *
      * @param moduleRoot   模块根

@@ -43,7 +43,7 @@ public class UploadGate implements Gate {
      * @param ops      FTP 操作对象
      * @param policy   网络异常时的自动重试策略
      * @param prompter 重试预算耗尽时的用户决策器
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public UploadGate(FtpOperations ops, RetryPolicy policy, RetryUserPrompter prompter) {

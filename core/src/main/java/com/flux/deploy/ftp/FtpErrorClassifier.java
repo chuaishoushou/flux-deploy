@@ -20,7 +20,7 @@ import java.util.Locale;
  *   <li>否则 → PROTOCOL</li>
  * </ul>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public final class FtpErrorClassifier {
@@ -35,7 +35,7 @@ public final class FtpErrorClassifier {
      *
      * @param t 原始异常（可为 null，返回 PROTOCOL 兜底）
      * @return 分类结果（永不返回 null）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static FtpErrorKind classify(Throwable t) {
@@ -112,7 +112,7 @@ public final class FtpErrorClassifier {
      *
      * @param kind 已分类的错误类型
      * @return true 时调用方应触发取消令牌
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static boolean isGlobal(FtpErrorKind kind) {
@@ -124,7 +124,7 @@ public final class FtpErrorClassifier {
      *
      * @param kind 错误类型
      * @return 建议文案；PROTOCOL 返回 null（无针对性建议）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static String suggestionFor(FtpErrorKind kind) {
@@ -147,7 +147,7 @@ public final class FtpErrorClassifier {
      *
      * @param t 异常（非 null）
      * @return 用 " / " 拼接的所有 message
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String collectMessages(Throwable t) {
@@ -169,7 +169,7 @@ public final class FtpErrorClassifier {
      * @param src  目标字符串
      * @param keys 关键字数组
      * @return 命中任一关键字返回 true
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static boolean containsAny(String src, String... keys) {

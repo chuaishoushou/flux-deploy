@@ -122,13 +122,10 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         // 让控件边框、暗色背景、高度、下拉箭头与同面板的"产物""更新模式"
         // 以及右侧"项目""系统"完全一致；点击下拉时仍弹出模块树搜索面板。
         this.moduleCombo = new PickerComboBox("点击选择工程", this::showModuleTreePopup);
-        moduleCombo.setToolTipText("选择要更新的 Maven 模块（源工程）");
+        moduleCombo.setToolTipText("选择要更新的源工程");
         // UI 只暴露两档：FULL / INCREMENTAL；AUTO_DETECT 是 CLI 内部值，不进下拉
         this.modeComboBox = new JComboBox<>(new DeployMode[]{DeployMode.FULL, DeployMode.INCREMENTAL});
-        modeComboBox.setToolTipText(
-                "<html><b>整包更新</b>：重新编译并上传整个 jar/war<br>"
-                + "<b>增量更新</b>：列出可部署文件，Git 变更默认勾选；<br>"
-                + "用户可在此基础上手动增删勾选</html>");
+        modeComboBox.setToolTipText("整包更新或增量更新");
         this.dynamicContent = new JPanel(new CardLayout());
 
         this.fullModeArtifactLabel = new JBLabel("");
@@ -137,8 +134,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         // 且会让 × 旁边多一个三角按钮，挤压输入区
         this.fileSearchField = new SearchTextField(false);
         fileSearchField.getTextEditor().getEmptyText().setText("搜索文件名或路径");
-        fileSearchField.getTextEditor().setToolTipText(
-                "按文件名、目录路径或变更状态过滤文件树，支持空格分隔多个关键字与拼音");
+        fileSearchField.getTextEditor().setToolTipText("过滤文件，支持空格分隔关键字或拼音");
 
         // 初始化 CheckboxTree
         this.treeRoot = new CheckedTreeNode("变更文件");
@@ -245,11 +241,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         // styleHeaderIconButton 与运行日志卡片头部三个图标按钮一致（透明底 + 22×22 + 不抢焦点）。
         this.refreshButton = new JButton(AllIcons.Actions.Refresh);
         PanelChromes.styleHeaderIconButton(refreshButton);
-        refreshButton.setToolTipText(
-                "<html>刷新工程列表与当前模式的文件列表"
-                + "<br>工程列表：丢弃模块缓存，下次点开「工程」下拉时重新扫描工作区"
-                + "<br>整包更新：无变化"
-                + "<br>增量更新：重新扫描模块文件并重新执行 Git 变更检测</html>");
+        refreshButton.setToolTipText("刷新工程与文件列表");
         refreshButton.addActionListener(e -> {
             // 工作区拉了新模块或删了旧模块时，ModuleEnumerator 的内存缓存仍是旧的；
             // 这里主动失效一次，下次打开「工程」下拉时即可看到最新模块树。
@@ -259,9 +251,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
         this.searchToggleButton = new JButton(AllIcons.Actions.Find);
         PanelChromes.styleHeaderIconButton(searchToggleButton);
-        searchToggleButton.setToolTipText(
-                "<html>展开 / 收起文件搜索框"
-                + "<br>展开后立即聚焦输入；ESC 清空后再 ESC 自动收起</html>");
+        searchToggleButton.setToolTipText("展开或收起搜索框");
         searchToggleButton.addActionListener(e -> toggleSearchField());
 
         this.expandAllButton = new JButton(AllIcons.Actions.Expandall);
@@ -279,9 +269,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         // 工程名本身已经在「工程」下拉框里显示，meta 改为承载产物信息避免重复。
         this.metaLabel = new JBLabel("");
         this.metaLabel.setForeground(NamedColorUtil.getInactiveTextColor());
-        this.metaLabel.setToolTipText(
-                "<html>当前源工程的产物文件名（从 pom 自动解析）。"
-                + "<br>用于匹配目标 FTP 包或本地包的版本。</html>");
+        this.metaLabel.setToolTipText("当前工程的打包产物");
 
         initUI();
         initListeners();
@@ -502,15 +490,10 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      */
     private JPanel buildStatusRow() {
         fileCountLabel.setForeground(NamedColorUtil.getInactiveTextColor());
-        fileCountLabel.setToolTipText(
-                "<html>勾选要部署的文件。部署前请手动编译 / 打包；"
-                + "<br>静态文件无需编译，缺失编译产物时点击部署会弹窗中止。</html>");
+        fileCountLabel.setToolTipText("勾选要部署的文件");
         JBLabel compileHintLabel = new JBLabel("⚠ 请手动编译/打包，静态文件无需编译");
         compileHintLabel.setForeground(NamedColorUtil.getInactiveTextColor());
-        compileHintLabel.setToolTipText(
-                "<html>部署前请手动编译 / 打包。"
-                + "<br>静态文件（.html / .css / .js / .properties / .xml 等）不参与编译，可直接部署。"
-                + "<br>缺失编译产物时点击部署会弹窗中止。</html>");
+        compileHintLabel.setToolTipText("部署前请手动编译，静态文件除外");
 
         // 去掉状态行的 1px 顶边线——它和标题栏底部线不是同一语义（一个是 footer 上沿、
         // 一个是 header 下沿），多画一条反而让面板看起来线条混乱。

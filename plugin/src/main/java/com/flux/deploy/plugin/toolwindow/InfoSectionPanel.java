@@ -98,29 +98,14 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         this.backupCheckBox = backupCheckBox;
 
         this.updateNoteCheckBox = new JCheckBox("更新版本记录", true);
-        this.updateNoteCheckBox.setToolTipText(
-                "<html>上传成功后在远程目录追加 <b>*_update_notes.txt</b> 更新记录，"
-                + "<br>写入 取包/传包 两行，包含时间、开发、任务、客服、包名。"
-                + "<br>不勾选则跳过版本记录。</html>");
-        backupCheckBox.setToolTipText(
-                "<html>上传前将远程原包备份到 <b>备份/yyyyMMdd_开发/</b> 目录，"
-                + "<br>更新失败可从备份自动回滚。"
-                + "<br>不勾选则无备份，失败后无法自动回滚。</html>");
+        this.updateNoteCheckBox.setToolTipText("上传后追加版本更新记录");
+        backupCheckBox.setToolTipText("上传前备份远程原包");
         this.taskIdField = new JBTextField();
-        this.taskIdField.setToolTipText(
-                "<html>任务描述或任务号，支持中文与长文本。"
-                + "<br>写入版本记录时会加「任务：」前缀。"
-                + "<br>与客服至少填一项。</html>");
+        this.taskIdField.setToolTipText("任务号或任务描述");
         this.customerIdField = new JBTextField();
-        this.customerIdField.setToolTipText(
-                "<html>客服单号或客服描述。"
-                + "<br>写入版本记录时会加「客服：」前缀。"
-                + "<br>与任务至少填一项。</html>");
+        this.customerIdField.setToolTipText("客服单号或客服描述");
         this.operatorField = new JBTextField();
-        this.operatorField.setToolTipText(
-                "<html>当前开发人员名字。"
-                + "<br>用于备份目录命名、锁文件归属、版本记录。"
-                + "<br>勾选版本记录或执行备份时必填。</html>");
+        this.operatorField.setToolTipText("当前开发人员姓名");
 
         operatorField.setColumns(20);
         taskIdField.setColumns(20);
@@ -144,10 +129,7 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         JBLabel backupHint = new JBLabel("· 重复备份会覆盖原包，多次更新请取消");
         backupHint.setFont(backupHint.getFont().deriveFont(Font.ITALIC, 11f));
         backupHint.setForeground(NamedColorUtil.getInactiveTextColor());
-        backupHint.setToolTipText(
-                "<html>若同一开发在同一天多次更新同一个包，"
-                + "<br>后一次备份会覆盖前一次，原始远程包会永久丢失。"
-                + "<br>多次更新时建议取消此项，用第一次的备份回滚即可。</html>");
+        backupHint.setToolTipText("同一天重复备份会覆盖前一次");
         checkRow.add(backupHint);
         container.add(checkRow, g);
         g.weightx = 0; g.fill = GridBagConstraints.NONE;
@@ -389,16 +371,13 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         if (sessionBackupRoot != null && !sessionBackupRoot.isBlank()) {
             // 已自定义：常规色文字
             backupLocationLabel.setText(ellipsizePath(sessionBackupRoot));
-            backupLocationLabel.setToolTipText(
-                    "<html>本次自定义：" + sessionBackupRoot
-                    + "<br>点击修改 / 切换系统或项目自动恢复默认</html>");
+            backupLocationLabel.setToolTipText("本次自定义：" + sessionBackupRoot);
             backupLocationLabel.setForeground(UIManager.getColor("Label.foreground"));
         } else {
             // 默认派生路径：灰色文字
             String defaultPath = computeDefaultBackupRoot();
             backupLocationLabel.setText(ellipsizePath(defaultPath));
-            backupLocationLabel.setToolTipText(
-                    "<html>默认备份位置：" + defaultPath + "<br>点击修改</html>");
+            backupLocationLabel.setToolTipText("默认位置：" + defaultPath);
             backupLocationLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
         }
     }

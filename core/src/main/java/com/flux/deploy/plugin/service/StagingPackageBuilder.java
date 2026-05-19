@@ -85,14 +85,15 @@ public class StagingPackageBuilder {
     /**
      * 构造暂存包构建器
      *
-     * <p>资源解析策略（无"跳过编译"开关）：</p>
+     * <p>资源解析策略：</p>
      * <ul>
      *   <li>{@code .java} → 必须读 {@code target/classes/<x>.class}（无源等价物）；
      *       上层调用方应在调用本类前用
      *       {@link com.flux.deploy.plugin.util.ArtifactPresenceValidator} 校验存在性</li>
-     *   <li>{@code src/main/resources/<x>} 或 {@code src/main/java/<x>}（非 .java）→
-     *       优先读 {@code target/classes/<x>}（携带 mvn process-resources 的 filtering 结果），
-     *       缺失时回退到源文件</li>
+     *   <li>其余所有文件（{@code src/main/webapp/}、{@code src/main/resources/}、
+     *       {@code src/main/java/} 下的非 .java）→ 直接读源文件，不查 {@code target/classes}。
+     *       本工作空间未启用 Maven filtering，{@code target/classes} 与源文件字节等价，
+     *       直读源文件还能避免"用户改了文件但忘了重编译"导致的旧版本静默上传</li>
      * </ul>
      *
      * <p>插件不再触发任何编译；缺 .class 由调用方在部署前以弹窗提前拒绝，本类不再做编译类自检。</p>
@@ -119,7 +120,7 @@ public class StagingPackageBuilder {
      * 在流水线收尾统一删除），便于后续门禁（如 BackupGate）复用同一份字节，
      * 避免对同一字节再做一次远端下载。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-08
      */
     public static final class BuildResult {
@@ -149,7 +150,7 @@ public class StagingPackageBuilder {
      * @param ftpPassword FTP 密码
      * @param remotePath  远程包完整路径
      * @return 构建结果（含暂存包 + 本地原包），未找到变更 class 时返回 null
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-08
      */
     public BuildResult buildKeepingOriginal(String ftpHost, int ftpPort,
@@ -448,11 +449,16 @@ public class StagingPackageBuilder {
     /**
      * 处理非 Java 资源文件（.xml, .properties, .js, .css, .html, .jsp 等）
      *
-     * <p>根据文件所在目录和目标包类型决定映射方式：</p>
+     * <p>所有资源一律从源文件直读（不查 {@code target/classes}），按所在目录决定包内路径：</p>
      * <ul>
-     *   <li>src/main/webapp/ → WAR 根目录（直接使用源文件，不经过编译）</li>
-     *   <li>src/main/resources/ → JAR 根目录 或 WAR 的 WEB-INF/classes/</li>
+     *   <li>{@code src/main/webapp/} → WAR 根目录</li>
+     *   <li>{@code src/main/resources/} → JAR 根目录 或 WAR 的 {@code WEB-INF/classes/}</li>
+     *   <li>{@code src/main/java/} 下的非 .java（如 mybatis xml）→ 同 resources 规则</li>
      * </ul>
+     *
+     * <p>本工作空间未启用 Maven filtering（无 {@code <filtering>true</filtering>} 配置），
+     * {@code target/classes} 下资源与源文件字节等价，直读源文件还能避免"改了文件但忘了重编译"
+     * 导致的旧版本静默上传。</p>
      *
      * @param isWar 目标包是否为 WAR（影响 resources 文件的包内路径）
      */
@@ -465,7 +471,7 @@ public class StagingPackageBuilder {
 
         String pathStr = sourcePath.toString().replace(File.separatorChar, '/');
 
-        // 1. src/main/webapp/ → WAR 根目录（直接用源文件）
+        // 1. src/main/webapp/ → WAR 根目录
         int webappIdx = pathStr.indexOf("src/main/webapp/");
         if (webappIdx >= 0) {
             String webRelative = pathStr.substring(webappIdx + "src/main/webapp/".length());
@@ -476,69 +482,24 @@ public class StagingPackageBuilder {
         }
 
         // 2. src/main/resources/ → JAR: 根目录 / WAR: WEB-INF/classes/
-        // 优先 target/classes（携带 mvn process-resources filtering 后内容），缺失则回退源文件。
-        // 插件不再触发 mvn；如果用户做过完整编译，target/classes 应已就绪。
         int resIdx = pathStr.indexOf("src/main/resources/");
-        if (resIdx >= 0) {
+        if (resIdx >= 0 && Files.exists(sourcePath)) {
             String resRelative = pathStr.substring(resIdx + "src/main/resources/".length());
-            Path classesPath = moduleRoot.resolve("target/classes").resolve(resRelative);
-            Path resolved;
-            boolean fromSource;
-            if (Files.exists(classesPath)) {
-                resolved = classesPath;
-                fromSource = false;
-            } else if (Files.exists(sourcePath)) {
-                resolved = sourcePath;
-                fromSource = true;
-            } else {
-                // 两路都没有：保持兼容（继续走下一段查找）
-                resolved = null;
-                fromSource = false;
-            }
-            if (resolved != null) {
-                // WAR 包：resources 打包到 WEB-INF/classes/ 下
-                String entryPath = isWar ? "WEB-INF/classes/" + resRelative : resRelative;
-                result.put(entryPath, resolved);
-                if (fromSource) {
-                    logCallback.accept("[源] " + resRelative
-                            + " ← src/main/resources/" + resRelative
-                            + "（target/classes 未找到，回退源文件）");
-                }
-                return;
-            }
+            String entryPath = isWar ? "WEB-INF/classes/" + resRelative : resRelative;
+            result.put(entryPath, sourcePath);
+            return;
         }
 
-        // 3. src/main/java/ 下的非 .java 文件（如 .xml mapper 文件）
-        // 同 2 的策略：优先 target/classes，缺失回退源文件。
+        // 3. src/main/java/ 下的非 .java 文件（如 mybatis mapper xml） → 同 resources 规则
         int javaIdx = pathStr.indexOf("src/main/java/");
-        if (javaIdx >= 0) {
+        if (javaIdx >= 0 && Files.exists(sourcePath)) {
             String javaRelative = pathStr.substring(javaIdx + "src/main/java/".length());
-            Path classesPath = moduleRoot.resolve("target/classes").resolve(javaRelative);
-            Path resolved;
-            boolean fromSource;
-            if (Files.exists(classesPath)) {
-                resolved = classesPath;
-                fromSource = false;
-            } else if (Files.exists(sourcePath)) {
-                resolved = sourcePath;
-                fromSource = true;
-            } else {
-                resolved = null;
-                fromSource = false;
-            }
-            if (resolved != null) {
-                String entryPath = isWar ? "WEB-INF/classes/" + javaRelative : javaRelative;
-                result.put(entryPath, resolved);
-                if (fromSource) {
-                    logCallback.accept("[源] " + javaRelative
-                            + " ← src/main/java/" + javaRelative
-                            + "（target/classes 未找到，回退源文件）");
-                }
-                return;
-            }
+            String entryPath = isWar ? "WEB-INF/classes/" + javaRelative : javaRelative;
+            result.put(entryPath, sourcePath);
+            return;
         }
 
-        // 4. 无法识别的路径
+        // 4. 无法识别的路径，或源文件已不存在
         logCallback.accept("[警告] 无法确定资源文件的包内路径: " + sourceFile);
     }
 

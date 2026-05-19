@@ -27,7 +27,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>UI 模态级使用 {@link ModalityState#any}：插件部署经常在后台进度条里跑，
  * 此时 IDE 处于 NON_MODAL 之外的状态，用 any 才能确保弹窗能浮出来。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-03
  */
 public final class RetryPromptDialog implements RetryUserPrompter {
@@ -42,7 +42,7 @@ public final class RetryPromptDialog implements RetryUserPrompter {
 
     /**
      * @param project 当前 IDEA Project，用于把 dialog 锚到对应窗口；可为 null 时弹无主 dialog
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public RetryPromptDialog(Project project) {
@@ -85,7 +85,7 @@ public final class RetryPromptDialog implements RetryUserPrompter {
      *
      * @param kind 错误分类，可为 null
      * @return 标题后缀
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     private static String describeKind(FtpErrorKind kind) {

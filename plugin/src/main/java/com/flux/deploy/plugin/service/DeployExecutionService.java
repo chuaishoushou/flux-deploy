@@ -69,7 +69,7 @@ public class DeployExecutionService {
      * 当 indicator 为 null（非任务上下文）时，token 永远返回 false，行为退化为不可取消。</p>
      *
      * @param cfg 即将交给 pipeline 的部署配置
-     * @author claude
+     * @author xumanyi
      * @date 2026-04-29
      */
     /**
@@ -98,7 +98,7 @@ public class DeployExecutionService {
      * <p>静态字段在并发执行场景下不安全，但本插件 UI 入口已串行化（同一时刻只允许一个
      * deploy 任务在跑），与 {@link #activeProject} / {@link #currentCancelMode} 沿用同一假设。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-08
      */
     private static final java.util.concurrent.ConcurrentMap<String, Path> backupLocalCopies =
@@ -125,7 +125,7 @@ public class DeployExecutionService {
      * 设置当前活跃 Project。在每个 deploy 入口最开始调用，结束 finally 里清回 null。
      *
      * @param project IDEA Project，可为 null 表示清理
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     private static void setActiveProject(Project project) {
@@ -138,7 +138,7 @@ public class DeployExecutionService {
      * <p>在 {@link #execute} finally 阶段调用，保证不论部署成功 / 失败 / 取消都不留 temp 文件。
      * 删除失败仅静默忽略——OS 重启或 IDE 重启后系统会自动清理 temp 目录。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-08
      */
     private static void clearBackupLocalCopies() {
@@ -223,7 +223,7 @@ public class DeployExecutionService {
      * @param <T>    操作返回值类型
      * @return action 的返回值
      * @throws Exception 连接失败、认证失败或回调内部抛出的异常
-     * @author claude
+     * @author xumanyi
      * @date 2026-04-28
      */
     private static <T> T withFreshFtpSession(
@@ -248,7 +248,7 @@ public class DeployExecutionService {
      * @param pass   FTP 密码
      * @param action 在新连接上执行的操作
      * @throws Exception 连接失败、认证失败或回调内部抛出的异常
-     * @author claude
+     * @author xumanyi
      * @date 2026-04-28
      */
     private static void runFreshFtpSession(
@@ -264,7 +264,7 @@ public class DeployExecutionService {
      * {@link #withFreshFtpSession(String, int, String, String, FtpAction)} 使用的回调接口（带返回值）。
      *
      * @param <T> 返回值类型
-     * @author claude
+     * @author xumanyi
      * @date 2026-04-28
      */
     @FunctionalInterface
@@ -275,7 +275,7 @@ public class DeployExecutionService {
     /**
      * {@link #runFreshFtpSession(String, int, String, String, FtpVoidAction)} 使用的回调接口（无返回值）。
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-04-28
      */
     @FunctionalInterface
@@ -713,7 +713,7 @@ public class DeployExecutionService {
     public static void executeLocalMode(Project project, PluginDeployConfig pluginConfig,
                                          Consumer<String> logCallback,
                                          Consumer<LocalPackagePatchService.LocalPatchResult> onComplete) {
-        ProgressManager.getInstance().run(new Task.Backgroundable(project, "FLUX 打包不上传", true) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "FLUX 本地打包", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 indicator.setIndeterminate(true);
@@ -744,12 +744,12 @@ public class DeployExecutionService {
                             logCallback);
                     if (result == null || !result.isSuccess()) {
                         logFailureSummary(logCallback,
-                                result == null ? "打包不上传失败" : result.getErrorMessage());
+                                result == null ? "本地打包失败" : result.getErrorMessage());
                     }
                     onComplete.accept(result);
                 } catch (Exception e) {
                     logCallback.accept("ERROR [部署] " + e.getMessage());
-                    logFailureSummary(logCallback, "打包不上传异常: " + e.getMessage());
+                    logFailureSummary(logCallback, "本地打包异常: " + e.getMessage());
                     onComplete.accept(null);
                 } finally {
                     setActiveProject(null);
@@ -1393,8 +1393,7 @@ public class DeployExecutionService {
                         //   - INCREMENTAL 但 changedFiles 为空：canPatch=false，executeWarEmbed 内部
                         //     回退到 localJar。
                         // INCREMENTAL+changedFiles 非空（含纯静态文件）走 patchExistingJar，源 artifact
-                        // 不消费——其中静态资源会按"target/classes 优先、缺失回退 src 源文件"自行解析，
-                        // 无需 mvn package 也能成功。
+                        // 不消费——其中静态资源直接从源文件读取，无需 mvn package 也能成功。
                         boolean changedFilesEmpty = pluginConfig.getChangedFiles() == null
                                 || pluginConfig.getChangedFiles().isEmpty();
                         boolean mustHaveLocalJar = pluginConfig.getMode() == DeployMode.FULL
@@ -1938,9 +1937,8 @@ public class DeployExecutionService {
 
                 if (Files.exists(extractedJar) && Files.size(extractedJar) > 0) {
                     // 用 StagingPackageBuilder 的变更文件列表构建 classEntries
-                    // 全静态资源场景下 target/classes 也可能不存在（首次部署 / 纯资源变更）；
-                    // 只要勾选了文件就走 patch 路径，StagingPackageBuilder 内部会按"target/classes 优先、
-                    // 缺失回退源文件"自行解析。.class 缺失情形已由 ArtifactPresenceValidator 在 UI 层提前拦下。
+                    // 全静态资源场景下不依赖 target/classes（StagingPackageBuilder 直读源文件）；
+                    // .class 缺失情形已由 ArtifactPresenceValidator 在 UI 层提前拦下。
                     List<String> changedFiles = pluginConfig.getChangedFiles();
                     boolean canPatch = changedFiles != null && !changedFiles.isEmpty();
                     if (canPatch) {
@@ -2040,7 +2038,7 @@ public class DeployExecutionService {
     /**
      * 嵌入阶段并行执行的聚合结果
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static final class EmbedParallelOutcome {
@@ -2058,7 +2056,7 @@ public class DeployExecutionService {
          * @param failedCount  失败包数
          * @param shouldAbort  是否触发主流程整体回滚
          * @param outcomes     详细 outcomes
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         EmbedParallelOutcome(int successCount, int failedCount, boolean shouldAbort,
@@ -2073,7 +2071,7 @@ public class DeployExecutionService {
     /**
      * download 阶段输出：tempDir + 已下载的 WAR 路径
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private record EmbedDownload(Path tempDir, Path downloadedWar) {}
@@ -2084,7 +2082,7 @@ public class DeployExecutionService {
      * <p>{@code manifest} 在 FULL 模式或无差异 patch 时为 null；增量模式下携带
      * {@link StagingPackageBuilder.PatchManifest}，供 upload 成功后输出"包内更新明细"。</p>
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private record EmbedTransform(Path outputWar, StagingPackageBuilder.PatchManifest manifest) {}
@@ -2118,7 +2116,7 @@ public class DeployExecutionService {
      * @param password         FTP 密码
      * @param logCallback      日志回调
      * @return 聚合结果
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static EmbedParallelOutcome runEmbedPhaseParallel(
@@ -2233,7 +2231,7 @@ public class DeployExecutionService {
                             if (Files.exists(extractedJar) && Files.size(extractedJar) > 0) {
                                 // .class 存在性已由 UI 层 ArtifactPresenceValidator 在点击部署前强制校验，
                                 // 这里只看勾选清单是否非空就允许走 patch；StagingPackageBuilder 内部
-                                // 会按"target/classes 优先、缺失回退源文件"自行解析资源。
+                                // 直读源文件解析资源，不依赖 target/classes。
                                 List<String> changedFiles = pluginConfig.getChangedFiles();
                                 boolean canPatch = changedFiles != null && !changedFiles.isEmpty();
                                 if (canPatch) {
@@ -2390,7 +2388,7 @@ public class DeployExecutionService {
      *
      * @param elapsedMs 耗时毫秒
      * @return 例如 "9 分 10 秒" 或 "45 秒"
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String formatElapsed(long elapsedMs) {
@@ -2409,7 +2407,7 @@ public class DeployExecutionService {
      * <p>遇到任何异常都吞掉（仅记录到 stderr），避免清理失败干扰主流程返回的 outcome。</p>
      *
      * @param tempDir 待清理的临时目录
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void cleanupTempDirSilent(Path tempDir) {
@@ -2439,7 +2437,7 @@ public class DeployExecutionService {
     /**
      * 嵌入失败包的串行重试结果
      *
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static final class EmbedRetryOutcome {
@@ -2489,7 +2487,7 @@ public class DeployExecutionService {
      * @param password          FTP 密码
      * @param logCallback       日志回调
      * @return 重试结果
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static EmbedRetryOutcome retryFailedEmbedSerially(
@@ -2642,7 +2640,7 @@ public class DeployExecutionService {
      * @param embedOutcomes        outcomes
      * @param retryRollbackFailed  out: 已 ROLLBACK_FAILED 的 key 集合（不重试）
      * @return key → target 的 LinkedHashMap（保留输入顺序）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static java.util.LinkedHashMap<String, FtpTargetSelection> collectRetryableTargets(
@@ -2697,7 +2695,7 @@ public class DeployExecutionService {
      * @param user           FTP 用户名
      * @param pass           FTP 密码
      * @throws Exception 下载或上传失败 → 调用方将该包标记为 ROLLBACK_FAILED
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     /**
@@ -2717,7 +2715,7 @@ public class DeployExecutionService {
      *
      * @param reason 失败原因消息（取自 TargetOutcome.error.message）
      * @return true 表示该失败属于"WAR 不含 JAR"类
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-04
      */
     static boolean isMissingJarFailure(String reason) {
@@ -2747,7 +2745,7 @@ public class DeployExecutionService {
      * @param updatedPackages 备份阶段注册的回滚清单（[remotePath, backupFilePath]）
      * @param remotePath      远程路径
      * @return 备份文件路径；未找到返回 null
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     /**
@@ -3002,7 +3000,7 @@ public class DeployExecutionService {
      * @param user          FTP 用户名
      * @param pass          FTP 密码
      * @param logCallback   日志回调
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void retryFailedBackupSerially(
@@ -3077,7 +3075,7 @@ public class DeployExecutionService {
      * @param backupDir  备份根目录（含尾部 /）
      * @param allTargets 全部目标列表
      * @throws IOException 创建目录失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void precreateBackupSubDirs(FtpOperations ops,
@@ -3106,7 +3104,7 @@ public class DeployExecutionService {
      * @param pass        FTP 密码
      * @param logCallback 日志回调（线程安全要求由调用方保证）
      * @throws Exception 任意 IO / 校验失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void backupSingleTarget(FtpTargetSelection target,

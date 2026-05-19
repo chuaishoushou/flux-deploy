@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *  null                 CONTINUE_ISOLATED     ABORT_BATCH
  * </pre>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-04
  */
 class EmbedFailureDecisionTest {

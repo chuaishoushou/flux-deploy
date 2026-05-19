@@ -47,9 +47,7 @@ public class FluxDeployToolWindowFactory implements ToolWindowFactory {
         toolWindow.setStripeTitle("FLUX 客服更新  v" + version);
 
         // 注册标题栏图标：使用手册 / 更新日志
-        // 通知邮件按钮（ShowEmailAction）暂时下线——Swing JEditorPane 富文本体验差，
-        // 实际使用问题较多；功能代码保留（com.flux.deploy.email / plugin.email 包），
-        // 后续若改用 JCEF 或外部 webview 重做时再恢复入口。
+        // 通知邮件入口改成主面板「重置」按钮旁的「邮件模板」按钮，不再占顶栏图标位
         toolWindow.setTitleActions(java.util.List.of(
                 new com.flux.deploy.plugin.action.ShowHelpAction(),
                 new com.flux.deploy.plugin.action.ShowChangelogAction()

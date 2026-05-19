@@ -20,7 +20,7 @@ import java.util.List;
  *
  * @param maxAttempts      单轮最大尝试次数（含首次），≥ 1
  * @param backoffSchedule  退避序列；空序列或 maxAttempts=1 等价于不重试
- * @author claude
+ * @author xumanyi
  * @date 2026-05-03
  */
 public record RetryPolicy(int maxAttempts, List<Duration> backoffSchedule) {
@@ -42,7 +42,7 @@ public record RetryPolicy(int maxAttempts, List<Duration> backoffSchedule) {
      * 大部分恢复在 5~15s 内。再多的次数继续等下去用户体验差，应升级为弹窗。</p>
      *
      * @return 默认策略
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public static RetryPolicy networkDefault() {
@@ -60,7 +60,7 @@ public record RetryPolicy(int maxAttempts, List<Duration> backoffSchedule) {
      *
      * @param attempt 当前已失败的尝试序号，≥ 1
      * @return 应等待时长；序列为空时返回 {@link Duration#ZERO}
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public Duration backoffFor(int attempt) {
@@ -83,7 +83,7 @@ public record RetryPolicy(int maxAttempts, List<Duration> backoffSchedule) {
      *
      * @param kind 错误分类（可为 null）
      * @return true 表示调用方应进入退避 + 重试循环
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public boolean shouldRetry(FtpErrorKind kind) {

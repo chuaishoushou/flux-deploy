@@ -125,7 +125,7 @@ public class FtpOperations {
      * @param prompter   预算耗尽时的用户提示器
      * @param log        日志回调（每次重试 / 续传决策都会写一行）
      * @throws IOException 用户选择 ABORT 后抛最后一次错误；或非网络类错误首次失败即抛
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     public void uploadResumable(Path localPath, String remotePath,
@@ -195,7 +195,7 @@ public class FtpOperations {
      * @param log        日志回调
      * @return 续传起点（≥ 0，≤ localSize）
      * @throws IOException 列目录失败
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     private long computeResumeOffset(String remotePath, long localSize, Consumer<String> log) throws IOException {
@@ -222,7 +222,7 @@ public class FtpOperations {
      * @param offset 续传起点（0 = 从头）
      * @param log    日志回调
      * @throws IOException IO 失败 / 服务端响应非正完成
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     private void tryUploadFromOffset(Path local, String remote, long offset,
@@ -257,7 +257,7 @@ public class FtpOperations {
      *
      * @param duration 等待时长，≤ 0 立即返回
      * @throws IOException 被中断
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-03
      */
     private static void sleep(Duration duration) throws IOException {

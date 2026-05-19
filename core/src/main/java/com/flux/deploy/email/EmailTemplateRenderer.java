@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
  * 基于 HTML 3.2 解析器，对 HTML5 的 {@code data-*} 属性识别不稳定，
  * 富文本编辑过程中可能被剥离。{@code class} 是标准属性，编辑过程中保留可靠。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-17
  */
 public final class EmailTemplateRenderer {
@@ -52,7 +52,7 @@ public final class EmailTemplateRenderer {
      * @param templateSource 模板源串（{@code null} 视作空串）
      * @param values         已知字段 key → 值的映射；{@code null} 视作空 map
      * @return 渲染后的富文本 HTML 串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public static String renderInitial(String templateSource, Map<String, String> values) {
@@ -73,9 +73,54 @@ public final class EmailTemplateRenderer {
      * @param values         字段值字典
      * @param rawHtmlKeys    这些 key 的值是 HTML 片段、不 escape（可为 null）
      * @return 渲染后的富文本 HTML
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
+    /**
+     * "方案 C" 模板填充工具：把模板源串里的 {@code ${字段名}} 直接替换为字段值，
+     * <b>不加</b> {@code <span class="flux-field-X">} 锚点
+     *
+     * <p>跟 {@link #renderInitial} 的区别：本方法产出的 HTML 是 "模板源 + 字段填值"
+     * 的纯净结果，没有插件内部用的 span 包裹。适用于"模板填充工具"工作流：</p>
+     *
+     * <ul>
+     *   <li>不再需要在富文本编辑器里识别锚点 → 不需要 span class 记号</li>
+     *   <li>渲染后的 HTML 直接写入预览 / 复制到剪贴板，到企业微信邮箱样式跟模板源串一致</li>
+     *   <li>未在 {@code values} 中的占位符保留为字面 {@code ${字段名}}（上层 UI 用此提示）</li>
+     * </ul>
+     *
+     * @param templateSource 模板源串
+     * @param values         字段值字典
+     * @param rawHtmlKeys    这些 key 的值是 HTML 片段、不 escape（可为 null）
+     * @return 替换后的 HTML 字符串
+     * @author xumanyi
+     * @date 2026-05-18
+     */
+    public static String renderInitialPlain(String templateSource, Map<String, String> values,
+                                            Set<String> rawHtmlKeys) {
+        if (templateSource == null) {
+            return "";
+        }
+        Map<String, String> safeValues = (values == null) ? Map.of() : values;
+        Set<String> rawKeys = (rawHtmlKeys == null) ? Collections.emptySet() : rawHtmlKeys;
+        Matcher m = PLACEHOLDER.matcher(templateSource);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            String key = m.group(1);
+            if (safeValues.containsKey(key)) {
+                String raw = safeValues.get(key);
+                String content = rawKeys.contains(key)
+                        ? (raw == null ? "" : raw)
+                        : escapeHtml(raw == null ? "" : raw);
+                m.appendReplacement(sb, Matcher.quoteReplacement(content));
+            } else {
+                m.appendReplacement(sb, Matcher.quoteReplacement(m.group(0)));
+            }
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
     public static String renderInitial(String templateSource, Map<String, String> values,
                                        Set<String> rawHtmlKeys) {
         if (templateSource == null) {
@@ -124,7 +169,7 @@ public final class EmailTemplateRenderer {
      * @param newItem     新追加的条目（纯文本，由本方法做 HTML 转义）
      * @param separator   分隔符（可含 HTML 片段，如 "、" 或 "&lt;br&gt;"）
      * @return 追加后的 HTML 串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public static String appendAccumulate(String htmlContent, String fieldKey,
@@ -148,7 +193,7 @@ public final class EmailTemplateRenderer {
      * @param dedup       是否去重
      * @param escapeNew   是否对 {@code newItem} 做 HTML escape
      * @return 累积后 HTML
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public static String appendAccumulate(String htmlContent, String fieldKey,
@@ -193,7 +238,7 @@ public final class EmailTemplateRenderer {
      * @param candidate 待查 condidate
      * @param separator 分隔符
      * @return 已存在返回 true
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     private static boolean containsItem(String inner, String candidate, String separator) {
@@ -219,7 +264,7 @@ public final class EmailTemplateRenderer {
      *
      * @param htmlContent 富文本 HTML（{@code null} 视作空串）
      * @return 模板源串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public static String toTemplateSource(String htmlContent) {
@@ -247,7 +292,7 @@ public final class EmailTemplateRenderer {
      *
      * @param s 原始文本（{@code null} 视作空串）
      * @return 转义后文本
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     static String escapeHtml(String s) {

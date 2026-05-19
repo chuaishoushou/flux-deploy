@@ -17,7 +17,7 @@ import java.nio.charset.StandardCharsets;
  * <p>HTML flavor 的 MIME 类型用 {@code "text/html;class=java.lang.String"}，
  * Java 剪贴板对 String 类型的 HTML 在 macOS / Windows / Linux 三端表现一致。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-17
  */
 public final class HtmlClipboardTransferable implements Transferable {
@@ -57,7 +57,7 @@ public final class HtmlClipboardTransferable implements Transferable {
      *
      * @param html  富文本 HTML 串（永不为 null，调用方传 null 会被规范化为空串）
      * @param plain 纯文本 fallback（通常由 {@link #stripHtml(String)} 从 HTML 提取）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public HtmlClipboardTransferable(String html, String plain) {
@@ -69,7 +69,7 @@ public final class HtmlClipboardTransferable implements Transferable {
      * 便捷构造：仅传 HTML，自动派生 plain text fallback
      *
      * @param html 富文本 HTML 串
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     public HtmlClipboardTransferable(String html) {
@@ -115,11 +115,34 @@ public final class HtmlClipboardTransferable implements Transferable {
      * 不能共享同一个 stream 实例（读完一次就 EOF 了）。</p>
      *
      * @return 字节输入流
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     private InputStream htmlInputStream() {
         return new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 把所有 {@code <span class="flux-field-XXX">值</span>} 锚点剥成 {@code 值}
+     *
+     * <p>模板字段锚点只在插件内部用于"保存到模板时反向折算成 {@code ${字段名}}"。
+     * 复制到剪贴板给企业微信邮箱时，这层 span 不该被对方看到——脱壳保留内容即可。</p>
+     *
+     * <p>简单 regex 匹配，覆盖 {@code data-flux-field} 等可选属性顺序差异。
+     * 嵌套 span 的极端场景由 regex 的非贪婪匹配保证逐对脱壳。</p>
+     *
+     * @param html 富文本 HTML（{@code null} 视作空串）
+     * @return 剥掉锚点 span 的 HTML
+     * @author xumanyi
+     * @date 2026-05-18
+     */
+    public static String stripFluxFieldClass(String html) {
+        if (html == null || html.isEmpty()) {
+            return "";
+        }
+        return html.replaceAll(
+                "(?is)<span\\s+[^>]*class=\"[^\"]*flux-field-[^\"]*\"[^>]*>(.*?)</span>",
+                "$1");
     }
 
     /**
@@ -132,7 +155,7 @@ public final class HtmlClipboardTransferable implements Transferable {
      *
      * @param html HTML 串（{@code null} 视作空串）
      * @return 纯文本
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-17
      */
     static String stripHtml(String html) {

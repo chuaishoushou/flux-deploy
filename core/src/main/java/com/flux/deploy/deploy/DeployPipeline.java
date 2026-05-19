@@ -151,7 +151,7 @@ public class DeployPipeline {
      * 流水线收尾必须统一删除，避免 temp 文件累积。</p>
      *
      * @param targets 目标包列表
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-08
      */
     private static void cleanupLocalOriginalCopies(List<TargetPackage> targets) {
@@ -495,8 +495,9 @@ public class DeployPipeline {
     /**
      * 增量/自动模式下，为每个目标构建 staging 暂存包。
      *
-     * <p>StagingPackageBuilder 自己会连接 FTP 下载远端原包、用已编译的 target/classes 打补丁，
-     * 输出到模块 {@code target/} 下。构建成功后用暂存包路径覆盖 {@link TargetPackage#getLocalStagingFile}。</p>
+     * <p>StagingPackageBuilder 自己会连接 FTP 下载远端原包；.class 从 target/classes 取、
+     * 静态资源直读源文件，二者合并后打补丁输出到模块 {@code target/} 下。
+     * 构建成功后用暂存包路径覆盖 {@link TargetPackage#getLocalStagingFile}。</p>
      *
      * @return true=全部 staging 成功，false=有任何失败（错误已写入 result）
      * @author xumanyi

@@ -42,7 +42,7 @@ import java.util.function.Function;
  *
  * <p>线程安全：本类是无状态工具类，多次调用 execute 可安全并发。</p>
  *
- * @author claude
+ * @author xumanyi
  * @date 2026-05-02
  */
 public final class ParallelExecutor {
@@ -60,7 +60,7 @@ public final class ParallelExecutor {
      * @param strategy    失败策略，决定是否在单包失败时触发取消
      * @param token       取消令牌；执行过程中可能被本类调用 cancel()（仅 Simple 实现支持）
      * @param phaseName   阶段名，用于线程命名（如 "backup" / "embed"）
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public record Options(
@@ -80,7 +80,7 @@ public final class ParallelExecutor {
      * 单任务执行函数
      *
      * @param <T> 目标类型
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     @FunctionalInterface
@@ -92,7 +92,7 @@ public final class ParallelExecutor {
          * @param log    该目标专属的日志 buffer，调用方追加内容后由执行器写入 outcome.logSegment
          * @return 目标的执行结果（不可为 null）
          * @throws Exception 任意异常会被 {@link FtpErrorClassifier} 分类后挂在 FAILED outcome 上
-         * @author claude
+         * @author xumanyi
          * @date 2026-05-02
          */
         TargetOutcome run(T target, StringBuilder log) throws Exception;
@@ -108,7 +108,7 @@ public final class ParallelExecutor {
      * @param <T>       目标类型
      * @return {@code Map<targetKey, Outcome>}；空目标列表返回空 Map
      * @throws IllegalArgumentException parallelism &lt; 1
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     public static <T> Map<String, TargetOutcome> execute(
@@ -187,7 +187,7 @@ public final class ParallelExecutor {
      * @param task     单任务函数
      * @param outcomes 共享 outcome Map（写入时同步）
      * @param <T>      目标类型
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static <T> void runOne(Options opts, T target, String key,
@@ -243,7 +243,7 @@ public final class ParallelExecutor {
      * @param o        原 outcome
      * @param appendix 要追加的日志（含换行）
      * @return 新 outcome，若 status 不识别则返回原对象
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static TargetOutcome augmentLogSegment(TargetOutcome o, String appendix) {
@@ -269,7 +269,7 @@ public final class ParallelExecutor {
      *
      * @param epochMs epoch 毫秒
      * @return HH:mm:ss
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static String formatHms(long epochMs) {
@@ -284,7 +284,7 @@ public final class ParallelExecutor {
      * @param strategy 失败策略
      * @param kind     错误分类（可能为 null，例如 task 函数自己构造的 failed outcome 没指定 kind）
      * @return true 表示应触发 cancel
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static boolean decideCancel(FailureStrategy strategy, FtpErrorKind kind) {
@@ -300,7 +300,7 @@ public final class ParallelExecutor {
      * 触发取消令牌（仅 {@link CancellationToken.Simple} 暴露 cancel 方法）
      *
      * @param token 取消令牌
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void tryCancel(CancellationToken token) {
@@ -315,7 +315,7 @@ public final class ParallelExecutor {
      * @param outcomes 共享 Map
      * @param key      目标 key
      * @param out      outcome
-     * @author claude
+     * @author xumanyi
      * @date 2026-05-02
      */
     private static void putOutcome(Map<String, TargetOutcome> outcomes,
