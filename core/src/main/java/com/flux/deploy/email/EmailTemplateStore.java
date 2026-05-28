@@ -43,27 +43,51 @@ public final class EmailTemplateStore {
     /**
      * 内置默认模板源串（HTML 片段）
      *
-     * <p>4 个绑定变量（{@code ${任务}}、{@code ${客服}}、{@code ${更新包}}、{@code ${备份包}}）
-     * 由主面板 / 部署历史缓存自动填；其他字段是占位标签，用户在邮件弹窗里手填。</p>
+     * <p>8 个绑定变量 {@code ${项目}} / {@code ${任务}} / {@code ${客服}} /
+     * {@code ${更新模式}} / {@code ${更新包}} / {@code ${更新包路径}} / {@code ${备份包}} /
+     * {@code ${备份包路径}} 由主面板 + 部署历史缓存自动填（点「导入」触发）；
+     * 空值时显示斜体占位符 {@code ${字段名}}。</p>
      *
-     * <p>首行 {@code XX，} 是收件人占位，每次发邮件由用户自己改。后续行用 4 个
-     * {@code &nbsp;} 缩进（约 1 个中文字宽），跟首行 "XX，" 视觉错开。占位符语法
-     * {@code ${字段名}} 由 {@link EmailTemplateRenderer#renderInitialPlain} 解释。</p>
+     * <p>首行 {@code 顾问，} 是收件人占位，每次发邮件由用户自己改。后续行每行前面用 1 个
+     * 半角空格作为视觉错落（不做"段首缩进 2 字"那种正式缩进——用户实测企微复制粘贴
+     * 不要正式缩进，更紧凑、对齐效果更稳定）。占位符语法 {@code ${字段名}} 由
+     * {@link EmailTemplateRenderer#renderInitialPlain} 解释。</p>
+     *
+     * <p>固定行（无变量、只有标签）由用户每次手填：{@code 更新内容 / 资源来源 /
+     * 更新方式 / 是否重启 / 浏览器缓存刷新 / 影响范围 / SQL}。</p>
      */
+    /** 内置默认模板的完整 HTML（含正文 + 签名档）。
+     *  内容来源：用户在浏览器编辑器里编排好、点「保存」落盘的 default.html，原样固化进来。
+     *  正文 8 个变量 ${项目}/${任务}/${客服}/${更新模式}/${更新包}/${更新包路径}/${备份包路径} 等由
+     *  「导入数据」按钮填充；签名档为公司固定信息。这样新装用户 / 点「恢复默认」都拿到这份。 */
+
     public static final String BUILTIN_DEFAULT_TEMPLATE =
-            "XX，<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;你好！<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;【${项目}】项目已更新到FTP，麻烦更新下<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新内容：<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;任务：${任务}<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;客服：${客服}<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新包：${更新包}<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;备份包：${备份包}<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;更新方式：<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;是否重启：<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;浏览器缓存刷新：<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;影响范围：<br>"
-                    + "&nbsp;&nbsp;&nbsp;&nbsp;SQL:<br>";
+            "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\">顾问，</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 你好！</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 【${项目}】项目已更新到FTP，麻烦更新下</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新内容:</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 客服：${客服}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 任务：${任务}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 资源来源：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> FTP版本来源：${更新包路径}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 备份包：${备份包路径}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新方式：${更新模式}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 是否重启：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 浏览器缓存刷新：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 影响范围：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> SQL:无</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新包：${更新包}</span></p>"
+                    + "<p style=\"line-height: 1;\"><br></p>"
+                    + "<p style=\"line-height: 1;\"><br></p>"
+                    + "<p style=\"text-align: justify;\"><strong style=\"background-color: rgb(255, 255, 255); font-family: &quot;PingFang SC&quot;; color: rgb(192, 192, 192);\">KaiFa 开发人员</strong></p>"
+                    + "<p style=\"text-align: justify;\"><strong style=\"background-color: rgb(255, 255, 255); font-size: 9pt; font-family: Verdana; color: rgb(192, 192, 192);\">Technical Consultant</strong></p>"
+                    + "<p><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>F</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>ull-value </em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>L</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>ogistics, </em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>U</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>nited e</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>X</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>pertise</em></strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(31, 73, 125);\">专注.专业.专心</span></p>"
+                    + "<p><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(51, 102, 255);\"><em>---------------------------------------------</em></strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">上海富勒信息科技有限公司（FLUX）</span></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">客服</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">400 878 9606 </span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\"> </strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">手机</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">: </strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">微信</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">FLUX-2013</span></p>"
+                    + "<p style=\"line-height: 1;\"><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128);\">网址:</strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(31, 73, 125);\"> </strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 255);\">http://www.flux.com.cn</strong></p>";
 
     /**
      * v1 时代的"老占位符"集合 —— 检测到 {@code default.html} 内容包含这里任一项

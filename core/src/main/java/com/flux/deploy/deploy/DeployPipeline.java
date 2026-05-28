@@ -12,6 +12,7 @@ import com.flux.deploy.plugin.service.StagingPackageBuilder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -48,6 +49,9 @@ public class DeployPipeline {
      */
     public DeployResult execute() {
         DeployResult result = new DeployResult();
+
+        // 本次部署开始执行的时刻——作为所有包版本记录的"取包时间"（全局共用）
+        LocalDateTime deployStart = LocalDateTime.now();
 
         // 1. 构建显式目标包列表（name 不为 null 的条目）
         List<TargetPackage> targets = buildTargets();
@@ -100,7 +104,7 @@ public class DeployPipeline {
             gates.add(new UploadGate(ops, config.getUploadRetryPolicy(), config.getRetryPrompter()));
             gates.add(new VerifyGate(ops));
             if (!config.isSkipNote()) {
-                gates.add(new NoteGate(ops, config));
+                gates.add(new NoteGate(ops, config, deployStart));
             }
             if (!config.isSkipLock()) {
                 gates.add(new UnlockGate(ops, ftpLock));
@@ -419,7 +423,7 @@ public class DeployPipeline {
      */
     private DeployResult executeDryRun(List<TargetPackage> targets, FtpOperations ops,
                                        FtpLock ftpLock, DeployResult result) {
-        System.out.println("\n=== DRY-RUN 模式（仅预检，不执行修改） ===\n");
+        // 原 "=== DRY-RUN 模式（仅预检，不执行修改） ===" 横幅已删：用户点"预检"即明确意图，每次重复 banner 是噪音
 
         for (TargetPackage target : targets) {
             try {

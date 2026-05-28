@@ -98,24 +98,58 @@ public final class BackupTargetGuard {
         return hits;
     }
 
+    /**
+     * 早停版扫描：在主目标 + 嵌入目标中找到第一个命中即返回，不再继续遍历。
+     *
+     * <p>用于点击「执行更新」时的首要前置校验：用户可能勾选了 backup 根目录、连锁选中了
+     * 几千个子包，此时无需把全部列举出来——找到任何一个就可以弹窗中止后续 FTP 备份冲突检测，
+     * 避免几千次空跑的网络往返。</p>
+     *
+     * @param mainTargets  主目标包勾选
+     * @param embedTargets 内嵌目标包勾选
+     * @return 第一个命中；全部安全时返回 {@code null}
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    public static Hit findFirstHit(List<FtpTargetSelection> mainTargets,
+                                    List<FtpTargetSelection> embedTargets) {
+        Hit hit = findFirstIn(mainTargets);
+        if (hit != null) return hit;
+        return findFirstIn(embedTargets);
+    }
+
+    private static Hit findFirstIn(List<FtpTargetSelection> list) {
+        if (list == null || list.isEmpty()) return null;
+        for (FtpTargetSelection t : list) {
+            Hit hit = toHit(t);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
     private static void collect(List<FtpTargetSelection> list, List<Hit> hits) {
         if (list == null || list.isEmpty()) return;
         for (FtpTargetSelection t : list) {
-            String matched = findBackupSegment(t.getRelativePath());
-            if (matched != null) {
-                // relativePath 在不同来源下可能含/不含文件名结尾，只在缺失时补 targetName，
-                // 避免出现 "....jarxxx.jar" 这样的重复拼接
-                String dir = t.getRemoteDir() == null ? "" : t.getRemoteDir();
-                String rel = t.getRelativePath() == null ? "" : t.getRelativePath();
-                String name = t.getTargetName() == null ? "" : t.getTargetName();
-                String full = dir + rel;
-                if (!name.isEmpty() && !full.endsWith(name)) {
-                    if (!full.isEmpty() && !full.endsWith("/")) full += "/";
-                    full += name;
-                }
-                hits.add(new Hit(full, matched));
-            }
+            Hit hit = toHit(t);
+            if (hit != null) hits.add(hit);
         }
+    }
+
+    /** 单条勾选项 → Hit；未命中返回 null。collect / findFirstIn 共用的路径拼接逻辑。 */
+    private static Hit toHit(FtpTargetSelection t) {
+        String matched = findBackupSegment(t.getRelativePath());
+        if (matched == null) return null;
+        // relativePath 在不同来源下可能含/不含文件名结尾，只在缺失时补 targetName，
+        // 避免出现 "....jarxxx.jar" 这样的重复拼接
+        String dir = t.getRemoteDir() == null ? "" : t.getRemoteDir();
+        String rel = t.getRelativePath() == null ? "" : t.getRelativePath();
+        String name = t.getTargetName() == null ? "" : t.getTargetName();
+        String full = dir + rel;
+        if (!name.isEmpty() && !full.endsWith(name)) {
+            if (!full.isEmpty() && !full.endsWith("/")) full += "/";
+            full += name;
+        }
+        return new Hit(full, matched);
     }
 
     /**

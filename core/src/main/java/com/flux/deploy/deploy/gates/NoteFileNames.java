@@ -6,20 +6,25 @@ package com.flux.deploy.deploy.gates;
  * <p><b>canonical 命名</b>：{@code <包全名>_update_notes.txt}（复数，例：{@code tm10srv.war_update_notes.txt}）。
  * 本插件之后写入新文件时一律采用该命名。</p>
  *
- * <p><b>识别规则</b>：扫描包所在目录，凡是文件名同时满足以下条件即视为 note 候选：</p>
- * <ol>
- *   <li>以 stem(包名) 开头。stem = 去掉包名最后一个扩展名（无扩展名时 stem == 包名）。</li>
- *   <li>以 {@code .txt} 结尾。</li>
- * </ol>
+ * <p><b>识别规则（模糊匹配 + 对称切版本）</b>：对包名和候选 .txt 各自计算 base，base 相等即视为命中。</p>
+ * <ul>
+ *   <li>包名 base：剥末尾 {@code .jar}/{@code .war}/{@code .ear}/{@code .zip} → 截到 first {@code -<数字>}
+ *       （如 {@code -9.0.0-SNAPSHOT}）；没有就截到 first {@code _}；都没有就原样。再剥一次扩展名。</li>
+ *   <li>候选 base：剥末尾 {@code .txt} → 同样规则切版本/下划线 → 再剥扩展名。</li>
+ * </ul>
  *
- * <p>中间字符不做约束（包括复数/单数、含或不含 {@code .war}/{@code .jar}、带日期或版本号后缀、
- * stem 后直接接字母如 {@code <stem>es.txt} 等），从而无需逐一枚举历史命名。</p>
+ * <p>例：包 {@code scev6-utils-tms-9.0.0-SNAPSHOT.jar}，base = {@code scev6-utils-tms}。</p>
+ * <ul>
+ *   <li>命中：{@code scev6-utils-tms_update_notes.txt}（旧文件）、
+ *       {@code scev6-utils-tms-9.0.0-SNAPSHOT_update_notes.txt}（新 canonical）</li>
+ *   <li>不命中：兄弟包 {@code scev6-utils-tms-apps_update_notes.txt}（base 是 {@code scev6-utils-tms-apps}）</li>
+ * </ul>
  *
  * <p><b>前提</b>：包所在目录里 {@code .txt} 文件只用于版本记录，不会放别的 {@code .txt}
  * （否则会被误识别）。这条假设由部署侧约定保证。</p>
  *
- * <p>canonical 文件也满足该谓词；调用者按文件名等于 {@link #canonicalName(String)} 把它单独挑出。
- * 多个候选时按字节最多者原地追加，<b>不做任何合并、迁移或删除</b>。</p>
+ * <p><b>命中处理</b>：0 个 → 按 canonical 新建；1 个 → 就地追加；≥2 个属于严重冲突，
+ * 由 plugin 层预检阶段提前拦截并要求用户手动清理，不在此处自动选择。</p>
  *
  * @author xumanyi
  * @date 2026-05-11
@@ -27,6 +32,10 @@ package com.flux.deploy.deploy.gates;
 public final class NoteFileNames {
 
     private NoteFileNames() {}
+
+    /** 包扩展名集合，用于 base 计算时剥扩展。 */
+    private static final java.util.List<String> PACKAGE_EXTS =
+            java.util.Arrays.asList(".jar", ".war", ".ear", ".zip");
 
     /**
      * 返回当前标准的 canonical 文件名（带复数 s）。
@@ -41,8 +50,7 @@ public final class NoteFileNames {
     /**
      * 判断给定基名文件是否是 {@code packageName} 的 note 候选（用于目录扫描后筛选）。
      *
-     * <p>判定细则见 {@link NoteFileNames 类级 javadoc}。canonical 文件会通过该判定，
-     * 调用者需要按 {@link #canonicalName(String)} 名称比较把 canonical 单独取出。</p>
+     * <p>规则见 {@link NoteFileNames 类级 javadoc}：对称剥 base 等值比较。</p>
      *
      * @param packageName 当前部署的包名（含扩展名）
      * @param fileName    待判定的同目录文件 base 名（不含路径）
@@ -52,8 +60,9 @@ public final class NoteFileNames {
         if (fileName == null || !fileName.endsWith(".txt")) {
             return false;
         }
-        String stem = stripLastExt(packageName);
-        return !stem.isEmpty() && fileName.startsWith(stem);
+        String pkgBase = computeBase(packageName, false);
+        String fileBase = computeBase(fileName, true);
+        return !pkgBase.isEmpty() && pkgBase.equals(fileBase);
     }
 
     /**
@@ -68,62 +77,52 @@ public final class NoteFileNames {
         return (dot > 0) ? name.substring(0, dot) : name;
     }
 
-    /** 用于判断模板 .txt 的包名部分是否带扩展名（决定新文件用当前包全名还是 stem）。 */
-    private static final java.util.List<String> KNOWN_PACKAGE_EXTS =
-            java.util.Arrays.asList(".jar", ".war", ".ear", ".zip");
+    /**
+     * 计算 base：剥扩展名 → 截到 first {@code -<数字>} 或 first {@code _} → 再剥一次扩展名。
+     *
+     * @param name      原始文件名（包名 或 候选 .txt 名）
+     * @param isTxtFile {@code true} 时先剥 {@code .txt}；{@code false} 时剥包扩展名
+     * @return 算出的 base，null 输入返回空串
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    private static String computeBase(String name, boolean isTxtFile) {
+        if (name == null) return "";
+        String s = name;
+        if (isTxtFile) {
+            if (s.endsWith(".txt")) s = s.substring(0, s.length() - 4);
+        } else {
+            s = stripPackageExt(s);
+        }
+        // 截到 first -<数字> 或 first _，谁先到取谁
+        int cut = -1;
+        for (int i = 0; i < s.length() - 1; i++) {
+            char c = s.charAt(i);
+            if (c == '_') { cut = i; break; }
+            if (c == '-' && Character.isDigit(s.charAt(i + 1))) { cut = i; break; }
+        }
+        if (cut >= 0) {
+            s = s.substring(0, cut);
+        }
+        // 再剥一次扩展名（候选文件名里嵌的 .jar/.war 形态，例 tm10srv.war_update_notes.txt 截到 _ 后剩 tm10srv.war）
+        return stripPackageExt(s);
+    }
 
     /**
-     * 当前包在目录下没有任何 note 文件时，参考目录里别的包的 note 命名风格，给当前包推一个同款新文件名。
+     * 若 {@code s} 末尾匹配 {@link #PACKAGE_EXTS} 中任意扩展名（忽略大小写），剥掉返回，否则原样返回。
      *
-     * <p><b>分界规则</b>：模板 .txt 的"包名部分"和"后缀部分"以**第一个 {@code _}** 为界——
-     * {@code <P>_<rest>.txt} → P 是包名部分，{@code _<rest>.txt} 是后缀模板。</p>
-     *
-     * <p><b>前缀风格判定</b>：</p>
-     * <ul>
-     *   <li>P 末尾是已知包扩展名（{@code .jar} / {@code .war} / {@code .ear} / {@code .zip}）
-     *       → 模板用"全名前缀"，新文件 = 当前包全名 + 后缀</li>
-     *   <li>否则视为"stem 前缀"，新文件 = 当前包 stem + 后缀</li>
-     * </ul>
-     *
-     * <p>例：</p>
-     * <ul>
-     *   <li>模板 {@code scev6-utils-t22Hte_notes.txt}（P 无扩展）+ 当前 {@code scev6-utils-tms-9.0.0-SNAPSHOT.jar}
-     *       → 新文件 {@code scev6-utils-tms-9.0.0-SNAPSHOT_notes.txt}</li>
-     *   <li>模板 {@code scev6-utils-t22Hte.jar_notes.txt}（P 带 .jar）+ 当前 {@code scev6-utils-tms-9.0.0-SNAPSHOT.jar}
-     *       → 新文件 {@code scev6-utils-tms-9.0.0-SNAPSHOT.jar_notes.txt}</li>
-     * </ul>
-     *
-     * <p>不依赖目录里其他包的 jar/war 是否还在（客户经常会把别的包删掉只留 .txt）。</p>
-     *
-     * @param currentPkgFullName 当前部署的包全名（含扩展名）
-     * @param dirFileNames       目录下所有文件的基名
-     * @return 推断出的新文件名；目录里没有可参考的 {@code .txt} 时返回 null
+     * @param s 待处理字符串
+     * @return 剥扩展名后的字符串
      * @author xumanyi
-     * @date 2026-05-12
+     * @date 2026-05-26
      */
-    public static String inferNoteFilenameForNewPackage(
-            String currentPkgFullName,
-            Iterable<String> dirFileNames) {
-        String currentStem = stripLastExt(currentPkgFullName);
-        for (String name : dirFileNames) {
-            if (name == null || name.isEmpty()) continue;
-            if (!name.endsWith(".txt")) continue;
-            // 跳过看上去属于当前包的 .txt（理论上 pickPrimary 已处理；这里再防一道）
-            if (!currentStem.isEmpty() && name.startsWith(currentStem)) continue;
-            int underscore = name.indexOf('_');
-            if (underscore <= 0) continue;
-            String prefixPart = name.substring(0, underscore);
-            String suffix = name.substring(underscore); // 含起始 _
-            boolean fullStyle = false;
-            String prefixLower = prefixPart.toLowerCase();
-            for (String ext : KNOWN_PACKAGE_EXTS) {
-                if (prefixLower.endsWith(ext)) {
-                    fullStyle = true;
-                    break;
-                }
+    private static String stripPackageExt(String s) {
+        String lower = s.toLowerCase();
+        for (String ext : PACKAGE_EXTS) {
+            if (lower.endsWith(ext)) {
+                return s.substring(0, s.length() - ext.length());
             }
-            return (fullStyle ? currentPkgFullName : currentStem) + suffix;
         }
-        return null;
+        return s;
     }
 }

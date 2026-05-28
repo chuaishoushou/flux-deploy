@@ -67,8 +67,7 @@ public class VerifyGate implements Gate {
             }
 
             target.setStatus(TargetPackage.Status.VERIFIED);
-            System.out.println("  [校验] " + target.getPackageName()
-                    + " SHA256 一致: " + localHash.substring(0, 16) + "...");
+            System.out.println("  [校验] SHA256 一致 " + localHash.substring(0, 16) + "...");
 
         } finally {
             Files.deleteIfExists(tempFile);

@@ -8,8 +8,8 @@ import java.util.Map;
  *
  * <p>由 {@code DeployToolWindowPanel} 实现并在初始化时注入。
  * 把"如何从 InfoSectionPanel / TargetSectionPanel 拼凑字段值"的细节留在
- * 主面板里，让 {@link EmailDialog} 与 {@code EmailDraftManager} 不直接耦合
- * 这些 UI 类。</p>
+ * 主面板里，让 {@link EmailRuntimeValuesBuilder}（浏览器编辑器的 runtime-data API 后端）
+ * 不直接耦合这些 UI 类。</p>
  *
  * @author xumanyi
  * @date 2026-05-17
@@ -20,7 +20,8 @@ public interface EmailRuntimeData {
      * 收集当前主面板里属于"插件可填字段"的最新值
      *
      * <p>返回 map 至少应该包含：{@code 任务} / {@code 客服}（来自主面板"任务号" /
-     * "客服号"输入框）。备份包 / 更新包 / 项目 不在此处提供，由邮件弹窗的「导入」
+     * "客服号"输入框）与 {@code 更新模式}（源工程"模式"下拉框当前选中值，整包更新 /
+     * 增量更新）。备份包 / 更新包 / 项目 不在此处提供，由邮件弹窗的「导入」
      * 按钮自己从部署历史缓存拉取，跟本方法的返回值合并后一并写到 chip。</p>
      *
      * <p><b>调用时机</b>：仅在邮件弹窗的「导入」按钮点击回调里调用一次。打开弹窗时

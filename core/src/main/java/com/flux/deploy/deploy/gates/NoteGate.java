@@ -42,18 +42,22 @@ public class NoteGate implements Gate {
 
     private final FtpOperations ops;
     private final DeployConfig config;
+    /** 本次部署开始执行的时刻——所有包共用，作为版本记录的"取包时间"。 */
+    private final LocalDateTime deployStart;
 
     /**
      * 创建说明文件门禁实例
      *
-     * @param ops    FTP 操作对象
-     * @param config 部署配置
+     * @param ops         FTP 操作对象
+     * @param config      部署配置
+     * @param deployStart 本次部署开始执行的时刻，用作所有包的取包时间
      * @author xumanyi
-     * @date 2026-03-26
+     * @date 2026-05-28
      */
-    public NoteGate(FtpOperations ops, DeployConfig config) {
+    public NoteGate(FtpOperations ops, DeployConfig config, LocalDateTime deployStart) {
         this.ops = ops;
         this.config = config;
+        this.deployStart = deployStart;
     }
 
     /** {@inheritDoc} */
@@ -88,24 +92,15 @@ public class NoteGate implements Gate {
             candidates.add(new RemoteNote(fname, fpath, content));
         }
 
-        // 2) 选目标文件：优先 canonical（精确匹配），否则最大字节者；
-        //    都没有就按目录里别的包 .txt 命名风格推一个新文件名，推不出再用 canonical 默认。
+        // 2) 选目标文件：优先 canonical（精确匹配），否则最大字节者；都没有就用 canonical 新建。
         RemoteNote primary = pickPrimary(candidates, canonicalName);
         String writeName;
         String writePath;
         String baseContent;
         if (primary == null) {
-            java.util.List<String> dirFileNames = new ArrayList<>();
-            for (FTPFile e : dirListing) {
-                if (e != null && e.isFile()) dirFileNames.add(e.getName());
-            }
-            String inferred = NoteFileNames.inferNoteFilenameForNewPackage(packageName, dirFileNames);
-            writeName = (inferred != null) ? inferred : canonicalName;
+            writeName = canonicalName;
             writePath = remoteDir + writeName;
             baseContent = "";
-            if (inferred != null && !inferred.equals(canonicalName)) {
-                System.out.println("  [说明] 目录里无当前包 note，参考已有 .txt 命名风格新建: " + writeName);
-            }
         } else {
             writeName = primary.name;
             writePath = primary.path;
@@ -118,17 +113,18 @@ public class NoteGate implements Gate {
 
         Path tempNote = Files.createTempFile("note-", ".txt");
         try {
-            // 3) 拼接新 2 条记录
-            String now = LocalDateTime.now().format(TIME_FMT);
+            // 3) 拼接新 2 条记录：取包时间=部署开始时刻（全局共用），传包时间=本包刚上传校验完成的当前时刻
+            String fetchTime = deployStart.format(TIME_FMT);
+            String uploadTime = LocalDateTime.now().format(TIME_FMT);
             String operator = nullToEmpty(config.getOperator());
             String taskId = nullToEmpty(config.getTaskId());
             String customerId = nullToEmpty(config.getCustomerId());
-            String fetchRecord = "取包时间：" + now
+            String fetchRecord = "取包时间：" + fetchTime
                     + " 开发：" + operator
                     + " 任务：" + taskId
                     + " 客服：" + customerId
                     + " 包名称：" + packageName;
-            String uploadRecord = "传包时间：" + now
+            String uploadRecord = "传包时间：" + uploadTime
                     + " 开发：" + operator
                     + " 任务：" + taskId
                     + " 客服：" + customerId
@@ -149,10 +145,8 @@ public class NoteGate implements Gate {
             Files.writeString(tempNote, finalContent, StandardCharsets.UTF_8);
             long expectedBytes = Files.size(tempNote);
             ops.upload(tempNote, writePath);
-            System.out.println("  [说明] 已上传 " + writeName + " (" + expectedBytes + "B)");
-
             target.setStatus(TargetPackage.Status.NOTE_UPDATED);
-            System.out.println("  [说明] " + writeName + " 已追加 2 条记录");
+            System.out.println("  [说明] " + writeName + " 已追加 2 条记录 (" + expectedBytes + " B)");
 
         } finally {
             Files.deleteIfExists(tempNote);
@@ -170,30 +164,26 @@ public class NoteGate implements Gate {
     }
 
     /**
-     * 从匹配的候选文件里挑选目标：优先精确匹配 canonical；否则取字节最多者；候选为空返回 null。
+     * 从匹配的候选文件里挑选目标：0 个返回 null（调用者按 canonical 新建）；1 个直接返回；
+     * ≥2 个属于冲突状态——本应由 plugin 层预检阶段拦截并要求用户手动清理，落到此处属于异常路径，直接抛错避免误写。
      *
      * @param candidates 命中谓词的所有候选
-     * @param canonicalName canonical 文件名
+     * @param canonicalName canonical 文件名（仅用于异常信息）
      * @return 选中的目标，或 null
+     * @throws IllegalStateException 候选 ≥2 时（应在预检拦截）
      * @author xumanyi
      * @date 2026-05-11
      */
     private static RemoteNote pickPrimary(List<RemoteNote> candidates, String canonicalName) {
         if (candidates.isEmpty()) return null;
+        if (candidates.size() == 1) return candidates.get(0);
+        StringBuilder names = new StringBuilder();
         for (RemoteNote rn : candidates) {
-            if (rn.name.equals(canonicalName)) return rn;
+            if (names.length() > 0) names.append(", ");
+            names.append(rn.name);
         }
-        RemoteNote largest = candidates.get(0);
-        for (int i = 1; i < candidates.size(); i++) {
-            RemoteNote c = candidates.get(i);
-            int cmp = Long.compare(
-                    c.content.getBytes(StandardCharsets.UTF_8).length,
-                    largest.content.getBytes(StandardCharsets.UTF_8).length);
-            if (cmp > 0 || (cmp == 0 && c.name.compareTo(largest.name) < 0)) {
-                largest = c;
-            }
-        }
-        return largest;
+        throw new IllegalStateException(
+                "note 候选 ≥2（预检阶段应已拦截，请手动清理后重试），canonical=" + canonicalName + "，候选=[" + names + "]");
     }
 
     /**

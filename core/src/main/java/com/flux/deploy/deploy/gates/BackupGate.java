@@ -133,8 +133,8 @@ public class BackupGate implements Gate {
             handedOff = true;
 
             System.out.println("  [备份] " + target.getPackageName()
-                    + " → " + backupFilePath + " (" + formatSize(backupSize) + ")"
-                    + (reusedExistingCopy ? "（复用 staging 阶段本地副本）" : ""));
+                    + " (" + formatSize(backupSize) + ")"
+                    + (reusedExistingCopy ? "，复用 staging 阶段本地副本" : ""));
 
         } finally {
             // 异常路径：本次自己下载的 temp 未交付 → 删除避免泄漏；

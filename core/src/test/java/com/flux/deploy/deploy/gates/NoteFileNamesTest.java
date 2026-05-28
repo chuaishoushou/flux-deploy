@@ -40,21 +40,50 @@ class NoteFileNamesTest {
 
     @Test
     void isNoteCandidate_acceptsArbitraryMiddleContent() {
+        // 切到首个 _ 后 base = tm10srv 即可命中（不再要求 _update_notes 这类固定后缀）
         String pkg = "tm10srv.war";
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "tm10srv_README.txt"));
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "tm10srv.war_release_history.txt"));
-        assertTrue(NoteFileNames.isNoteCandidate(pkg, "tm10srv-anything.txt"));
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "tm10srv_v2_update_notes_20260511.txt"));
-        // 正好 <stem>.txt 也算
+        // 正好 <base>.txt 也算（无 _ 无 -<数字>，base 直接等）
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "tm10srv.txt"));
     }
 
     @Test
+    void isNoteCandidate_rejectsSiblingWithDifferentBase() {
+        // 新 fuzzy 规则：候选 base 若含「-非数字」拼接（兄弟包），不算同一包的 note
+        String pkg = "tm10srv.war";
+        // tm10srv-anything 的 base 是 tm10srv-anything（无 _ 无 -<数字>），与 pkg base tm10srv 不等
+        assertFalse(NoteFileNames.isNoteCandidate(pkg, "tm10srv-anything.txt"));
+    }
+
+    @Test
     void isNoteCandidate_acceptsStemFollowedByLetters() {
-        // 中间字符不做约束：stem 紧跟字母也算（如 SNAPSHOTes.txt 这种客户手写的命名）
+        // SNAPSHOTes.txt：candidate 切到 -9（首个 -<数字>）后 base = scev6-utils-tms，与 pkg base 等
         String pkg = "scev6-utils-tms-9.0.0-SNAPSHOT.jar";
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms-9.0.0-SNAPSHOTes.txt"));
         assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms-9.0.0-SNAPSHOT.jar_update_notes.txt"));
+    }
+
+    @Test
+    void isNoteCandidate_acceptsFuzzyMatchAcrossVersions() {
+        // 核心场景：旧 note（无版本号）和新 canonical（带版本号）都该命中同一个包
+        String pkg = "scev6-utils-tms-9.0.0-SNAPSHOT.jar";
+        assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms_update_notes.txt"));
+        assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms-9.0.0-SNAPSHOT_update_notes.txt"));
+    }
+
+    @Test
+    void isNoteCandidate_rejectsSiblingFamilyPackage() {
+        // shared-tms 那个目录里的真实碰撞案例
+        String pkg = "scev6-utils-9.0.0-SNAPSHOT.jar";
+        // 兄弟包不能误中：scev6-utils（base）≠ scev6-utils-tms / scev6-utils-apps
+        assertFalse(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms-9.0.0-SNAPSHOT_update_notes.txt"));
+        assertFalse(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-tms_update_notes.txt"));
+        assertFalse(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-apps_update_notes.txt"));
+        // 自家两种命名仍然命中
+        assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils_update_notes.txt"));
+        assertTrue(NoteFileNames.isNoteCandidate(pkg, "scev6-utils-9.0.0-SNAPSHOT_update_notes.txt"));
     }
 
     @Test
@@ -87,76 +116,5 @@ class NoteFileNamesTest {
         assertEquals("a.tar", NoteFileNames.stripLastExt("a.tar.gz"));
         assertEquals("plainpkg", NoteFileNames.stripLastExt("plainpkg"));
         assertEquals(".hidden", NoteFileNames.stripLastExt(".hidden"));
-    }
-
-    @Test
-    void inferNoteFilename_stemTemplate_appliesStemStyle() {
-        // 模板 P=scev6-utils-t22Hte（无扩展） → stem 风格
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "scev6-utils-tms-9.0.0-SNAPSHOT.jar",
-                java.util.Arrays.asList("scev6-utils-t22Hte_notes.txt"));
-        assertEquals("scev6-utils-tms-9.0.0-SNAPSHOT_notes.txt", result);
-    }
-
-    @Test
-    void inferNoteFilename_fullnameTemplate_appliesFullStyle() {
-        // 模板 P=scev6-utils-t22Hte.jar（带 .jar） → 全名风格
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "scev6-utils-tms-9.0.0-SNAPSHOT.jar",
-                java.util.Arrays.asList("scev6-utils-t22Hte.jar_notes.txt"));
-        assertEquals("scev6-utils-tms-9.0.0-SNAPSHOT.jar_notes.txt", result);
-    }
-
-    @Test
-    void inferNoteFilename_warExtension_isAlsoFullStyle() {
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList("pkgB.war_update_notes.txt"));
-        assertEquals("pkgA.war_update_notes.txt", result);
-    }
-
-    @Test
-    void inferNoteFilename_stemPrefix_warCase() {
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList("pkgB_update_notes.txt"));
-        assertEquals("pkgA_update_notes.txt", result);
-    }
-
-    @Test
-    void inferNoteFilename_takesFirstMatchingTemplate() {
-        // 多个候选时按迭代顺序取第一个能解析的
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList(
-                        "pkgB.war_update_notes.txt",
-                        "pkgC_update_note.txt"));
-        assertEquals("pkgA.war_update_notes.txt", result);
-    }
-
-    @Test
-    void inferNoteFilename_returnsNullWhenNoTxtAtAll() {
-        assertNull(NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList("pkgA.war")));
-    }
-
-    @Test
-    void inferNoteFilename_returnsNullWhenTxtHasNoUnderscore() {
-        // 没有 _ 无法分界
-        assertNull(NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList("readme.txt")));
-    }
-
-    @Test
-    void inferNoteFilename_skipsTxtsBelongingToCurrentPackage() {
-        // 当前包 stem 开头的 .txt 跳过（防御性，正常 pickPrimary 已处理）
-        String result = NoteFileNames.inferNoteFilenameForNewPackage(
-                "pkgA.war",
-                java.util.Arrays.asList(
-                        "pkgA_old.txt",
-                        "pkgB_update_notes.txt"));
-        assertEquals("pkgA_update_notes.txt", result);
     }
 }

@@ -111,6 +111,38 @@ public final class DeployHistoryCache {
     }
 
     /**
+     * 取指定项目目录下所有备份文件的完整 FTP 路径（去重，按部署顺序）。
+     *
+     * <p>每条记录里 {@code backupDir} 是单个备份目录（如
+     * {@code /开发/.../backup/20260527_xumanyi/}），{@code packageRemotePaths} 是该次部署
+     * 所有包的 FTP 全路径。本方法对每个包用 {@code backupDir + 包文件名} 拼出在 backup 目录
+     * 下的镜像路径——这跟实际 {@link com.flux.deploy.deploy.gates.BackupGate} 落盘策略一致。</p>
+     *
+     * @param projectDir 项目目录
+     * @return 去重后的备份文件完整路径列表（永不为 null）
+     * @author xumanyi
+     * @date 2026-05-27
+     */
+    public List<String> collectBackupFilePathsFor(String projectDir) {
+        if (projectDir == null) return List.of();
+        Set<String> seen = new LinkedHashSet<>();
+        for (Record r : records) {
+            if (!Objects.equals(r.getProjectDir(), projectDir)) continue;
+            String backupDir = r.getBackupDir();
+            if (backupDir == null || backupDir.isBlank()) continue;
+            String normalizedDir = backupDir.endsWith("/") ? backupDir : backupDir + "/";
+            for (String pkgPath : r.getPackageRemotePaths()) {
+                if (pkgPath == null || pkgPath.isBlank()) continue;
+                int slash = pkgPath.lastIndexOf('/');
+                String fileName = slash >= 0 ? pkgPath.substring(slash + 1) : pkgPath;
+                if (fileName.isEmpty()) continue;
+                seen.add(normalizedDir + fileName);
+            }
+        }
+        return new ArrayList<>(seen);
+    }
+
+    /**
      * 调试用：当前缓存内的记录条数
      */
     public int size() {

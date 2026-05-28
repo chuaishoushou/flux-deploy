@@ -168,24 +168,22 @@ public class StagingPackageBuilder {
             return null;
         }
 
-        logCallback.accept("[暂存包] 待替换/新增 " + classEntries.size()
-                + " 条，待删除 " + deleteEntries.size() + " 条");
+        logCallback.accept("[暂存包] 变更清单：" + classEntries.size()
+                + " 条替换/新增、" + deleteEntries.size() + " 条删除");
         for (String entry : classEntries.keySet()) {
             logCallback.accept("  → " + entry);
         }
 
-        logCallback.accept("[暂存包] 下载远程包: " + remotePath);
         Path downloadedPackage = targetDir.resolve("__remote_" + artifactFileName);
+        logCallback.accept("[暂存包] 下载远程包：" + remotePath);
         downloadRemotePackage(ftpHost, ftpPort, ftpUsername, ftpPassword, remotePath, downloadedPackage);
-        logCallback.accept("[暂存包] 下载完成 (" + Files.size(downloadedPackage) / 1024 + " KB)");
 
         Path stagingPackage = targetDir.resolve("__staging_" + artifactFileName);
-        logCallback.accept("[暂存包] 替换 class 文件...");
         PatchManifest manifest = patchJar(downloadedPackage, stagingPackage, classEntries);
-        logCallback.accept("[暂存包] 已变更 " + manifest.total() + " 个条目（替换 "
-                + manifest.getReplaced().size() + "，新增 " + manifest.getAdded().size()
-                + "，删除 " + manifest.getDeleted().size() + "），暂存包已生成 ("
-                + Files.size(stagingPackage) / 1024 + " KB)");
+        logCallback.accept("[暂存包] 应用补丁完成（替换 " + manifest.getReplaced().size()
+                + "、新增 " + manifest.getAdded().size()
+                + "、删除 " + manifest.getDeleted().size()
+                + "），包体 " + Files.size(stagingPackage) / 1024 + " KB");
 
         // 不删除 downloadedPackage：所有权移交给调用方，用于后续 BackupGate 复用
         return new BuildResult(stagingPackage, downloadedPackage);
@@ -251,12 +249,12 @@ public class StagingPackageBuilder {
             return 0;
         }
 
-        logCallback.accept("[本地补丁] 待替换/新增 " + classEntries.size()
-                + " 条，待删除 " + deleteEntries.size() + " 条");
+        logCallback.accept("[本地补丁] 变更清单：" + classEntries.size()
+                + " 条替换/新增、" + deleteEntries.size() + " 条删除");
 
         Files.createDirectories(outputPath.getParent());
         PatchManifest manifest = patchJar(localPackage, outputPath, classEntries);
-        logCallback.accept("[本地补丁] 已变更 " + manifest.total() + " 个条目，输出包: "
+        logCallback.accept("[本地补丁] 应用补丁完成（共 " + manifest.total() + " 个条目），输出 "
                 + outputPath.getFileName() + " (" + Files.size(outputPath) / 1024 + " KB)");
         return manifest.total();
     }
@@ -299,15 +297,16 @@ public class StagingPackageBuilder {
         // 解析变更文件对应的 class
         Map<String, Path> classEntries = resolveChangedClasses(moduleRoot, classesDir);
         if (classEntries.isEmpty() && deleteEntries.isEmpty()) {
-            logCallback.accept("[补丁] 未找到需要替换的 class 文件");
+            logCallback.accept("[补丁] 无可应用的条目");
             return null;
         }
 
-        // 对提取的 JAR 做补丁；不再打"找到 N 个 class 需要替换"——下面那行结果已包含同等信息
+        // 对提取的 JAR 做补丁；用通用"应用补丁"措辞，避免"class"字眼让用户误以为只处理 .class
+        // （此处的 class 是 jar 内字节码条目，跟用户勾选的源文件无关）
         Path patchedJar = outputDir.resolve("patched-" + existingJar.getFileName());
         PatchManifest manifest = patchJar(existingJar, patchedJar, classEntries);
-        logCallback.accept("[补丁] 替换 " + manifest.total() + " 个 class"
-                + (deleteEntries.isEmpty() ? "" : "（含 " + deleteEntries.size() + " 个删除）"));
+        logCallback.accept("[补丁] 已应用（" + manifest.total() + " 个条目"
+                + (deleteEntries.isEmpty() ? "" : "，含 " + deleteEntries.size() + " 个删除") + "）");
 
         return new PatchOutcome(patchedJar, manifest);
     }

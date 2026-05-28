@@ -1,0 +1,582 @@
+/* ============================================================
+   邮件模板编辑器 · 仿企微邮箱布局
+   - 所有动作集中在顶部 toolbar（不再有底部 dock）
+   - 编辑器卡片延展到 viewport 底部
+   - 模板下拉 popover 只装"列表选择"，管理按钮平铺在顶栏
+   - 配色：靛蓝主色 + zinc 灰阶
+   ============================================================ */
+
+:root {
+  --primary: #6366f1;
+  --primary-hover: #5457e0;
+  --primary-active: #4347d0;
+  --primary-tint: #eef2ff;
+  --primary-soft: #e0e7ff;
+
+  --bg: #fafafa;
+  --bg-elev: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.78);
+  --fg: #18181b;
+  --fg-soft: #3f3f46;
+  --fg-muted: #71717a;
+  --fg-faint: #a1a1aa;
+  --border: #e4e4e7;
+  --border-soft: #f4f4f5;
+  --bg-hover: #f4f4f5;
+  --bg-active: #e4e4e7;
+
+  --success: #10b981;
+  --danger: #ef4444;
+  --danger-soft: #fee2e2;
+  --warning: #f59e0b;
+
+  --shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.04),
+               0 1px 1px rgba(24, 24, 27, 0.06);
+  --shadow-md: 0 2px 4px rgba(24, 24, 27, 0.04),
+               0 4px 8px rgba(24, 24, 27, 0.06),
+               0 0 0 1px rgba(24, 24, 27, 0.04);
+  --shadow-lg: 0 4px 8px rgba(24, 24, 27, 0.04),
+               0 12px 24px rgba(24, 24, 27, 0.08),
+               0 0 0 1px rgba(24, 24, 27, 0.04);
+  --shadow-xl: 0 8px 16px rgba(24, 24, 27, 0.06),
+               0 24px 48px rgba(24, 24, 27, 0.12),
+               0 0 0 1px rgba(24, 24, 27, 0.04);
+  --shadow-focus: 0 0 0 3px rgba(99, 102, 241, 0.18);
+
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+button { font-family: inherit; cursor: pointer; }
+
+/* ──────────────────────────────────────────
+   背景层：微妙径向渐变
+   ────────────────────────────────────────── */
+.bg-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 0%, rgba(99, 102, 241, 0.06), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(168, 85, 247, 0.04), transparent 60%);
+}
+
+/* ──────────────────────────────────────────
+   应用骨架：上 fixed 顶栏 + 下 flex 1 编辑区
+   ────────────────────────────────────────── */
+.app {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ──────────────────────────────────────────
+   顶部 toolbar
+   ────────────────────────────────────────── */
+.topbar {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 50;
+  background: var(--bg-glass);
+  backdrop-filter: saturate(180%) blur(16px);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  border-bottom: 1px solid var(--border);
+  animation: slideDown 0.4s var(--ease-out) both;
+}
+.topbar-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* brand */
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--primary) 0%, #818cf8 100%);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(99, 102, 241, 0.2);
+}
+.brand-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fg);
+}
+
+/* 模板下拉 pill */
+.topbar-tpl { position: relative; }
+.template-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 13px;
+  transition: all 0.15s var(--ease);
+}
+.template-pill:hover {
+  border-color: #d4d4d8;
+  background: var(--bg-hover);
+}
+.template-pill[aria-expanded="true"] {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-focus);
+}
+.template-pill .template-name { font-weight: 500; }
+.template-pill .chevron {
+  color: var(--fg-muted);
+  transition: transform 0.2s var(--ease);
+}
+.template-pill[aria-expanded="true"] .chevron { transform: rotate(180deg); }
+
+/* popover：只装模板列表，不放管理按钮 */
+.template-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 260px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.16s var(--ease-out), transform 0.16s var(--ease-out);
+  overflow: hidden;
+  z-index: 100;
+}
+.template-popover.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+.popover-inner { padding: 6px; max-height: 320px; overflow-y: auto; }
+
+.tpl-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--fg);
+  text-align: left;
+  transition: background-color 0.1s var(--ease);
+}
+.tpl-item:hover { background: var(--bg-hover); }
+.tpl-item.selected {
+  background: var(--primary-tint);
+  color: var(--primary);
+  font-weight: 500;
+}
+.tpl-check { width: 14px; height: 14px; flex: 0 0 14px; color: var(--primary); opacity: 0; }
+.tpl-item.selected .tpl-check { opacity: 1; }
+.tpl-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-badge {
+  font-size: 11px;
+  color: var(--fg-muted);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+}
+
+/* 顶栏按钮组（管理 + 数据动作通用） */
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border-left: 1px solid var(--border);
+}
+.topbar-group:first-of-type { border-left: none; padding-left: 0; }
+.topbar-spacer { flex: 1 1 auto; }
+
+/* 通用顶栏按钮：icon + text，紧凑 */
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-soft);
+  font-size: 13px;
+  transition: all 0.15s var(--ease);
+  white-space: nowrap;
+}
+.tb-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.tb-btn:active { transform: scale(0.97); }
+.tb-btn .tb-ico { flex: 0 0 14px; color: currentColor; }
+
+.tb-btn.danger:hover { color: var(--danger); background: var(--danger-soft); }
+
+.tb-btn.primary {
+  background: var(--primary);
+  color: #fff;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(99, 102, 241, 0.2);
+}
+.tb-btn.primary:hover {
+  background: var(--primary-hover);
+  color: #fff;
+}
+
+.tb-btn.outlined {
+  border-color: var(--primary-soft);
+  color: var(--primary);
+}
+.tb-btn.outlined:hover {
+  background: var(--primary-tint);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.tb-btn.done {
+  background: var(--success) !important;
+  color: #fff !important;
+  border-color: var(--success) !important;
+}
+
+/* ──────────────────────────────────────────
+   编辑区：填满剩余 viewport 高度
+   ────────────────────────────────────────── */
+.content {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+  overflow: hidden;
+  min-height: 0;
+  animation: fadeUp 0.4s 0.06s var(--ease-out) both;
+}
+
+.editor-card {
+  flex: 1 1 auto;
+  max-width: 980px;
+  background: var(--bg-elev);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: box-shadow 0.25s var(--ease);
+}
+.editor-card:focus-within {
+  box-shadow: var(--shadow-lg);
+  border-color: #d4d4d8;
+}
+
+/* ──────────────────────────────────────────
+   Quill 编辑器样式覆盖
+   ────────────────────────────────────────── */
+.ql-toolbar.ql-snow {
+  border: none !important;
+  border-bottom: 1px solid var(--border) !important;
+  padding: 8px 12px !important;
+  background: linear-gradient(180deg, #fcfcfd 0%, #f9fafb 100%);
+  flex: 0 0 auto;
+}
+.ql-snow.ql-toolbar button {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
+}
+.ql-snow.ql-toolbar button:hover { background: var(--bg-hover); }
+.ql-snow.ql-toolbar button.ql-active,
+.ql-snow.ql-toolbar .ql-picker-label.ql-active {
+  background: var(--primary-tint);
+  color: var(--primary);
+}
+.ql-snow .ql-stroke { stroke-width: 1.6; }
+
+.ql-snow .ql-picker { height: 28px; }
+.ql-snow .ql-picker-label {
+  border-radius: 6px;
+  padding: 0 8px;
+  transition: background-color 0.12s var(--ease);
+}
+.ql-snow .ql-picker-label:hover { background: var(--bg-hover); }
+.ql-snow .ql-picker-options {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  background: var(--bg-elev);
+}
+.ql-snow .ql-picker-item {
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin: 0;
+  transition: background-color 0.1s var(--ease);
+}
+.ql-snow .ql-picker-item:hover { background: var(--bg-hover); }
+
+.ql-container.ql-snow {
+  border: none !important;
+  /* 默认字号：9pt（小五）+ 字体苹方简，符合本项目内部邮件风格惯例 */
+  font-size: 9pt;
+  font-family: "PingFang SC", "Microsoft YaHei", Tahoma, Arial, sans-serif;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+.ql-editor {
+  padding: 12px 24px !important;
+  /* 默认行距 1（单倍）。跟默认模板的 line-height: 1 + 用户看企微邮件的实际行距对齐。
+     企微剪贴板 HTML 里不写 inline line-height，行距完全由企微站 CSS 控制，
+     渲染出来是单倍——所以编辑器默认也用 1，"邮件 → 编辑器"粘过来视觉就一致。
+     段距 8px（p margin）保证段落之间有透气，单字段不糊在一起。 */
+  line-height: 1;
+  color: var(--fg);
+  min-height: 100%;
+}
+.ql-editor.ql-blank::before {
+  font-style: normal;
+  color: var(--fg-faint);
+  left: 24px;
+}
+.ql-editor p {
+  margin: 0 0 8px 0;
+}
+.ql-editor p:last-child { margin-bottom: 0; }
+.ql-editor ol, .ql-editor ul {
+  margin: 0 0 8px 0;
+  padding-left: 1.5em;
+}
+.ql-editor li { margin: 0; }
+
+/* ──────────────────────────────────────────
+   变量 chip：完全无装饰
+   ────────────────────────────────────────── */
+.ph {
+  display: inline-block;
+  vertical-align: top;
+  max-width: 100%;
+  color: inherit;
+  background: transparent;
+  border: none;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+.ph.ph-empty {
+  color: #c2762e;
+  font-style: italic;
+}
+
+/* ──────────────────────────────────────────
+   行距 picker
+   宽度按"最长 label"（1.15 倍 ≈ 6 字符）留够；强制 nowrap 防止值长度超过宽度时回行
+   ────────────────────────────────────────── */
+.ql-snow .ql-picker.ql-lineheight { width: 92px; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label { white-space: nowrap; }
+/* 未选 / 清空时 fallback 到"行距" */
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label::before { content: '行距'; }
+/* 选中后 label 走跟选项一致的中文标签（"单倍 / 1.15 倍 / ..."），不再用 "行距 X" 长串 */
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label[data-value="1"]::before    { content: '单倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label[data-value="1.15"]::before { content: '1.15 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label[data-value="1.5"]::before  { content: '1.5 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label[data-value="2"]::before    { content: '2 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-label[data-value="3"]::before    { content: '3 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-item[data-value="1"]::before    { content: '单倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-item[data-value="1.15"]::before { content: '1.15 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-item[data-value="1.5"]::before  { content: '1.5 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-item[data-value="2"]::before    { content: '2 倍'; }
+.ql-snow .ql-picker.ql-lineheight .ql-picker-item[data-value="3"]::before    { content: '3 倍'; }
+
+/* ──────────────────────────────────────────
+   邮件变量 picker
+   ────────────────────────────────────────── */
+.ql-snow .ql-picker.ql-flux-var { width: 100px; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-options { min-width: 380px; padding: 6px; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-label {
+  color: var(--primary);
+  font-weight: 500;
+}
+.ql-snow .ql-picker.ql-flux-var .ql-picker-label::before { content: '邮件变量'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item {
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="项目"]::before
+    { content: '${项目}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="任务"]::before
+    { content: '${任务}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="客服"]::before
+    { content: '${客服}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新模式"]::before
+    { content: '${更新模式}\00a0\00a0\00a0\00a0 整包更新 / 增量更新'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包"]::before
+    { content: '${更新包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包路径"]::before
+    { content: '${更新包路径}\00a0\00a0\00a0\00a0 /开发/项目/.../a.jar'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包"]::before
+    { content: '${备份包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包路径"]::before
+    { content: '${备份包路径}\00a0\00a0\00a0\00a0 /开发/项目/backup/.../a.jar'; }
+
+/* 字号 picker：用中文字号制（小五 / 五号 / 小四 ...）显示，对应 WeCom 的标签习惯。
+   实际 data-value 是 pt 值，CSS 输出 inline font-size: <pt>，跟 WeCom 一一对应。 */
+.ql-snow .ql-picker.ql-size { width: 70px; }
+.ql-snow .ql-picker.ql-size .ql-picker-label:not([data-value])::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item:not([data-value])::before {
+  content: '默认';
+}
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="9pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="9pt"]::before    { content: '小五'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="10.5pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="10.5pt"]::before { content: '五号'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="12pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="12pt"]::before   { content: '小四'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="14pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="14pt"]::before   { content: '四号'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="16pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="16pt"]::before   { content: '三号'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="18pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="18pt"]::before   { content: '小二'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="22pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="22pt"]::before   { content: '二号'; }
+.ql-snow .ql-picker.ql-size .ql-picker-label[data-value="26pt"]::before,
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="26pt"]::before   { content: '一号'; }
+/* 选项里把字号实际视觉给出，让"小四"看起来就是 12pt 的大小 */
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="9pt"]    { font-size: 9pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="10.5pt"] { font-size: 10.5pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="12pt"]   { font-size: 12pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="14pt"]   { font-size: 14pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="16pt"]   { font-size: 16pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="18pt"]   { font-size: 18pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="22pt"]   { font-size: 22pt; }
+.ql-snow .ql-picker.ql-size .ql-picker-item[data-value="26pt"]   { font-size: 26pt; }
+
+/* 字体 picker */
+.ql-snow .ql-picker.ql-font .ql-picker-label:not([data-value])::before,
+.ql-snow .ql-picker.ql-font .ql-picker-item:not([data-value])::before {
+  content: '默认';
+}
+.ql-snow .ql-picker.ql-font [data-value="Microsoft YaHei"]::before    { content: '微软雅黑'; font-family: "Microsoft YaHei", sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="SimSun"]::before             { content: '宋体';     font-family: SimSun, serif; }
+.ql-snow .ql-picker.ql-font [data-value="SimHei"]::before             { content: '黑体';     font-family: SimHei, sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="KaiTi"]::before              { content: '楷体';     font-family: KaiTi, serif; }
+.ql-snow .ql-picker.ql-font [data-value="PingFang SC"]::before        { content: '苹方';     font-family: "PingFang SC", sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="Tahoma"]::before              { content: 'Tahoma';     font-family: Tahoma, sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="Arial"]::before               { content: 'Arial';      font-family: Arial, sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="Helvetica"]::before           { content: 'Helvetica';  font-family: Helvetica, sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="Verdana"]::before             { content: 'Verdana';    font-family: Verdana, sans-serif; }
+.ql-snow .ql-picker.ql-font [data-value="Times New Roman"]::before     { content: 'Times';      font-family: "Times New Roman", serif; }
+.ql-snow .ql-picker.ql-font [data-value="Georgia"]::before             { content: 'Georgia';    font-family: Georgia, serif; }
+.ql-snow .ql-picker.ql-font [data-value="Courier New"]::before         { content: 'Courier';    font-family: "Courier New", monospace; }
+
+/* ──────────────────────────────────────────
+   Toast
+   ────────────────────────────────────────── */
+.toast-stack {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  pointer-events: none;
+}
+.toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--fg);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 13px;
+  box-shadow: var(--shadow-xl);
+  max-width: 360px;
+  pointer-events: auto;
+  animation: toastIn 0.3s var(--ease-bounce);
+}
+.toast.leaving { animation: toastOut 0.2s var(--ease) forwards; }
+.toast.success { background: var(--success); }
+.toast.error { background: var(--danger); }
+.toast.warn { background: var(--warning); color: var(--fg); }
+.toast-ico { flex: 0 0 16px; }
+
+/* ──────────────────────────────────────────
+   动画
+   ────────────────────────────────────────── */
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px) scale(0.96); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes toastOut {
+  to { opacity: 0; transform: translateX(20px) scale(0.96); }
+}
+
+/* 滚动条 */
+.popover-inner::-webkit-scrollbar,
+.ql-container.ql-snow::-webkit-scrollbar { width: 8px; height: 8px; }
+.popover-inner::-webkit-scrollbar-thumb,
+.ql-container.ql-snow::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 4px; }
+.popover-inner::-webkit-scrollbar-thumb:hover,
+.ql-container.ql-snow::-webkit-scrollbar-thumb:hover { background: #d4d4d8; }
+
+/* 响应式 */
+@media (max-width: 880px) {
+  .topbar-inner { gap: 8px; }
+  .tb-btn span:not(.tb-ico) { display: none; }
+  .tb-btn { padding: 0 8px; }
+  .topbar-spacer { flex: 1 1 auto; min-width: 8px; }
+}

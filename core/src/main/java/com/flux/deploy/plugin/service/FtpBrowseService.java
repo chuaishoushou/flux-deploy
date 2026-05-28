@@ -6,6 +6,7 @@ import org.apache.commons.net.ftp.FTPFile;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 /**
@@ -145,8 +146,11 @@ public class FtpBrowseService {
                 String subForDisplay = relativeSubDir.isEmpty() ? "." : relativeSubDir;
                 String relPath = relativeSubDir.isEmpty()
                         ? name : relativeSubDir + "/" + name;
+                // FTP LIST 解析出的时间戳可能为 null（服务器未在列表里返回时间）；null 记 0 表示未知
+                Calendar ts = entry.getTimestamp();
+                long modifiedTime = ts != null ? ts.getTimeInMillis() : 0L;
                 packages.add(new PackageInfo(subForDisplay, name, type, relPath,
-                        entry.getSize(), insideBackup));
+                        entry.getSize(), insideBackup, modifiedTime));
             } else if (entry.isDirectory() && !LOCK_CONTROL_DIR.equals(name)) {
                 String nextRel = relativeSubDir.isEmpty() ? name : relativeSubDir + "/" + name;
                 String nextAbs = absolutePath + name + "/";
@@ -229,6 +233,8 @@ public class FtpBrowseService {
         private final long size;
         // 该包是否位于备份目录（backup/backups/bak/.backup）子树下；UI 据此默认不勾选
         private final boolean fromBackup;
+        // 文件最后修改时间（epoch 毫秒）；0 表示未知（FTP 列表未给出时间戳）
+        private final long modifiedTime;
 
         /**
          * 构造包信息（兼容旧签名，默认非备份目录）
@@ -243,7 +249,7 @@ public class FtpBrowseService {
          */
         public PackageInfo(String subDirectory, String packageName, String type,
                             String relativePath, long size) {
-            this(subDirectory, packageName, type, relativePath, size, false);
+            this(subDirectory, packageName, type, relativePath, size, false, 0L);
         }
 
         /**
@@ -255,17 +261,19 @@ public class FtpBrowseService {
          * @param relativePath 相对于系统目录的路径
          * @param size         文件大小（字节）
          * @param fromBackup   是否来自备份目录子树（true 时 UI 默认不勾选该包）
+         * @param modifiedTime 文件最后修改时间（epoch 毫秒）；0 表示未知
          * @author xumanyi
          * @date 2026-05-02
          */
         public PackageInfo(String subDirectory, String packageName, String type,
-                            String relativePath, long size, boolean fromBackup) {
+                            String relativePath, long size, boolean fromBackup, long modifiedTime) {
             this.subDirectory = subDirectory;
             this.packageName = packageName;
             this.type = type;
             this.relativePath = relativePath;
             this.size = size;
             this.fromBackup = fromBackup;
+            this.modifiedTime = modifiedTime;
         }
 
         /**
@@ -324,5 +332,14 @@ public class FtpBrowseService {
          * @date 2026-05-02
          */
         public boolean isFromBackup() { return fromBackup; }
+
+        /**
+         * 获取文件最后修改时间
+         *
+         * @return 最后修改时间（epoch 毫秒）；0 表示未知（FTP 列表未给出时间戳）
+         * @author xumanyi
+         * @date 2026-05-28
+         */
+        public long getModifiedTime() { return modifiedTime; }
     }
 }

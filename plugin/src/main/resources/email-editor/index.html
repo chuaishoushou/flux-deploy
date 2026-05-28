@@ -42,6 +42,11 @@
       vertical-align: top;
       max-width: 100%;
       border-bottom: 1px dashed rgba(176, 119, 0, 0.55);
+      /* 允许 chip 内部文本被鼠标选中复制——contenteditable=false 默认会让 Chromium
+         把 chip 当原子块，无法拖选其中的文字；显式开启 user-select 让选中复制可用 */
+      -webkit-user-select: text;
+      user-select: text;
+      cursor: text;
     }
     /* 空 chip（值未填）：暖灰斜体 + 还是那条虚线 */
     .ph.ph-empty {
@@ -75,10 +80,37 @@
     .ql-snow .ql-picker.ql-font [data-value="Times New Roman"]::before    { content: 'Times';   font-family: "Times New Roman", serif; }
     .ql-snow .ql-picker.ql-font [data-value="Courier New"]::before        { content: 'Courier'; font-family: "Courier New", monospace; }
 
-    /* ========= 工具栏「变量」picker 下拉：label 始终显示"变量"，选项显示字段名 ========= */
-    .ql-snow .ql-picker.ql-flux-var { width: 70px; }
-    .ql-snow .ql-picker.ql-flux-var .ql-picker-label::before { content: '变量'; }
-    .ql-snow .ql-picker.ql-flux-var .ql-picker-item::before  { content: attr(data-value); }
+    /* ========= 工具栏「邮件变量」picker 下拉 =========
+       label 始终显示蓝色"邮件变量"；选项显示 ${字段名} + 该变量替换后的真实示例值，
+       让用户一眼看出"插进去之后长什么样" */
+    .ql-snow .ql-picker.ql-flux-var { width: 95px; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-options { min-width: 380px; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-label { color: #1976d2; font-weight: 500; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-label::before { content: '邮件变量'; }
+    /* \00a0 是 CSS 里写 non-breaking space 的方式；用 4 个 nbsp 分隔变量与示例 */
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="项目"]::before
+        { content: '${项目}'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="任务"]::before
+        { content: '${任务}'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="客服"]::before
+        { content: '${客服}'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新模式"]::before
+        { content: '${更新模式}\00a0\00a0\00a0\00a0 整包更新 / 增量更新'; }
+    /* 下面 4 个包相关变量：右侧拼出真实替换值示例，让用户看出"插进去之后长什么样"。
+       注意：CSS 转义 \00a0 后面如果直接跟 a-f / 数字会被读成更长的 hex 转义（例 \00a0a
+       被读成 U+00A0A 而不是 NBSP + 'a'），所以在最后一个 NBSP 后面加一个空格作为
+       转义终止符——这个空格不会渲染，但能阻止后续字符被吞进去。 */
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包"]::before
+        { content: '${更新包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包路径"]::before
+        { content: '${更新包路径}\00a0\00a0\00a0\00a0 /开发/项目/.../a.jar'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包"]::before
+        { content: '${备份包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包路径"]::before
+        { content: '${备份包路径}\00a0\00a0\00a0\00a0 /开发/项目/backup/.../a.jar'; }
+    /* 兜底：未单独列出的旧变量按 data-value 原样显示（向后兼容老模板） */
+    .ql-snow .ql-picker.ql-flux-var .ql-picker-item:not([data-value="项目"]):not([data-value="任务"]):not([data-value="客服"]):not([data-value="更新模式"]):not([data-value="更新包"]):not([data-value="更新包路径"]):not([data-value="备份包"]):not([data-value="备份包路径"])::before
+        { content: attr(data-value); }
   </style>
 </head>
 <body>
@@ -171,8 +203,16 @@
 
     // ============================================================
     //   4. 哪些字段值是 raw HTML 片段（不 escape，让 <br> 之类的生效）
+    //   更新包 / 备份包：以 "、" 分隔多个 JAR/WAR 名（单行紧凑），escape 与否对 "、" 无影响，
+    //                   raw HTML 兼容老模板可能塞 <br>。
+    //   更新包路径 / 备份包路径：以 <br> 分隔多个 FTP 全路径，必须 raw HTML 才能换行。
     // ============================================================
-    var RAW_HTML_KEYS = { '更新包': true, '备份包': true };
+    var RAW_HTML_KEYS = {
+      '更新包': true,
+      '更新包路径': true,
+      '备份包': true,
+      '备份包路径': true
+    };
 
     // ============================================================
     //   4.5 当前已知的字段值字典 —— 由 setTemplate / updateChips 同步维护
@@ -206,6 +246,9 @@
       modules: {
         toolbar: {
           container: [
+            // 「邮件变量」picker 放在最前——这是邮件模板编辑的核心入口，
+            // 比字体 / 字号等通用富文本能力更高频
+            [{ 'flux-var': ['项目', '任务', '客服', '更新模式', '更新包', '更新包路径', '备份包', '备份包路径'] }],
             [{ 'font': Font.whitelist }],
             [{ 'size': Size.whitelist }],
             ['bold', 'italic', 'underline', 'strike'],
@@ -214,8 +257,7 @@
             [{ 'list': 'ordered' }, { 'list': 'bullet' }],
             [{ 'indent': '-1' }, { 'indent': '+1' }],
             ['link'],
-            ['clean'],
-            [{ 'flux-var': ['项目', '任务', '客服', '更新包', '备份包'] }]
+            ['clean']
           ],
           handlers: {
             // 「变量」picker —— 在当前光标位置插入 FluxField chip
@@ -457,6 +499,50 @@
       sendToJava({ kind: 'ready' });
     }
     notifyReady();
+
+    // ============================================================
+    //   11.5 复制事件拦截 —— 让 Ctrl+C / Cmd+C 输出"chip 脱壳后的真实文本"
+    //
+    //   背景：Quill 自带的 clipboard 序列化对 flux-field embed 输出 ${key} 字面值
+    //   （Quill 视它为"原子块"），用户原本期望"看到什么就复制什么"（已填值的 chip
+    //   应该复制其真实文字）。这里在 capture 阶段拦截，clone 选区、把 chip 脱壳，
+    //   再 setData 回剪贴板，跟下方「复制到剪贴板」按钮的口径一致。
+    //
+    //   触发条件：editor 区域内的 copy / cut 事件。capture=true 让我们抢先 Quill 之前
+    //   执行；preventDefault() 阻止 Quill 默认序列化。
+    // ============================================================
+    function intercepCopyEvent(ev) {
+      var sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      var range = sel.getRangeAt(0);
+      if (range.collapsed) return;
+
+      try {
+        // clone 选区到独立 DOM 片段处理，不污染编辑器实际内容
+        var frag = range.cloneContents();
+        var container = document.createElement('div');
+        container.appendChild(frag);
+
+        // 把每个 chip 脱壳：空 chip 直接删掉，已填 chip 保留其内部 innerHTML
+        var chips = container.querySelectorAll('.ph');
+        chips.forEach(function (chip) {
+          if (chip.classList.contains('ph-empty')) {
+            chip.outerHTML = '';
+          } else {
+            chip.outerHTML = chip.innerHTML;
+          }
+        });
+
+        ev.clipboardData.setData('text/plain', container.textContent || '');
+        ev.clipboardData.setData('text/html', container.innerHTML);
+        ev.preventDefault();
+      } catch (err) {
+        // setData 受限或其他异常时回退到默认行为，不破坏复制流程
+        console.warn('[FluxEmail] copy intercept failed, falling back:', err);
+      }
+    }
+    quill.root.addEventListener('copy', intercepCopyEvent, true);
+    quill.root.addEventListener('cut', intercepCopyEvent, true);
 
     // ============================================================
     //   12. JCEF 拖动选择修复 —— 鼠标按下时给 .ql-editor 抓 pointer capture

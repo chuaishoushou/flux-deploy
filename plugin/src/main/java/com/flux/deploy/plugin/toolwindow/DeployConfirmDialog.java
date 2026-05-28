@@ -68,8 +68,12 @@ public class DeployConfirmDialog extends DialogWrapper {
      */
     @Override
     protected @Nullable JComponent createCenterPanel() {
+        boolean multiPath = remotePath != null && remotePath.contains("\n");
+        // 多目标时多给一段纵向空间放路径滚动框，避免挤压下方文件树
+        int baseHeight = mode == DeployMode.FULL ? 140 : 400;
+        if (multiPath) baseHeight += 80;
         JPanel panel = new JPanel(new BorderLayout(0, 8));
-        panel.setPreferredSize(new Dimension(550, mode == DeployMode.FULL ? 140 : 400));
+        panel.setPreferredSize(new Dimension(550, baseHeight));
 
         // 顶部信息
         JPanel infoPanel = new JPanel(new GridBagLayout());
@@ -84,10 +88,13 @@ public class DeployConfirmDialog extends DialogWrapper {
         pkgLabel.setFont(pkgLabel.getFont().deriveFont(Font.BOLD));
         infoPanel.add(pkgLabel, gbc);
 
+        // 远程路径：多目标（含 \n）时用 JTextArea+滚动条，单目标时维持 JBLabel
         gbc.gridx = 0; gbc.gridy = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
+        gbc.anchor = multiPath ? GridBagConstraints.NORTHWEST : GridBagConstraints.WEST;
         infoPanel.add(new JBLabel("远程路径："), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        infoPanel.add(new JBLabel(remotePath), gbc);
+        infoPanel.add(buildRemotePathComponent(multiPath), gbc);
+        gbc.anchor = GridBagConstraints.WEST;
 
         gbc.gridx = 0; gbc.gridy = 2; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
         infoPanel.add(new JBLabel("更新模式："), gbc);
@@ -176,6 +183,41 @@ public class DeployConfirmDialog extends DialogWrapper {
         panel.add(warning, BorderLayout.SOUTH);
 
         return panel;
+    }
+
+    /**
+     * 构造「远程路径」字段的渲染组件。
+     *
+     * <p>单目标时直接用 {@link JBLabel}（与之前一致）；多目标（remotePath 含 {@code \n}）时
+     * 改用只读 {@link JTextArea} + {@link JBScrollPane}，固定宽高，超出滚动，避免 JLabel
+     * 不渲染换行 + GridBag {@code weightx=1.0} 撑爆对话框宽度的双重问题。</p>
+     *
+     * @param multiPath 是否多目标场景
+     * @return 渲染组件
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    private JComponent buildRemotePathComponent(boolean multiPath) {
+        if (!multiPath) {
+            return new JBLabel(remotePath == null ? "" : remotePath);
+        }
+        JTextArea ta = new JTextArea(remotePath);
+        ta.setEditable(false);
+        ta.setLineWrap(false);
+        JBLabel proto = new JBLabel();
+        ta.setFont(proto.getFont());
+        ta.setBackground(proto.getBackground());
+        ta.setForeground(proto.getForeground());
+        ta.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
+        int lineCount = remotePath.split("\n", -1).length;
+        int visibleRows = Math.min(5, Math.max(2, lineCount));
+        int fontH = ta.getFontMetrics(ta.getFont()).getHeight();
+        JBScrollPane sp = new JBScrollPane(ta);
+        // 固定 preferredSize 防止内部超长内容把 GridBag 列撑宽：宽度对齐 panel 550 减左侧 label 区域
+        sp.setPreferredSize(new Dimension(420, visibleRows * fontH + 12));
+        sp.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        sp.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        return sp;
     }
 
     /** 构建按包路径分组的文件树 */

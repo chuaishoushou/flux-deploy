@@ -1,10 +1,13 @@
 package com.flux.deploy.plugin.toolwindow;
 
+import com.flux.deploy.deploy.ResidualLockDiagnosis;
 import com.flux.deploy.email.EmailDraftManager;
 import com.flux.deploy.email.EmailTemplateStore;
 import com.flux.deploy.model.DeployResult;
-import com.flux.deploy.plugin.email.EmailDialog;
 import com.flux.deploy.plugin.email.EmailRuntimeData;
+import com.flux.deploy.plugin.email.EmailRuntimeValuesBuilder;
+import com.flux.deploy.plugin.email.EmailWebServer;
+import com.flux.deploy.plugin.email.EmailWebServerService;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.flux.deploy.plugin.model.DeployTargetMode;
 import com.flux.deploy.plugin.model.FtpTargetSelection;
@@ -28,8 +31,6 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.JBColor;
-import com.intellij.ui.JBSplitter;
-import com.intellij.ui.OnePixelSplitter;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.util.ui.JBUI;
@@ -73,10 +74,6 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private static final String ROOT_DEPLOY = "deploy";
     /** 主面板卡片键：文档视图 */
     private static final String ROOT_DOCS = "docs";
-    /** 右列初始分割比例：目标区占比 */
-    private static final float RIGHT_SPLIT_DEFAULT_PROPORTION = 0.66f;
-    /** 日志最小化时右侧分割条的比例：让目标区拿 97%、日志槽位只剩标题栏 */
-    private static final float RIGHT_SPLIT_LOG_CLOSED_PROPORTION = 0.97f;
 
     /** 根卡片布局：在部署面板与文档面板之间切换 */
     private CardLayout rootCardLayout;
@@ -124,21 +121,19 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     // 备份选项
     private final JCheckBox backupCheckBox;
 
-    /** 右侧目标区 / 日志区分割器 */
-    private JBSplitter rightSplit;
-    /** 日志整体容器（上方横条 + 下方日志卡片），关闭后可重新挂回右侧分割器 */
+    /** 右列容器（BorderLayout：CENTER=目标卡 / SOUTH=日志卡或日志折叠条），状态切换在此换 SOUTH 槽 */
+    private JPanel rightColumn;
+    /** 日志整体容器（上方横条 + 下方日志卡片），最小化或全屏时从 rightColumn 摘出 */
     private JPanel logCard;
-    /** 日志关闭后的恢复入口 */
+    /** 日志最小化态的折叠条（只剩标题栏），最小化时挂到 rightColumn 的 SOUTH 槽 */
     private JPanel logClosedBar;
     /** 日志是否处于关闭状态 */
     private boolean logClosed = false;
-    /** 日志关闭前的右列比例，用于恢复时还原高度 */
-    private float rightSplitRestoreProportion = RIGHT_SPLIT_DEFAULT_PROPORTION;
 
     /** 部署视图根容器，用于日志全屏切换时替换内容 */
     private JPanel deployCard;
-    /** 部署主分割器（左列｜右列），固定 50/50 不可拖动；日志全屏退出时还原回 deployCard */
-    private OnePixelSplitter mainSplit;
+    /** 部署主分割容器（左列 ｜ 右列）：GridLayout(1,2) 强制 50/50，无可拖拽分隔线；日志全屏退出时还原回 deployCard */
+    private JPanel mainSplit;
     /** 日志是否处于插件级全屏状态（占满整个 deployCard） */
     private boolean logFullscreen = false;
 
@@ -360,70 +355,35 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         // 初次按当前状态刷新一遍图标（默认 NORMAL：全屏=⤢、最小化=∨）
         refreshHeaderIcons();
 
-        // ═══ 右列：目标 ↕ 日志 可拖动（带抓取手柄） ═══
-        // 上下分割器：dividerWidth=1 + 关掉 controls / icon → 1px 极细线；
-        // 视觉上的"上排↔下排"分隔由下排面板自己的 1px 顶边线提供（execCard / logCard 都有 customLine）。
-        // 拖动通过 JLayer<ExtendedSplitterHitZoneUI> 扩展的 4px 隐形命中区抓取。
-        rightSplit = new JBSplitter(true, RIGHT_SPLIT_DEFAULT_PROPORTION);
-        rightSplit.setShowDividerControls(false);
-        rightSplit.setShowDividerIcon(false);
-        rightSplit.setDividerWidth(1);
-        rightSplit.setFirstComponent(targetCard);
-        rightSplit.setSecondComponent(logCard);
-        rightSplit.setProportion(RIGHT_SPLIT_DEFAULT_PROPORTION);
+        // ═══ 左右两列：BorderLayout(CENTER=上半, SOUTH=下半) ═══
+        // 上半（source / target）吃所有可用纵向空间，下半（exec / log）锁在自己的首选高度。
+        // 容器被外部挤压再恢复时，下半保持原样、上半自适应——不会出现旧分割器方案里
+        //「比例只算一次、恢复后下半凭空多出空白」的问题。
+        // 视觉上的"上排↔下排"分隔由下半面板自己的 1px 顶边线提供（execCard / logCard customLine）。
 
-        // ═══ 左列：源 ↕ 执行 可上下拖动（拖动通过 JLayer 隐形命中区实现） ═══
-        JBSplitter leftSplit = new JBSplitter(true, 0.66f);
-        leftSplit.setShowDividerControls(false);
-        leftSplit.setShowDividerIcon(false);
-        leftSplit.setDividerWidth(1);
+        // 让 logCard 的首选高度对齐 execCard，下排两块面板顶边横线在 NORMAL 态严格同 Y，
+        // 视觉上是一条整齐的横线穿过两列。logClosedBar / 全屏切换时此对齐自然失效（设计如此）。
+        int sharedBottomHeight = execCard.getPreferredSize().height;
+        logCard.setPreferredSize(new Dimension(
+                logCard.getPreferredSize().width, sharedBottomHeight));
+
+        JPanel leftColumn = new JPanel(new BorderLayout());
         // 源工程面板自己渲染圆角外框 + 标题栏 + 状态行（PanelChromes / SourceSectionPanel#initUI），
         // 不再用 createCardPanel 再包一层标题与边框
-        leftSplit.setFirstComponent(sourceSection);
-        leftSplit.setSecondComponent(execCard);
-        JPanel leftColumn = new JPanel(new BorderLayout());
-        // 用 JLayer 包一层 → 在 divider 上下各 4px 范围加"幽灵命中区"，
-        // 视觉宽度仍为 dividerWidth，但鼠标可在更宽的隐形带上抓取拖动（详见 ExtendedSplitterHitZoneUI）
-        leftColumn.add(new JLayer<>(leftSplit, new ExtendedSplitterHitZoneUI()),
-                BorderLayout.CENTER);
+        leftColumn.add(sourceSection, BorderLayout.CENTER);
+        leftColumn.add(execCard, BorderLayout.SOUTH);
 
-        // 首次布局后按 execCard 的首选高度收紧左右两列下半区：
-        //  - 左列：执行区维持其自身所需的最低高度，上半部源工程拿到剩余高度；
-        //  - 右列：默认关闭日志时只保留恢复条；用户打开日志后再按执行区高度还原。
-        // 只在首次 componentResized 时生效（done 标志兜底），之后分隔条由用户自由拖动。
-        leftSplit.addComponentListener(new java.awt.event.ComponentAdapter() {
-            boolean done = false;
-            @Override
-            public void componentResized(java.awt.event.ComponentEvent e) {
-                if (done) return;
-                int totalH = leftSplit.getHeight();
-                if (totalH <= 0) return;
-                int execH = Math.max(1, execCard.getPreferredSize().height);
-                // 夹到合理区间，避免极端窗口高度下执行区被挤到 0 或撑满全屏
-                float prop = Math.max(0.3f, Math.min(0.95f,
-                        (totalH - execH) / (float) totalH));
-                leftSplit.setProportion(prop);
-                rightSplitRestoreProportion = prop;
-                // 折叠态走 0.97 让日志槽位只剩标题栏；展开态与左列同款比例，
-                // 保证上下分割条 Y 位置一致，视觉上是一条整齐的横线穿过两列。
-                rightSplit.setProportion(logClosed ? RIGHT_SPLIT_LOG_CLOSED_PROPORTION : prop);
-                done = true;
-            }
-        });
+        // rightColumn 作为字段保留：日志最小化 / 全屏切换需要在 SOUTH 槽里换组件。
+        rightColumn = new JPanel(new BorderLayout());
+        rightColumn.add(targetCard, BorderLayout.CENTER);
+        rightColumn.add(logCard, BorderLayout.SOUTH);
 
-        // 右列与左列结构对称：JPanel(BorderLayout) + JLayer<JBSplitter>，
-        // 这样 mainSplit 给两侧分配的内部高度完全一致，
-        // 上下分割条的 Y 位置才能严格对齐，不会出现 1-2px 错位。
-        JPanel rightColumn = new JPanel(new BorderLayout());
-        rightColumn.add(new JLayer<>(rightSplit, new ExtendedSplitterHitZoneUI()),
-                BorderLayout.CENTER);
-
-        // ═══ 主分割：左列 | 右列，OnePixelSplitter 自带 1px 线 ═══
-        // 不再硬指定 setResizeEnabled / divider 颜色——保留 IDEA 默认行为，避免不同
-        // 平台版本下空内容渲染问题。左右仍是 50/50 起始；拖动用户可以微调。
-        mainSplit = new OnePixelSplitter(false, 0.5f);
-        mainSplit.setFirstComponent(leftColumn);
-        mainSplit.setSecondComponent(rightColumn);
+        // ═══ 主分割：左列 | 右列。GridLayout(1,2) 强制严格等宽（左右 preferred 不同也不会失衡），
+        // 中间 1px 分隔线通过给 leftColumn 加右边框实现，不可拖动 ═══
+        leftColumn.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 0, 0, 0, 1));
+        mainSplit = new JPanel(new GridLayout(1, 2, 0, 0));
+        mainSplit.add(leftColumn);
+        mainSplit.add(rightColumn);
 
         deployCard = new JPanel(new BorderLayout());
         // 顶部加 1px 线把"IDEA 工具窗 header"和"我们的 4 格内容"分开；
@@ -581,12 +541,31 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 showPrerequisiteDialog(missing, "执行更新");
                 return;
             }
-            // 已勾选备份时：异步查 FTP 是否已存在当天同开发的备份，存在则弹冲突对话框
-            if (backupCheckBox.isSelected()) {
-                checkBackupConflictAndProceed();
-            } else {
-                proceedToDeployOrPreCheck();
+            // 首要安全前置：勾选的目标包是否落在备份目录下。早停（命中一个即弹窗），
+            // 避免后续 checkBackupConflictAndProceed 对几千个误勾包做 FTP 当天备份空检。
+            if (!confirmIfBackupTargetSelected()) {
+                return;
             }
+            // 编译产物校验（缺失 / 过期）与备份目录校验同属"点击即跑"的本地前置，前移到此处：
+            // 在 FTP 预检、部署确认对话框之前完成，避免用户确认更新后才被产物问题打断。
+            if (!verifyFtpArtifactsOrPrompt()) {
+                return;
+            }
+            // 未勾选「执行备份」的安全二次确认：前移到确认框之前（原在确认之后才弹），
+            // 确认执行后不再弹任何警告/校验。
+            if (!backupCheckBox.isSelected() && !confirmNoBackupOrAbort()) {
+                return;
+            }
+            // 残留锁扫描+处理：前移到确认框之前（原在确认后的真实部署阶段才弹窗），
+            // 处理完成后再走"备份冲突检查 / 预检 + 确认框"，让「确认执行」后只剩纯执行。
+            resolveResidualLocksAndProceed(() -> {
+                // 已勾选备份时：异步查 FTP 是否已存在当天同开发的备份，存在则弹冲突对话框
+                if (backupCheckBox.isSelected()) {
+                    checkBackupConflictAndProceed();
+                } else {
+                    proceedToDeployOrPreCheck();
+                }
+            });
         });
         localOnlyButton.addActionListener(e -> {
             logSection.appendLog("INFO  [界面] 点击「本地打包」（FTP 模式产出本地包）");
@@ -595,6 +574,10 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             if (!missing.isEmpty()) {
                 logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
                 showPrerequisiteDialog(missing, "本地打包");
+                return;
+            }
+            // 编译产物校验前移到确认对话框之前，与「执行更新」口径一致：先确认产物就绪再弹确认框
+            if (!verifyFtpArtifactsOrPrompt()) {
                 return;
             }
             if (!confirmFtpLocalBuild()) {
@@ -639,7 +622,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             revalidate();
             repaint();
         });
-        logSection.appendLog("INFO  [界面] 切换至" + mode.getDisplayName());
+        logSection.appendLog("INFO  [界面] 切换至 " + mode.getDisplayName());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -742,6 +725,27 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         JOptionPane.showMessageDialog(this, "编译产物缺失，请手动执行编译/打包后重试。",
                 "请手动执行编译/打包", JOptionPane.WARNING_MESSAGE);
         return false;
+    }
+
+    /**
+     * FTP 模式（执行更新 / 本地打包）点击即跑的编译产物前置校验。
+     *
+     * <p>取源选择区当前勾选的全部文件与嵌入目标状态，委托 {@link #verifyArtifactsOrPrompt} 完成
+     * "缺失存在性 + 新鲜度"两道校验。与 {@link #confirmIfBackupTargetSelected} 同属"点击即跑"的
+     * 本地前置：在 FTP 预检、部署确认对话框之前完成，避免用户确认更新后才被产物问题打断。</p>
+     *
+     * <p>校验范围是源选择区全集，而非部署确认对话框里最终勾选的子集——前移到点击阶段时尚无确认框，
+     * 用全集校验能更早暴露问题，与本地模式 {@link #doLocalBuild} 的口径一致。</p>
+     *
+     * @return true 表示校验通过、可继续；false 表示已弹窗、调用方应 return
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    private boolean verifyFtpArtifactsOrPrompt() {
+        List<FtpTargetSelection> embeds = targetSection.getEmbedTargets();
+        boolean hasEmbedTargets = embeds != null && !embeds.isEmpty();
+        return verifyArtifactsOrPrompt(
+                sourceSection.getMode(), sourceSection.getSelectedFiles(), hasEmbedTargets);
     }
 
     /** 实际执行本地打包的异步任务 */
@@ -888,7 +892,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             rollbackButton.setEnabled(false);
             return;
         }
-        int confirm = JOptionPane.showConfirmDialog(this,
+        // 不可逆破坏类：默认按钮落在「否」，避免误回车触发回滚
+        Object[] rollbackOptions = {
+                UIManager.getString("OptionPane.yesButtonText"),
+                UIManager.getString("OptionPane.noButtonText")
+        };
+        int confirm = JOptionPane.showOptionDialog(this,
                 "确认回滚上次部署？\n\n"
                 + "此操作将：\n"
                 + "  1. 恢复所有已更新的包为备份版本\n"
@@ -896,7 +905,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 + "  3. 删除备份目录\n\n"
                 + "⚠ 回滚不可撤销。\n"
                 + "⚠ 请确认当前没有其他人正在更新同一系统的包。",
-                "确认回滚", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                "确认回滚", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
+                null, rollbackOptions, rollbackOptions[1]);
         if (confirm != JOptionPane.YES_OPTION) {
             logSection.appendLog("INFO  [界面] 用户取消回滚");
             return;
@@ -923,6 +933,39 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     }
 
     /**
+     * 首要安全前置校验：勾选的目标包是否落在备份目录（backup/backups/bak 或带 yyyyMMdd 前/后缀的目录）下。
+     *
+     * <p>调用时机：deployButton 点击后、任何 FTP 远端校验之前。命中一个即弹窗——勾选 backup 根目录
+     * 会连锁选中数千子包，逐个统计无意义；只要确认存在备份目录嫌疑就足够提醒用户。
+     * 用户点否 → 整流程退出（{@code checkBackupConflictAndProceed} 都不会被调）。</p>
+     *
+     * @return {@code true} 表示无命中或用户确认继续；{@code false} 表示用户取消，外部应中止
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    private boolean confirmIfBackupTargetSelected() {
+        BackupTargetGuard.Hit hit = BackupTargetGuard.findFirstHit(
+                targetSection.getMainTargets(), targetSection.getEmbedTargets());
+        if (hit == null) return true;
+        String msg = "勾选的目标包路径包含「" + hit.matchedSegment + "」，疑似备份目录。\n\n"
+                + "是否确认更新？";
+        // 安全警告类：默认按钮落在「否」，避免误回车直接覆盖备份目录
+        Object[] options = {
+                UIManager.getString("OptionPane.yesButtonText"),
+                UIManager.getString("OptionPane.noButtonText")
+        };
+        int warn = JOptionPane.showOptionDialog(this, msg,
+                "目标包疑似备份目录", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
+                null, options, options[1]);
+        if (warn != JOptionPane.YES_OPTION) {
+            logSection.appendLog("INFO  [界面] 用户取消（目标包位于备份目录的安全警告）");
+            return false;
+        }
+        logSection.appendLog("WARN  [界面] 用户确认：将更新到备份目录下的目标包");
+        return true;
+    }
+
+    /**
      * 异步查询 FTP 是否已有今天同开发的备份；有冲突时弹确认框，无冲突时直接进入预检/部署流程
      *
      * @author xumanyi
@@ -943,7 +986,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         // 禁用按钮 + 日志提示
         setButtonsEnabled(false);
-        logSection.appendLog("INFO  [备份] 正在检查当天是否已有备份...");
+        logSection.appendLog("INFO  [备份] 检查当日是否已有备份...");
 
         com.intellij.openapi.application.ApplicationManager.getApplication()
                 .executeOnPooledThread(() -> {
@@ -978,7 +1021,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                         }
                         pendingBackupStrategy = strategy;
                         logSection.appendLog("INFO  [备份] 冲突处理：" + strategy.getDisplayName()
-                                + "（" + conflicts.size() + " 个冲突）");
+                                + "（共 " + conflicts.size() + " 个冲突）");
                         proceedToDeployOrPreCheck();
                     } else {
                         logSection.appendLog("INFO  [备份] 用户取消，未执行更新");
@@ -1005,15 +1048,135 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      */
     private void proceedToDeployOrPreCheck() {
         if (!hasPreChecked) {
-            logSection.appendLog("INFO  [界面] 自动执行预检（预检通过后将自动进入部署确认）");
+            // 预检触发动作日志在 executeDeploy 的"开始预检"行已包含，此处不重复
             // 预检通过后自动继续部署，串接成无缝流程。
-            // 预检失败时该 action 仍会被消费但不会重复触发部署（onComplete 内会判断 result.isSuccess）。
+            // hasPreChecked 的置位下放到 onComplete 成功分支：预检失败（如 note 文件冲突）时
+            // 保持 false，用户清理后再次点击会重新跑预检 + 审计。
             pendingPostPrecheckAction = this::showConfirmAndDeploy;
             executeDeploy(true);
-            hasPreChecked = true;
         } else {
             showConfirmAndDeploy();
         }
+    }
+
+    /**
+     * 未勾选「执行备份」时的安全二次确认。
+     *
+     * <p>原先在 {@link #showConfirmAndDeploy} 里、用户点完「确认执行」之后才弹；现前移到确认框之前，
+     * 使「确认执行」之后只剩纯执行、不再弹任何警告。默认按钮落在「否」，避免误回车直接走无备份路径。</p>
+     *
+     * @return {@code true} 表示用户确认不备份继续；{@code false} 表示用户取消，调用方应中止
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    private boolean confirmNoBackupOrAbort() {
+        Object[] noBackupOptions = {
+                UIManager.getString("OptionPane.yesButtonText"),
+                UIManager.getString("OptionPane.noButtonText")
+        };
+        int warn = JOptionPane.showOptionDialog(this,
+                "⚠ 未勾选「执行备份」，更新失败后将无法自动回滚！\n\n"
+                + "确定不备份直接更新到 FTP？",
+                "安全警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
+                null, noBackupOptions, noBackupOptions[1]);
+        if (warn != JOptionPane.YES_OPTION) {
+            logSection.appendLog("INFO  [界面] 用户取消（未勾选备份的安全警告）");
+            return false;
+        }
+        logSection.appendLog("INFO  [界面] 用户确认：不备份直接更新");
+        return true;
+    }
+
+    /**
+     * 残留锁扫描 + 处理，完成后执行 {@code next}。
+     *
+     * <p>原先在 {@link DeployExecutionService} 真实部署阶段（备份之后、加锁之前）才扫描残留锁并弹窗，
+     * 用户点完「确认执行」后仍可能被这道弹窗打断。现前移到确认框之前：先异步扫描所有目标包目录的残留锁，
+     * 有残留就弹 {@link ResidualLockResolveDialog} 让用户勾选清理，清理干净后才执行 {@code next}
+     * （备份冲突检查 / 预检 + 确认框）。这样「确认执行」之后只剩纯执行步骤。</p>
+     *
+     * <p>扫描本身失败（FTP 抖动等）视为非阻断：记一条日志后继续 {@code next}，与
+     * {@link #checkBackupConflictAndProceed} 的容错口径一致；真正的 FTP 故障会在后续预检 / 部署阶段暴露。
+     * 但用户已勾选清理却 apply 失败、或清理后仍有残留，则中止不继续。</p>
+     *
+     * @param next 残留锁处理通过后要执行的后续动作
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    private void resolveResidualLocksAndProceed(Runnable next) {
+        java.util.List<FtpTargetSelection> allTargets = new java.util.ArrayList<>();
+        allTargets.addAll(targetSection.getMainTargets());
+        java.util.List<FtpTargetSelection> embeds = targetSection.getEmbedTargets();
+        if (embeds != null) allTargets.addAll(embeds);
+        if (allTargets.isEmpty()) {
+            next.run();
+            return;
+        }
+
+        String operator = infoSection.getOperator();
+        String host = targetSection.getConnectedHost();
+        int port = targetSection.getConnectedPort();
+        String user = targetSection.getConnectedUsername();
+        String pass = targetSection.getConnectedPassword();
+
+        setButtonsEnabled(false);
+        logSection.appendLog("INFO  [残留锁] 检查残留锁...");
+
+        com.intellij.openapi.application.ApplicationManager.getApplication()
+                .executeOnPooledThread(() -> {
+            java.util.List<ResidualLockDiagnosis> found;
+            try {
+                found = DeployExecutionService.diagnoseResidualLocks(
+                        host, port, user, pass, operator, allTargets,
+                        msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    logSection.appendLog("INFO  [残留锁] 检查失败（忽略此步骤继续）: " + ex.getMessage());
+                    setButtonsEnabled(true);
+                    next.run();
+                });
+                return;
+            }
+            SwingUtilities.invokeLater(() -> {
+                setButtonsEnabled(true);
+                if (found.isEmpty()) {
+                    logSection.appendLog("INFO  [残留锁] 检查完成：无残留锁");
+                    next.run();
+                    return;
+                }
+                ResidualLockResolveDialog dialog = new ResidualLockResolveDialog(project, found);
+                if (!dialog.showAndGet()) {
+                    logSection.appendLog("INFO  [残留锁] 用户取消，未执行更新");
+                    return;
+                }
+                java.util.List<ResidualLockDiagnosis> selected = dialog.getSelected();
+                setButtonsEnabled(false);
+                com.intellij.openapi.application.ApplicationManager.getApplication()
+                        .executeOnPooledThread(() -> {
+                    java.util.List<ResidualLockDiagnosis> remaining;
+                    try {
+                        remaining = DeployExecutionService.applyResidualLockResolution(
+                                host, port, user, pass, operator, allTargets, selected,
+                                msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
+                    } catch (Exception ex) {
+                        SwingUtilities.invokeLater(() -> {
+                            logSection.appendLog("ERROR [残留锁] 清理失败，已中止: " + ex.getMessage());
+                            setButtonsEnabled(true);
+                        });
+                        return;
+                    }
+                    SwingUtilities.invokeLater(() -> {
+                        setButtonsEnabled(true);
+                        if (!remaining.isEmpty()) {
+                            logSection.appendLog("INFO  [残留锁] 仍有 " + remaining.size()
+                                    + " 个未处理的残留锁，已中止");
+                            return;
+                        }
+                        next.run();
+                    });
+                });
+            });
+        });
     }
 
     /**
@@ -1146,69 +1309,55 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
     private void showConfirmAndDeploy() {
         List<FtpTargetSelection> mainTargets = targetSection.getMainTargets();
+        List<FtpTargetSelection> embedTargets = targetSection.getEmbedTargets();
         DeployMode mode = sourceSection.getMode();
         List<String> files = sourceSection.getSelectedFiles();
 
-        // 主目标包展示：单个时显示包名；多个时列出所有 relativePath 便于用户核对
+        // 目标包/远程路径展示：优先主目标；都没有时退回到 WAR 嵌入目标（避免只勾 .war 时显示"未选择"）。
+        // 「同名目标」措辞只用在主目标场景（同名 JAR 分散在多个子目录），嵌入场景一般是不同 .war，用通用「目标」。
+        List<FtpTargetSelection> displayTargets;
+        boolean isMainCase;
+        if (!mainTargets.isEmpty()) {
+            displayTargets = mainTargets;
+            isMainCase = true;
+        } else if (embedTargets != null && !embedTargets.isEmpty()) {
+            displayTargets = embedTargets;
+            isMainCase = false;
+        } else {
+            displayTargets = java.util.Collections.emptyList();
+            isMainCase = false;
+        }
+
         String targetPkg;
         String remotePath;
-        if (mainTargets.isEmpty()) {
+        if (displayTargets.isEmpty()) {
             targetPkg = "未选择";
             remotePath = "未选择";
-        } else if (mainTargets.size() == 1) {
-            FtpTargetSelection t = mainTargets.get(0);
+        } else if (displayTargets.size() == 1) {
+            FtpTargetSelection t = displayTargets.get(0);
             targetPkg = t.getTargetName();
             remotePath = t.getRemoteDir() + t.getRelativePath();
         } else {
-            targetPkg = mainTargets.get(0).getTargetName() + "（共 " + mainTargets.size() + " 个同名目标）";
+            String suffix = isMainCase ? " 个同名目标" : " 个目标";
+            targetPkg = displayTargets.get(0).getTargetName()
+                    + "（共 " + displayTargets.size() + suffix + "）";
             StringBuilder sb = new StringBuilder();
-            for (FtpTargetSelection t : mainTargets) {
+            for (FtpTargetSelection t : displayTargets) {
                 if (sb.length() > 0) sb.append('\n');
                 sb.append(t.getRemoteDir()).append(t.getRelativePath());
             }
             remotePath = sb.toString();
         }
 
-        // 安全前置校验：勾选的目标包是否落在备份目录（backup/backups/bak）下。
-        // 命中即先弹窗拦截，避免用户在主确认对话框里走完一长串流程后才被拦下。
-        List<BackupTargetGuard.Hit> backupHits = BackupTargetGuard.scan(
-                mainTargets, targetSection.getEmbedTargets());
-        if (!backupHits.isEmpty()) {
-            String msg;
-            if (backupHits.size() == 1) {
-                BackupTargetGuard.Hit h = backupHits.get(0);
-                msg = "勾选的目标包路径包含「" + h.matchedSegment + "」，疑似备份目录。\n\n"
-                        + "是否确认更新？";
-            } else {
-                msg = "勾选的 " + backupHits.size() + " 个目标包路径疑似备份目录。\n\n"
-                        + "是否确认更新？";
-            }
-            int warn = JOptionPane.showConfirmDialog(this, msg,
-                    "目标包疑似备份目录", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-            if (warn != JOptionPane.YES_OPTION) {
-                logSection.appendLog("INFO  [界面] 用户取消（目标包位于备份目录的安全警告）");
-                return;
-            }
-            logSection.appendLog("WARN  [界面] 用户确认：将更新到备份目录下的目标包");
-        }
-
+        // 安全前置校验已前移到 deployButton 的 click handler（confirmIfBackupTargetSelected），
+        // 这里不再重复扫描——用户选择确认时已经走完那一关。
         DeployConfirmDialog dialog = new DeployConfirmDialog(
                 project, targetPkg, remotePath, mode, files);
 
         if (dialog.showAndGet()) {
-            logSection.appendLog("INFO  [界面] 部署确认对话框：确认");
-
-            if (!backupCheckBox.isSelected()) {
-                int warn = JOptionPane.showConfirmDialog(this,
-                        "⚠ 未勾选「执行备份」，更新失败后将无法自动回滚！\n\n"
-                        + "确定不备份直接更新到 FTP？",
-                        "安全警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-                if (warn != JOptionPane.YES_OPTION) {
-                    logSection.appendLog("INFO  [界面] 用户取消（未勾选备份的安全警告）");
-                    return;
-                }
-                logSection.appendLog("INFO  [界面] 用户确认：不备份直接更新");
-            }
+            logSection.appendLog("INFO  [界面] 用户确认部署");
+            // 未勾选备份的安全警告已前移到 deployButton 点击阶段（confirmNoBackupOrAbort），
+            // 确认执行后只剩纯执行，不再弹任何警告 / 校验。
             List<String> selectedFiles = dialog.getSelectedFiles();
             executeDeploy(false, selectedFiles);
         } else {
@@ -1230,7 +1379,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         // 版本后缀只在"实际打包"动作里加（打包并上传 / 打包不上传），预检不打：预检不消费本地产物
         String roundLabel = dryRun ? "预检" : localOnly ? "本地打包" : "执行更新";
         String versionSuffix = dryRun ? "" : " (v" + currentPluginVersion() + ")";
-        logSection.appendLog("INFO  [界面] 开始新一轮" + roundLabel + versionSuffix);
+        // 去掉原"新一轮"前缀：用户点过一次后再次点击不必每次标"新一轮"；点了就是开始
+        logSection.appendLog("INFO  [界面] 开始" + roundLabel + versionSuffix);
 
         PluginDeployConfig pluginConfig = new PluginDeployConfig();
         pluginConfig.setTargetMode(DeployTargetMode.FTP);
@@ -1292,17 +1442,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             return;
         }
 
-        // 编译产物存在性校验：dryRun 不需要本地产物，仅做 FTP 状态预检；其他流程必须要求
-        // target/<artifact> 与 .class 提前就绪（插件不再触发任何编译）。
-        // INCREMENTAL+嵌入目标 时 validator 会额外校验 target/<artifact>，对齐 executeWarEmbed
-        // 的"整包兜底"约束，避免到嵌入阶段才报"本地 JAR 文件不存在"。
-        boolean hasEmbedTargetsForValidate = pluginConfig.getEmbedTargets() != null
-                && !pluginConfig.getEmbedTargets().isEmpty();
-        if (!dryRun && !verifyArtifactsOrPrompt(pluginConfig.getMode(),
-                pluginConfig.getChangedFiles(), hasEmbedTargetsForValidate)) {
-            return;
-        }
-
+        // 编译产物校验（缺失 / 过期）已前移到「执行更新」「本地打包」点击 handler，与备份目录校验
+        // 同处"点击即跑"前置；此处不再重复，dryRun 预检本就不需要本地产物。
         infoSection.saveToCache();
 
         enterRunningState();
@@ -1380,6 +1521,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                     pendingPostPrecheckAction = null;
                     if (dryRun && !localOnly && result != null && result.isSuccess()
                             && postAction != null) {
+                        // 只有预检真正通过才标记"已预检"，失败保持 false 以便下次重跑校验（note 审计等）
+                        hasPreChecked = true;
                         logSection.appendLog("INFO  [界面] 预检通过，自动进入部署确认");
                         postAction.run();
                     }
@@ -1609,36 +1752,29 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     /**
      * 折叠日志窗口，只保留顶部折叠条。
      *
-     * <p>关键：必须把 rightSplit 比例改成 {@link #RIGHT_SPLIT_LOG_CLOSED_PROPORTION}（=0.97），
-     * 否则 logClosedBar 会继承之前的 34% 槽位高度，看起来是「标题栏 + 大片空白」，
-     * 而不是真正的最小化条。</p>
+     * <p>BorderLayout 方案下，把 rightColumn 的 SOUTH 槽从 logCard 换成 logClosedBar，
+     * logClosedBar 的首选高度只够标题栏，target 区自动吃掉腾出的纵向空间——
+     * 不需要旧 splitter 方案里靠比例（0.97）压扁日志槽位的技巧。</p>
      *
-     * <p>从全屏态进入折叠态时，先把 logCard 从 deployCard 摘回 mainSplit，再把
-     * rightSplit 第二槽换成 logClosedBar——一次 repaint 完成「全屏 → 折叠」。</p>
+     * <p>从全屏态进入折叠态时，先把 logCard 从 deployCard 摘回、mainSplit 还回 deployCard，
+     * 再把 rightColumn 的 SOUTH 换成 logClosedBar。</p>
      */
     private void closeLogWindow() {
-        if (rightSplit == null || logClosed) {
+        if (rightColumn == null || logClosed) {
             return;
         }
-        boolean wasFullscreen = logFullscreen;
         if (logFullscreen) {
             deployCard.remove(logCard);
             deployCard.add(mainSplit, BorderLayout.CENTER);
             logFullscreen = false;
-            deployCard.revalidate();
+        } else {
+            rightColumn.remove(logCard);
         }
-        // 仅 NORMAL→MIN 时刷新展开比例：从全屏直达折叠时 rightSplit 在 FS 期间未显示，
-        // 其 getProportion() 可能仍是上一轮 MIN 残留的 0.97（来源：MIN→FS 不重置比例）；
-        // 若误把 0.97 当成"展开比例"保存，再次展开就只剩 3% 高度，看起来像日志栏无法打开。
-        // 此时直接复用 toggleLogFullscreen 在进入 FS 前已记录的 rightSplitRestoreProportion。
-        if (!wasFullscreen) {
-            rightSplitRestoreProportion = rightSplit.getProportion();
-        }
+        rightColumn.add(logClosedBar, BorderLayout.SOUTH);
         logClosed = true;
-        rightSplit.setSecondComponent(logClosedBar);
-        rightSplit.setProportion(RIGHT_SPLIT_LOG_CLOSED_PROPORTION);
-        rightSplit.revalidate();
-        rightSplit.repaint();
+        rightColumn.revalidate();
+        rightColumn.repaint();
+        deployCard.revalidate();
         deployCard.repaint();
         refreshHeaderIcons();
     }
@@ -1646,53 +1782,56 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     /**
      * 切换日志全屏：全屏时 logCard 占满 deployCard；退出全屏一律回到 NORMAL 态。
      *
-     * <p>从最小化态点全屏按钮也走这里：直接把 rightSplit 第二槽位换成空 panel，
-     * logCard 搬进 deployCard，一次点击就到全屏，不经过中间「先展开 → 再点全屏」。</p>
+     * <p>BorderLayout 方案下：</p>
+     * <ul>
+     *   <li>进入全屏：根据当前是 NORMAL / MINIMIZED 从 rightColumn 摘掉对应组件
+     *       （logCard 或 logClosedBar），mainSplit 从 deployCard 摘出，logCard 搬到 deployCard CENTER。</li>
+     *   <li>退出全屏：logCard 从 deployCard 摘出，mainSplit 还回 deployCard CENTER，
+     *       logCard 还回 rightColumn SOUTH，状态统一回 NORMAL。</li>
+     * </ul>
      */
     private void toggleLogFullscreen() {
         if (deployCard == null || logCard == null) {
             return;
         }
         if (logFullscreen) {
-            // 退出全屏：logCard 还回 rightSplit，恢复 NORMAL 态
+            // 退出全屏 → 一律回到 NORMAL
             deployCard.remove(logCard);
             deployCard.add(mainSplit, BorderLayout.CENTER);
-            rightSplit.setSecondComponent(logCard);
-            rightSplit.setProportion(rightSplitRestoreProportion);
+            rightColumn.add(logCard, BorderLayout.SOUTH);
             logFullscreen = false;
             logClosed = false;
         } else {
-            // 进入全屏前先把"当前展开比例"记到 rightSplitRestoreProportion，退出全屏 / 折叠时还原。
-            // 仅 NORMAL 态记录：MINIMIZED 态此时 rightSplit 比例是临时占位值 0.97，
-            // 不能当作展开比例保存——否则后续 MIN→FS→MIN→展开会只剩 3% 高度。
-            if (!logClosed) {
-                rightSplitRestoreProportion = rightSplit.getProportion();
+            // 进入全屏：根据当前态摘掉 rightColumn SOUTH 里的对应组件
+            if (logClosed) {
+                rightColumn.remove(logClosedBar);
+            } else {
+                rightColumn.remove(logCard);
             }
-            // rightSplit 第二槽位先填空 panel 占位（无论当前是 NORMAL 还是
-            // MINIMIZED 都直接覆盖），logCard 移入 deployCard
-            rightSplit.setSecondComponent(new JPanel());
             deployCard.remove(mainSplit);
             deployCard.add(logCard, BorderLayout.CENTER);
             logFullscreen = true;
             logClosed = false;
         }
         refreshHeaderIcons();
+        rightColumn.revalidate();
+        rightColumn.repaint();
         deployCard.revalidate();
         deployCard.repaint();
     }
 
     /**
-     * 展开日志窗口，恢复到折叠前的高度。
+     * 展开日志窗口，恢复到 logCard 自身的首选高度（在 initUI 里已对齐 execCard）。
      */
     private void restoreLogWindow() {
-        if (rightSplit == null || !logClosed) {
+        if (rightColumn == null || !logClosed) {
             return;
         }
+        rightColumn.remove(logClosedBar);
+        rightColumn.add(logCard, BorderLayout.SOUTH);
         logClosed = false;
-        rightSplit.setSecondComponent(logCard);
-        rightSplit.setProportion(rightSplitRestoreProportion);
-        rightSplit.revalidate();
-        rightSplit.repaint();
+        rightColumn.revalidate();
+        rightColumn.repaint();
         refreshHeaderIcons();
     }
 
@@ -1756,11 +1895,11 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             if (displayFiles.isEmpty()) {
                 appendModeHintOnce("[提示] 模块下未找到可部署文件");
             } else if (changedFiles.isEmpty()) {
-                appendModeHintOnce("[提示] 未检测到 Git 变更，已显示 "
-                        + displayFiles.size() + " 个可部署文件，可手动勾选");
+                appendModeHintOnce("[提示] 未检测到 Git 变更，已列出全部 "
+                        + displayFiles.size() + " 个可部署文件，请手动勾选");
             } else {
                 appendModeHintOnce("[提示] 检测到 " + changedFiles.size()
-                        + " 个 Git 变更，已显示 " + displayFiles.size()
+                        + " 个 Git 变更，已列出 " + displayFiles.size()
                         + " 个可部署文件并默认勾选变更项");
             }
         }
@@ -2032,189 +2171,45 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         return DeployRunStatus.FAIL;
     }
 
-    /**
-     * 扩展 JBSplitter 拖动命中区的 LayerUI
-     *
-     * <p>JBSplitter 的 {@code dividerWidth} 同时决定视觉宽度与鼠标命中范围。
-     * 默认值 2px 视觉细但极难抓取。本 UI 通过 {@link JLayer} 包一层透明事件拦截：
-     * 在 divider 真实位置上下各 {@value #HIT_PADDING} px 的隐形带内同样响应拖动，
-     * 视觉宽度保持不变（仅 dividerWidth），命中区扩大到 dividerWidth + 2*HIT_PADDING。</p>
-     *
-     * <p><b>事件分流</b>：</p>
-     * <ul>
-     *   <li>鼠标在原 divider 内（onDivider=true）→ 不消费任何事件，让 divider 自身的
-     *       hover 高亮、拖动手势、setProportion 逻辑保持原状；</li>
-     *   <li>鼠标在扩展带但 divider 外（ghost band）→ MOVED 设 N_RESIZE 光标；
-     *       PRESSED 起始拖动并消费；DRAGGED 直接计算并 {@code setProportion}；
-     *       RELEASED 结束拖动。消费这些事件可阻止下方面板（树/列表/滚动条）误响应。</li>
-     * </ul>
-     *
-     * <p><b>限制</b>：上下面板内容贴近 divider 边缘的 4px 区域不再触发原本的点击交互
-     * （比如树最末行的下边沿）。这部分通常不是交互热点，权衡可接受。</p>
-     *
-     * @author xumanyi
-     * @date 2026-04-30
-     */
-    private static class ExtendedSplitterHitZoneUI extends javax.swing.plaf.LayerUI<JBSplitter> {
-        /** 上下各扩展的命中像素数；总命中带宽 = dividerWidth + 2*HIT_PADDING */
-        private static final int HIT_PADDING = 4;
-        /** 拖动时夹紧 proportion 的下限 / 上限（保持每侧最少有可见区域） */
-        private static final float MIN_PROPORTION = 0.05f;
-        private static final float MAX_PROPORTION = 0.95f;
-
-        /** 扩展带触发的拖动会话标志（divider 自身拖动不进入此状态） */
-        private boolean dragging;
-        /** 上一次被覆盖 cursor 的组件，离开命中区时还原 */
-        private Component cursorOverrideOn;
-
-        @Override
-        public void installUI(JComponent c) {
-            super.installUI(c);
-            ((JLayer<?>) c).setLayerEventMask(
-                    AWTEvent.MOUSE_EVENT_MASK | AWTEvent.MOUSE_MOTION_EVENT_MASK);
-        }
-
-        @Override
-        public void uninstallUI(JComponent c) {
-            ((JLayer<?>) c).setLayerEventMask(0);
-            clearCursorOverride();
-            super.uninstallUI(c);
-        }
-
-        @Override
-        protected void processMouseEvent(MouseEvent e, JLayer<? extends JBSplitter> l) {
-            handle(e, l);
-        }
-
-        @Override
-        protected void processMouseMotionEvent(MouseEvent e, JLayer<? extends JBSplitter> l) {
-            handle(e, l);
-        }
-
-        /** 统一处理鼠标事件：判断 zone → 设光标 / 启停拖动 / 更新 proportion */
-        private void handle(MouseEvent e, JLayer<? extends JBSplitter> l) {
-            JBSplitter splitter = l.getView();
-            if (splitter == null) return;
-            // divider Y/H 用 firstComponent 实际 bounds 推算，避免依赖 Splitter 内部 API
-            Component first = splitter.getFirstComponent();
-            Component second = splitter.getSecondComponent();
-            if (first == null || second == null) return;
-
-            int dividerY;
-            int dividerH;
-            if (first.isVisible() && second.isVisible()) {
-                dividerY = first.getY() + first.getHeight();
-                dividerH = second.getY() - dividerY;
-                if (dividerH <= 0) dividerH = splitter.getDividerWidth();
-            } else {
-                // 任一侧折叠时拖动语义不再成立，退出拖动并放弃命中
-                if (dragging) dragging = false;
-                clearCursorOverride();
-                return;
-            }
-
-            Component src = (Component) e.getSource();
-            Point onSplitter = SwingUtilities.convertPoint(src, e.getPoint(), splitter);
-            boolean onDivider = onSplitter.y >= dividerY && onSplitter.y < dividerY + dividerH;
-            boolean inExt = onSplitter.y >= dividerY - HIT_PADDING
-                    && onSplitter.y < dividerY + dividerH + HIT_PADDING;
-            boolean inGhostBand = inExt && !onDivider;
-
-            switch (e.getID()) {
-                case MouseEvent.MOUSE_MOVED:
-                    if (dragging) return;
-                    if (inGhostBand) {
-                        setCursorOverride(src,
-                                Cursor.getPredefinedCursor(Cursor.N_RESIZE_CURSOR));
-                    } else if (!onDivider) {
-                        // onDivider 时让 divider 自身处理光标，不在此处还原免抢覆盖
-                        clearCursorOverride();
-                    }
-                    break;
-                case MouseEvent.MOUSE_EXITED:
-                    if (!dragging) clearCursorOverride();
-                    break;
-                case MouseEvent.MOUSE_PRESSED:
-                    if (inGhostBand) {
-                        dragging = true;
-                        e.consume();
-                    }
-                    break;
-                case MouseEvent.MOUSE_DRAGGED:
-                    if (dragging) {
-                        int splitterH = splitter.getHeight();
-                        if (splitterH > 0) {
-                            float prop = onSplitter.y / (float) splitterH;
-                            if (prop < MIN_PROPORTION) prop = MIN_PROPORTION;
-                            if (prop > MAX_PROPORTION) prop = MAX_PROPORTION;
-                            splitter.setProportion(prop);
-                        }
-                        e.consume();
-                    }
-                    break;
-                case MouseEvent.MOUSE_RELEASED:
-                    if (dragging) {
-                        dragging = false;
-                        e.consume();
-                        // 释放后重新评估当前位置的光标状态
-                        if (inGhostBand) {
-                            setCursorOverride(src,
-                                    Cursor.getPredefinedCursor(Cursor.N_RESIZE_CURSOR));
-                        } else if (!onDivider) {
-                            clearCursorOverride();
-                        }
-                    }
-                    break;
-                default:
-                    // 其他事件（CLICKED / ENTERED 等）不处理
-                    break;
-            }
-        }
-
-        /** 在指定组件上覆盖 cursor，并记录以便后续还原（切组件时先还原旧的） */
-        private void setCursorOverride(Component c, Cursor cursor) {
-            if (cursorOverrideOn != null && cursorOverrideOn != c) {
-                try { cursorOverrideOn.setCursor(null); } catch (Exception ignored) {}
-            }
-            cursorOverrideOn = c;
-            try {
-                if (!cursor.equals(c.getCursor())) c.setCursor(cursor);
-            } catch (Exception ignored) {}
-        }
-
-        /** 还原最近一次被覆盖的组件 cursor（setCursor(null) 让其继承父节点默认值） */
-        private void clearCursorOverride() {
-            if (cursorOverrideOn != null) {
-                try { cursorOverrideOn.setCursor(null); } catch (Exception ignored) {}
-                cursorOverrideOn = null;
-            }
-        }
-    }
-
     // ============================================================
     //  通知邮件入口
     // ============================================================
 
     /**
-     * 打开「通知邮件」弹窗（由 {@code ShowEmailAction} 标题栏图标触发）
+     * 打开「通知邮件」编辑器：启动本地 HTTP 服务并用系统浏览器跳转打开 SPA 编辑器。
      *
-     * <p>弹窗会从 {@link #emailDraftManager} 取出当前 draft；若 draft 为空（首次打开 /
-     * 项目刚切 / 重置后），用主面板当前字段值 + 选中模板渲染一个新 draft。</p>
+     * <p>由主面板「邮件模版」按钮和工具窗标题栏 {@code ShowEmailAction} 触发。
+     * Server 是项目级单例（{@link EmailWebServerService}），第一次调用时 lazy 启动，
+     * 之后跟随项目/IDE 存活——多次点按钮直接复用同一个 server（同端口同 token），
+     * 浏览器里旧标签页始终能用。</p>
+     *
+     * <p>每次进入都把当前主面板 + 部署历史的运行时变量供给者注入到 service，
+     * 浏览器点「导入数据」拉到的就是<b>当下</b>面板的最新快照。</p>
+     *
+     * <p>历史：之前是 JCEF 内嵌弹窗，因为 JCEF 富文本体验不佳被废弃，
+     * 改为外部浏览器纯 SPA 方案。原 {@code EmailDialog} 类已删除。</p>
      *
      * @author xumanyi
-     * @date 2026-05-17
+     * @date 2026-05-27
      */
     public void openEmailDialog() {
-        if (!com.intellij.ui.jcef.JBCefApp.isSupported()) {
-            com.intellij.openapi.ui.Messages.showWarningDialog(
-                    project,
-                    "通知邮件需要 IDE 内置浏览器（JCEF）支持。当前检测到 JCEF 不可用。\n\n"
-                            + "请到 Help → Find Action → Registry，把 ide.browser.jcef.enabled 设为 true，"
-                            + "重启 IDE 后再试。",
-                    "JCEF 不可用");
+        if (project == null) {
+            com.intellij.openapi.ui.Messages.showErrorDialog((java.awt.Component) null,
+                    "未关联到具体项目，无法启动本地编辑服务。", "无法打开邮件模板编辑器");
             return;
         }
-        new EmailDialog(project, emailDraftManager, this, deployHistoryCache).show();
+        try {
+            EmailWebServerService svc = EmailWebServerService.getInstance(project);
+            // 把当前 panel 的运行时数据供给者注入：浏览器点「导入数据」会经此拉到
+            // 最新的主面板字段 + 部署历史快照
+            svc.updateDataSupplier(() ->
+                    new EmailRuntimeValuesBuilder(this, deployHistoryCache).build());
+            EmailWebServer server = svc.getOrStart(emailDraftManager.getStore());
+            com.intellij.ide.BrowserUtil.browse(server.getEditorUrl());
+        } catch (java.io.IOException ioEx) {
+            com.intellij.openapi.ui.Messages.showErrorDialog(project,
+                    "启动本地服务失败: " + ioEx.getMessage(), "无法打开邮件模板编辑器");
+        }
     }
 
 
@@ -2246,6 +2241,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         Map<String, String> v = new HashMap<>();
         v.put("任务", nullToEmpty(infoSection.getTaskId()));
         v.put("客服", nullToEmpty(infoSection.getCustomerId()));
+        v.put("更新模式", sourceSection.getMode().toString());
         return v;
     }
 

@@ -64,6 +64,10 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
     private final AttributeSet styleBoxSuccess;
     private final AttributeSet styleBoxFail;
     private final AttributeSet styleBoxAbort;
+    /** 段落级 hanging-indent 样式：长行 wrap 后视觉行从时间戳右侧的内容列起，不再回到最左压住时间戳。 */
+    private final AttributeSet paragraphHanging;
+    /** RAW_LINE_MARK 段落样式：整体左缩进 + 不再倒缩首行，多行内容（如包路径列表）也保持齐头。 */
+    private final AttributeSet paragraphRaw;
 
     /**
      * 构造日志面板，初始化日志文本区域和进度条
@@ -82,6 +86,14 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
         this.styleBoxSuccess = buildStyle(new JBColor(new Color(0x2E8B2E), new Color(0x6FBF6F)), true);
         this.styleBoxFail = buildStyle(new JBColor(new Color(0xC7222D), new Color(0xFF6B6B)), true);
         this.styleBoxAbort = buildStyle(new JBColor(new Color(0xB07D00), new Color(0xE0A030)), true);
+
+        // 段落 hanging-indent：根据当前等宽字体计算"HH:mm:ss  "（10 字符）实际像素宽，
+        // 整段 leftIndent = N 像素、firstLineIndent = -N 像素。视觉效果：
+        //   首行：时间戳从最左对齐 (-N + N = 0)
+        //   续行：内容从 N 像素列起，不会再压回时间戳列
+        int indentPx = logArea.getFontMetrics(logArea.getFont()).charWidth('0') * 10;
+        this.paragraphHanging = buildParagraph(indentPx, -indentPx);
+        this.paragraphRaw = buildParagraph(indentPx, 0);
 
         this.progressBar = new JProgressBar();
         progressBar.setVisible(false);
@@ -129,17 +141,25 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
      */
     private void renderLine(String timestamp, String line) {
         if (line.isEmpty()) {
-            append("\n", styleInfo);
+            append("\n", styleInfo, paragraphHanging);
             return;
         }
         if (line.charAt(0) == RAW_LINE_MARK) {
-            append(line.substring(1) + "\n", styleInfo);
+            // raw 行：历史调用点会手动加 "          "（10 空格）对齐到时间戳后的内容列。
+            // 现在缩进由 paragraphRaw 段落样式接管，这里剥掉前导空格避免双重缩进。
+            // 限定 16 上限，避免吃掉调用方有意写的更深层级缩进。
+            String content = line.substring(1);
+            int leading = 0;
+            while (leading < content.length() && leading < 16 && content.charAt(leading) == ' ') {
+                leading++;
+            }
+            append(content.substring(leading) + "\n", styleInfo, paragraphRaw);
             return;
         }
         char first = line.charAt(0);
         if (first == '╔' || first == '╚' || first == '║') {
-            append(timestamp + "  ", styleInfo);
-            append(line + "\n", pickBoxStyle(line));
+            append(timestamp + "  ", styleInfo, paragraphHanging);
+            append(line + "\n", pickBoxStyle(line), paragraphHanging);
             return;
         }
         Matcher m = LEVEL_LINE.matcher(line);
@@ -147,12 +167,12 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
             String level = m.group(1);
             String stage = m.group(2);
             String msg = m.group(3);
-            append(timestamp + "  " + stage + " ", styleInfo);
-            append(msg + "\n", pickLevelStyle(level));
+            append(timestamp + "  " + stage + " ", styleInfo, paragraphHanging);
+            append(msg + "\n", pickLevelStyle(level), paragraphHanging);
             return;
         }
         // 无级别前缀的行：按 INFO 默认色渲染
-        append(timestamp + "  " + line + "\n", styleInfo);
+        append(timestamp + "  " + line + "\n", styleInfo, paragraphHanging);
     }
 
     /**
@@ -186,16 +206,25 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
     }
 
     /**
-     * 在文档末尾追加带样式片段（必须在 EDT 上调用）
+     * 在文档末尾追加带样式片段（必须在 EDT 上调用），并对该插入区间应用段落样式
      *
-     * @param text  文本
-     * @param style 样式
+     * <p>段落样式（leftIndent/firstLineIndent）必须在内容插入后通过
+     * {@link StyledDocument#setParagraphAttributes} 应用到对应区间，
+     * 否则只有字符样式生效、不会触发 hanging-indent 视觉换行。</p>
+     *
+     * @param text      文本（可含尾随 \n）
+     * @param charStyle 字符样式（颜色/粗体）
+     * @param paraStyle 段落样式（缩进），{@code null} 表示沿用上下文段落属性
      * @author xumanyi
-     * @date 2026-05-07
+     * @date 2026-05-27
      */
-    private void append(String text, AttributeSet style) {
+    private void append(String text, AttributeSet charStyle, AttributeSet paraStyle) {
         try {
-            doc.insertString(doc.getLength(), text, style);
+            int start = doc.getLength();
+            doc.insertString(start, text, charStyle);
+            if (paraStyle != null) {
+                doc.setParagraphAttributes(start, text.length(), paraStyle, false);
+            }
         } catch (BadLocationException ignored) {
             // 不应发生：始终往末尾插入
         }
@@ -218,6 +247,22 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
         if (bold) {
             StyleConstants.setBold(s, true);
         }
+        return s;
+    }
+
+    /**
+     * 构造段落样式：用于 hanging-indent 视觉换行
+     *
+     * @param leftIndent      整段左缩进像素
+     * @param firstLineIndent 首行额外缩进像素（负值即首行倒缩，达成 hanging 效果）
+     * @return 不可变段落样式
+     * @author xumanyi
+     * @date 2026-05-27
+     */
+    private static AttributeSet buildParagraph(int leftIndent, int firstLineIndent) {
+        SimpleAttributeSet s = new SimpleAttributeSet();
+        StyleConstants.setLeftIndent(s, leftIndent);
+        StyleConstants.setFirstLineIndent(s, firstLineIndent);
         return s;
     }
 

@@ -13,13 +13,14 @@ import com.flux.deploy.model.DeployResult;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.flux.deploy.plugin.model.FtpTargetSelection;
 import com.flux.deploy.plugin.model.PluginDeployConfig;
-import com.flux.deploy.plugin.toolwindow.ResidualLockResolveDialog;
 import com.flux.deploy.plugin.util.LogInterceptor;
 import com.flux.deploy.util.WarEmbedUtil;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.Messages;
 import org.jetbrains.annotations.NotNull;
 
 import org.apache.commons.net.ftp.FTPFile;
@@ -541,6 +542,8 @@ public class DeployExecutionService {
     private static volatile CancelMode currentCancelMode = CancelMode.NONE;
     /** 当前部署任务已成功上传/嵌入的包列表（实时追加，UI 弹窗读取展示用）。null 表示当前没有部署任务 */
     private static volatile List<String[]> currentSucceededUploads;
+    /** 当前部署任务每个目标"上传/嵌入完成"的实际时刻，按 remoteDir+relativePath 索引；供版本记录的传包时间使用。null 表示当前无部署任务。 */
+    private static volatile java.util.concurrent.ConcurrentMap<String, java.time.LocalDateTime> currentUploadFinishTimes;
     /** 当前部署任务的目标总数（主目标 + 嵌入目标）。0 表示当前没有部署任务 */
     private static volatile int currentTotalTargets;
     /** 当前部署任务是否为 dryRun（预检不需要弹窗收尾） */
@@ -604,6 +607,11 @@ public class DeployExecutionService {
         if (sink == null || target == null) return;
         String rp = target.getRemoteDir() + target.getRelativePath();
         sink.add(new String[]{rp, null});
+        // 记录该包"上传/嵌入完成"的实际时刻，供版本记录的传包时间使用（每包独立，多包不串味）
+        java.util.concurrent.ConcurrentMap<String, java.time.LocalDateTime> finishTimes = currentUploadFinishTimes;
+        if (finishTimes != null) {
+            finishTimes.put(rp, java.time.LocalDateTime.now());
+        }
     }
 
     /**
@@ -725,7 +733,6 @@ public class DeployExecutionService {
                         onComplete.accept(null);
                         return;
                     }
-                    logCallback.accept("INFO  [部署] 插件不再触发 mvn；直接使用 target/ 下已有产物");
 
                     // 2. 执行本地补丁
                     com.flux.deploy.plugin.model.LocalTargetSelection lt = pluginConfig.getLocalTarget();
@@ -785,9 +792,10 @@ public class DeployExecutionService {
                     + "可手动编辑该文件后再次部署");
         }
 
-        // 复位本次任务的"用户停止"上下文：模式 / 实时成功列表 / 总数 / dryRun 标志
+        // 复位本次任务的"用户停止"上下文：模式 / 实时成功列表 / 完成时刻表 / 总数 / dryRun 标志
         currentCancelMode = CancelMode.NONE;
         currentSucceededUploads = java.util.Collections.synchronizedList(new ArrayList<>());
+        currentUploadFinishTimes = new java.util.concurrent.ConcurrentHashMap<>();
         currentTotalTargets = 0;
         currentDryRun = pluginConfig.isDryRun();
 
@@ -802,6 +810,7 @@ public class DeployExecutionService {
             } finally {
                 currentCancelMode = CancelMode.NONE;
                 currentSucceededUploads = null;
+                currentUploadFinishTimes = null;
                 currentTotalTargets = 0;
                 currentDryRun = false;
             }
@@ -822,13 +831,8 @@ public class DeployExecutionService {
 
                 // 1. 编译项目（预检跳过编译，只检查 FTP 状态；
                 //    插件不再触发任何 mvn / IDE 编译。target/classes 与 target/<artifact> 的存在性
-                //    已由 UI 层 ArtifactPresenceValidator 在点击部署前以弹窗强制要求过；这里仅记录一行
-                //    日志说明流程，dryRun 下连这行也跳过。
-                if (!pluginConfig.isDryRun() && pluginConfig.getModulePath() != null) {
-                    logCallback.accept("INFO  [部署] 插件不再触发 mvn；直接使用 target/ 下已有产物");
-                } else if (pluginConfig.isDryRun()) {
-                    logCallback.accept("INFO  [预检] 跳过编译检查，仅检查 FTP 状态");
-                }
+                //    已由 UI 层 ArtifactPresenceValidator 在点击部署前以弹窗强制要求过。
+                //    原"[预检] 跳过编译检查..."属于流程已定义的固有行为，每次都打无信息增量，已删。
 
                 // 2+3: 每个主目标的暂存包 / aligned war 放到 Phase 3 上传循环里按目标逐个构建
                 //       这里仅构建一份不含主目标本地文件的基础 DeployConfig 供预检使用
@@ -882,6 +886,17 @@ public class DeployExecutionService {
                             applyCancellationToken(config);
                             DeployPipeline pipeline = new DeployPipeline(config);
                             DeployResult result = pipeline.execute();
+                            // Note 审计：当用户勾选了「更新版本记录」且前置预检通过时，
+                            // 扫描每个目标包目录的 .txt 候选，命中 ≥2 个则弹窗 + 预检失败。
+                            if (result != null && result.isSuccess() && pluginConfig.isUpdateNote()) {
+                                String conflictPkg = auditNoteConflicts(pluginConfig,
+                                        ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
+                                if (conflictPkg != null) {
+                                    DeployResult failed = new DeployResult();
+                                    failed.addError("note-audit", conflictPkg, "note 文件冲突");
+                                    result = failed;
+                                }
+                            }
                             // 总结日志：成功 / 失败一律输出一行
                             if (result != null && result.isSuccess()) {
                                 logCallback.accept("INFO  [预检] 通过");
@@ -910,8 +925,18 @@ public class DeployExecutionService {
                                 }
                                 DeployResult r = new DeployResult();
                                 if (missing == 0) {
-                                    logCallback.accept("INFO  [预检] 通过");
-                                    r.markSuccess();
+                                    // Note 审计：同上，勾选了「更新版本记录」才扫
+                                    String conflictPkg = pluginConfig.isUpdateNote()
+                                            ? auditNoteConflicts(pluginConfig,
+                                                    ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback)
+                                            : null;
+                                    if (conflictPkg != null) {
+                                        logCallback.accept("INFO  [预检] 未通过：note 文件冲突 - " + conflictPkg);
+                                        r.addError("note-audit", conflictPkg, "note 文件冲突");
+                                    } else {
+                                        logCallback.accept("INFO  [预检] 通过");
+                                        r.markSuccess();
+                                    }
                                 } else {
                                     String reason = missing + "/" + embedTargets0.size() + " 个 WAR 不存在";
                                     logCallback.accept("INFO  [预检] 未通过：" + reason);
@@ -941,10 +966,15 @@ public class DeployExecutionService {
                     // 登记本次任务总目标数（UI 弹"如何收尾"对话框时展示 N/M 用）
                     currentTotalTargets = allTargets.size();
 
-                    logCallback.accept("INFO  [部署] 部署开始，目标包 " + allTargets.size() + " 个"
-                            + (mainTargets.size() > 1 ? "，其中 " + mainTargets.size() + " 个同名主目标" : ""));
-                    for (FtpTargetSelection t : allTargets) {
-                        logCallback.accept("INFO  [部署] 目标 " + t.getRelativePath());
+                    logCallback.accept("INFO  [部署] 开始（共 " + allTargets.size() + " 个目标"
+                            + (mainTargets.size() > 1 ? "，其中 " + mainTargets.size() + " 个同名主目标" : "")
+                            + "）");
+                    // 单目标时不再逐个列出（后续准备/上传阶段会带路径）；多目标时列出有助于全局确认
+                    if (allTargets.size() > 1) {
+                        for (FtpTargetSelection t : allTargets) {
+                            logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
+                                    + "          → " + t.getRelativePath());
+                        }
                     }
 
                     // ── Phase 0.5: 预构建每个主目标对应的本地上传文件 ──
@@ -959,7 +989,8 @@ public class DeployExecutionService {
                     java.util.Map<FtpTargetSelection, Path> preparedPerMain = new java.util.LinkedHashMap<>();
                     if (!mainTargets.isEmpty()) {
                         long prepStart = System.currentTimeMillis();
-                        logCallback.accept("INFO  [准备] 准备开始，主目标 " + mainTargets.size() + " 个");
+                        // "主目标"是内部术语，对用户透出为"待预构建产物"更直观（jar 类目标在此预构建，war 嵌入目标走 [嵌入] 阶段）
+                        logCallback.accept("INFO  [准备] 开始（预构建 " + mainTargets.size() + " 个产物）");
                         for (FtpTargetSelection mt : mainTargets) {
                             try {
                                 Path local = prepareLocalFileForMainTarget(
@@ -969,9 +1000,8 @@ public class DeployExecutionService {
                                     throw new java.io.IOException("产物为空或不存在");
                                 }
                                 preparedPerMain.put(mt, local);
-                                logCallback.accept("INFO  [准备] " + mt.getRelativePath()
-                                        + " 完成，产物 " + local.getFileName()
-                                        + "，大小 " + formatSize(Files.size(local)));
+                                // 此处不再单独打"xxx 完成"：暂存包阶段已经输出过 [暂存包] 应用补丁完成 (大小)，
+                                // 再打"[准备] xxx 完成，产物 __staging_..."属于内部产物名 + 大小两次重复
                             } catch (Exception ex) {
                                 logCallback.accept("ERROR [准备] " + mt.getRelativePath()
                                         + " 产物构建失败：" + ex.getMessage());
@@ -980,8 +1010,8 @@ public class DeployExecutionService {
                                 return;
                             }
                         }
-                        logCallback.accept("INFO  [准备] 准备完成，阶段耗时 "
-                                + formatElapsed(System.currentTimeMillis() - prepStart));
+                        logCallback.accept("INFO  [准备] 完成（耗时 "
+                                + formatElapsed(System.currentTimeMillis() - prepStart) + "）");
                     }
 
                     // ── Phase 1: 备份（可选）──
@@ -1013,17 +1043,17 @@ public class DeployExecutionService {
                                     == com.flux.deploy.plugin.model.BackupConflictStrategy.NEW_DIR
                                     ? "，使用新增目录" : "";
                             long bkStart = System.currentTimeMillis();
-                            logCallback.accept("INFO  [备份] 备份开始，目标 " + allTargets.size()
-                                    + " 个" + dirSuffix);
+                            logCallback.accept("INFO  [备份] 开始（共 " + allTargets.size()
+                                    + " 个目标" + dirSuffix + "）");
                             try {
                                 // 备份并发度写死为 FTP_PARALLELISM（=3）。详见常量注释。
                                 backupDir = preBackupAll(pluginConfig, allTargets,
                                         FTP_PARALLELISM,
                                         userConfig.getBackupMaxRetries(),
                                         ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
-                                logCallback.accept("INFO  [备份] 备份完成，成功 " + allTargets.size()
-                                        + " 个，阶段耗时 "
-                                        + formatElapsed(System.currentTimeMillis() - bkStart));
+                                logCallback.accept("INFO  [备份] 完成（成功 " + allTargets.size()
+                                        + " / " + allTargets.size() + "，耗时 "
+                                        + formatElapsed(System.currentTimeMillis() - bkStart) + "）");
                             } catch (Exception e) {
                                 logCallback.accept("ERROR [备份] 备份失败：" + e.getMessage());
                                 logFailureSummary(logCallback, "备份失败，未执行后续步骤");
@@ -1183,94 +1213,18 @@ public class DeployExecutionService {
                         return; // localOnly 模式到此结束
                     }
 
-                    // ── Stage 0 (IDE)：弹窗确认残留锁处理 ──
-                    // 在 Phase 2 加锁之前先排查残留锁；若存在，让用户在 IDE 弹窗中勾选要清理的锁。
-                    // 用户取消或仍有残留 → 中止部署；用户清理完成 → 后续每个 targetConfig 设
-                    // EXTERNAL_RESOLVED，使核心 pipeline 内部 Stage 0 直接跳过（与 IDE 已处理一致）。
-                    java.util.List<ResidualLockDiagnosis> stage0All = new java.util.ArrayList<>();
-                    java.util.List<String[]> stage0Targets = new java.util.ArrayList<>();
-                    for (FtpTargetSelection t : allTargets) {
-                        String rp = t.getRemoteDir() + t.getRelativePath();
-                        int lastSlash = rp.lastIndexOf('/');
-                        String dir = lastSlash > 0 ? rp.substring(0, lastSlash + 1) : t.getRemoteDir();
-                        if (!dir.endsWith("/")) dir = dir + "/";
-                        stage0Targets.add(new String[]{dir, t.getTargetName()});
-                    }
-                    if (!stage0Targets.isEmpty()) {
-                        try (FtpSession s0 = new FtpSession(ftpHost, ftpPort)) {
-                            s0.connect(ftpUsername, ftpPassword);
-                            FtpOperations s0Ops = new FtpOperations(s0);
-                            FtpLock s0Lock = new FtpLock(s0Ops);
-                            ResidualLockResolver resolver = new ResidualLockResolver(
-                                    ResidualLockResolver.wrap(s0Ops, s0Lock), pluginConfig.getOperator());
-                            for (String[] t : stage0Targets) {
-                                stage0All.addAll(resolver.diagnose(t[0], t[1]));
-                            }
-                            if (!stage0All.isEmpty()) {
-                                java.util.List<ResidualLockDiagnosis> finalAll = stage0All;
-                                boolean[] proceed = {false};
-                                java.util.List<ResidualLockDiagnosis> selected = new java.util.ArrayList<>();
-                                try {
-                                    SwingUtilities.invokeAndWait(() -> {
-                                        ResidualLockResolveDialog dialog =
-                                                new ResidualLockResolveDialog(project, finalAll);
-                                        if (dialog.showAndGet()) {
-                                            selected.addAll(dialog.getSelected());
-                                            proceed[0] = true;
-                                        }
-                                    });
-                                } catch (Exception swingEx) {
-                                    logCallback.accept("INFO  [加锁] 对话框异常: " + swingEx.getMessage());
-                                    logFailureSummary(logCallback, "Stage 0 对话框异常");
-                                    onComplete.accept(null);
-                                    return;
-                                }
-                                if (!proceed[0]) {
-                                    logCallback.accept("INFO  [加锁] 用户取消");
-                                    logFailureSummary(logCallback, "用户取消 Stage 0 残留锁处理");
-                                    onComplete.accept(null);
-                                    return;
-                                }
-                                for (ResidualLockDiagnosis d : selected) {
-                                    try {
-                                        resolver.apply(d);
-                                        logCallback.accept("INFO  [加锁] 已清理: " + d.getLockFileName());
-                                    } catch (java.io.IOException ie) {
-                                        logCallback.accept("INFO  [加锁] 清理失败: " + ie.getMessage());
-                                        logFailureSummary(logCallback, "Stage 0 清理失败: " + ie.getMessage());
-                                        onComplete.accept(null);
-                                        return;
-                                    }
-                                }
-                                // 复检：仍有未处理的残留锁则中止
-                                boolean stillHasResidual = false;
-                                for (String[] t : stage0Targets) {
-                                    if (!resolver.diagnose(t[0], t[1]).isEmpty()) {
-                                        stillHasResidual = true;
-                                        break;
-                                    }
-                                }
-                                if (stillHasResidual) {
-                                    logCallback.accept("INFO  [加锁] 仍有未处理的残留锁，部署中止");
-                                    logFailureSummary(logCallback, "Stage 0 仍有未处理的残留锁");
-                                    onComplete.accept(null);
-                                    return;
-                                }
-                            }
-                        } catch (java.io.IOException ftpEx) {
-                            logCallback.accept("INFO  [加锁] FTP 错误: " + ftpEx.getMessage());
-                            logFailureSummary(logCallback, "Stage 0 FTP 错误: " + ftpEx.getMessage());
-                            onComplete.accept(null);
-                            return;
-                        }
-                    }
+                    // ── Stage 0 残留锁处理已前移到「确认执行」之前 ──
+                    // 残留锁的扫描 + 用户勾选清理已前移到 UI 层、部署确认对话框之前完成
+                    // （见 DeployToolWindowPanel#resolveResidualLocksAndProceed），使用户点完
+                    // 「确认执行」后只剩纯执行步骤，不再被残留锁弹窗打断。后续每个 targetConfig 仍设
+                    // EXTERNAL_RESOLVED，使核心 pipeline 内部 Stage 0 直接跳过（与 UI 已处理一致）。
 
                     // ── Phase 2: 加锁 ──
                     // 多目标时打 header + summary，单目标退化为单行 [加锁] X 已加锁，避免日志噪音
                     boolean multiTargets = allTargets.size() > 1;
                     long lockStart = System.currentTimeMillis();
                     if (multiTargets) {
-                        logCallback.accept("INFO  [加锁] 加锁开始");
+                        logCallback.accept("INFO  [加锁] 开始");
                     }
                     List<String[]> lockedPackages = new ArrayList<>();
                     try {
@@ -1278,11 +1232,11 @@ public class DeployExecutionService {
                                 ftpHost, ftpPort, ftpUsername, ftpPassword,
                                 logCallback, lockedPackages);
                         if (multiTargets) {
-                            logCallback.accept("INFO  [加锁] 加锁完成，阶段耗时 "
-                                    + formatElapsed(System.currentTimeMillis() - lockStart));
+                            logCallback.accept("INFO  [加锁] 完成（耗时 "
+                                    + formatElapsed(System.currentTimeMillis() - lockStart) + "）");
                         }
                     } catch (Exception e) {
-                        logCallback.accept("ERROR [加锁] 加锁失败：" + e.getMessage());
+                        logCallback.accept("ERROR [加锁] 失败：" + e.getMessage());
                         // 关键：先从备份恢复文件，再删锁文件
                         if (backupDir != null && !updatedPackages.isEmpty()) {
                             rollbackAll(backupDir, updatedPackages,
@@ -1305,12 +1259,15 @@ public class DeployExecutionService {
                             mi++;
                             FtpTargetSelection mt = entry.getKey();
                             Path localForThisTarget = entry.getValue();
-                            logCallback.accept("INFO  [上传] " + mi + "/" + preparedPerMain.size()
-                                    + " 主目标 " + mt.getRelativePath() + "，模式 " + tag);
+                            String sizeText;
                             try {
-                                logCallback.accept("INFO  [上传] 源文件 " + localForThisTarget
-                                        + "，大小 " + formatSize(Files.size(localForThisTarget)));
-                            } catch (Exception ignored) {}
+                                sizeText = formatSize(Files.size(localForThisTarget));
+                            } catch (Exception ex) {
+                                sizeText = "?";
+                            }
+                            logCallback.accept("INFO  [上传] " + mi + "/" + preparedPerMain.size()
+                                    + " " + mt.getRelativePath()
+                                    + " (" + sizeText + "，" + tag + ")");
 
                             DeployConfig targetConfig = buildDeployConfig(
                                     pluginConfig, ftpHost, ftpPort, ftpUsername, ftpPassword, null);
@@ -1344,7 +1301,7 @@ public class DeployExecutionService {
                                 onComplete.accept(thisResult);
                                 return;
                             }
-                            logCallback.accept("INFO  [上传] " + mt.getRelativePath() + " 上传成功");
+                            // 不再单独打"xxx 上传成功"：[校验] SHA256 一致 + [解锁] xxx 已是成功路径的充分标志
                             // 登记到实时成功列表（供 UI 弹"如何收尾"对话框展示）
                             recordSucceededUpload(mt);
                             result = thisResult;
@@ -1364,7 +1321,7 @@ public class DeployExecutionService {
 
                     long embedStart = System.currentTimeMillis();
                     if (hasEmbedTargets) {
-                        logCallback.accept("INFO  [嵌入] 嵌入开始，目标 " + embedTargets.size() + " 个");
+                        logCallback.accept("INFO  [嵌入] 开始（共 " + embedTargets.size() + " 个目标）");
 
                         String originalArtifact = pluginConfig.getArtifactFileName();
 
@@ -1569,8 +1526,9 @@ public class DeployExecutionService {
 
                     // 嵌入阶段结束日志（仅在确实进入嵌入阶段时打印）
                     if (hasEmbedTargets) {
-                        logCallback.accept("INFO  [嵌入] 嵌入完成，成功 " + embedSuccess + " 个，阶段耗时 "
-                                + formatElapsed(System.currentTimeMillis() - embedStart));
+                        logCallback.accept("INFO  [嵌入] 完成（成功 " + embedSuccess + " / "
+                                + embedTargets.size() + "，耗时 "
+                                + formatElapsed(System.currentTimeMillis() - embedStart) + "）");
                     }
 
                     // ── 解锁 ──
@@ -1578,13 +1536,13 @@ public class DeployExecutionService {
                     boolean multiUnlock = lockedPackages.size() > 1;
                     long unlockStart = System.currentTimeMillis();
                     if (multiUnlock) {
-                        logCallback.accept("INFO  [解锁] 解锁开始");
+                        logCallback.accept("INFO  [解锁] 开始");
                     }
                     java.util.Set<String> restoreFailedLockNames = preUnlockAll(
                             lockedPackages, ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
                     if (multiUnlock) {
-                        logCallback.accept("INFO  [解锁] 解锁完成，阶段耗时 "
-                                + formatElapsed(System.currentTimeMillis() - unlockStart));
+                        logCallback.accept("INFO  [解锁] 完成（耗时 "
+                                + formatElapsed(System.currentTimeMillis() - unlockStart) + "）");
                     }
                     // restoreLock 失败 → 远端只有孤悬锁文件、没有原 WAR：把对应 target 的 outcome
                     // 升级为 ROLLBACK_FAILED，让总结里能区分"⚠ 已恢复" / "❌ 需人工干预"。
@@ -1601,17 +1559,18 @@ public class DeployExecutionService {
                             && collectFailedRelativePaths(embedOutcomes).size() == embedOutcomes.size();
                     if (pluginConfig.isUpdateNote() && !allEmbedFailed) {
                         long noteStart = System.currentTimeMillis();
-                        logCallback.accept("INFO  [说明] 说明更新开始");
+                        logCallback.accept("INFO  [说明] 开始");
                         // ISOLATED 部分失败时，跳过失败包的 note 追加：失败包远端已被
                         // preUnlockAll 的 restoreLock 还原为原 WAR，写 note 会产生"取包/传包"幻象。
                         java.util.Set<String> skippedNoteKeys = collectFailedRelativePaths(embedOutcomes);
                         try {
                             updateNoteForAll(pluginConfig, allTargets, skippedNoteKeys,
+                                    deployStartMs, currentUploadFinishTimes,
                                     ftpHost, ftpPort, ftpUsername, ftpPassword, logCallback);
-                            logCallback.accept("INFO  [说明] 说明更新完成，阶段耗时 "
-                                    + formatElapsed(System.currentTimeMillis() - noteStart));
+                            logCallback.accept("INFO  [说明] 完成（耗时 "
+                                    + formatElapsed(System.currentTimeMillis() - noteStart) + "）");
                         } catch (Exception e) {
-                            logCallback.accept("WARN  [说明] 说明更新失败：" + e.getMessage() + "（不影响已部署的包）");
+                            logCallback.accept("WARN  [说明] 更新失败：" + e.getMessage() + "（不影响已部署的包）");
                         }
                     }
 
@@ -1657,14 +1616,12 @@ public class DeployExecutionService {
                     boolean allFailed = partialSuccess && actuallySucceeded == 0;
                     if (allFailed) {
                         logCallback.accept("ERROR [部署] 全部失败，成功 0 / " + totalEmbed
-                                + "，总耗时 " + formatElapsed(deployElapsedMs));
+                                + "（耗时 " + formatElapsed(deployElapsedMs) + "）");
                     } else if (partialSuccess) {
                         logCallback.accept("WARN  [部署] 部分成功，成功 " + actuallySucceeded + " / "
-                                + totalEmbed + "，总耗时 " + formatElapsed(deployElapsedMs));
-                    } else {
-                        logCallback.accept("INFO  [部署] 部署完成，成功 " + updatedPackages.size()
-                                + " 个，总耗时 " + formatElapsed(deployElapsedMs));
+                                + totalEmbed + "（耗时 " + formatElapsed(deployElapsedMs) + "）");
                     }
+                    // 完全成功路径：不再单独打"[部署] 部署完成..."，避免与下方框体 + 列表重复
                     logCallback.accept("\n╔══════════════════════════════╗");
                     if (allFailed) {
                         logCallback.accept("║      全部失败 0/" + totalEmbed
@@ -1762,7 +1719,8 @@ public class DeployExecutionService {
                         }
                     } else {
                         logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
-                                + "          已更新 " + updatedPackages.size() + " 个包"
+                                + "          已更新 " + updatedPackages.size() + " 个包（耗时 "
+                                + formatElapsed(deployElapsedMs) + "）"
                                 + (retrySuccessRemotes.isEmpty() ? "："
                                         : "（含 " + retrySuccessRemotes.size() + " 个重试后成功）："));
                         // 远程路径以 RAW_LINE_MARK 开头分行输出；工具窗口会剥标记并跳过时间戳，列表对齐干净。
@@ -1784,8 +1742,7 @@ public class DeployExecutionService {
                         logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
                                 + "          备份：未执行（用户选择跳过）");
                     }
-                    logCallback.accept(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
-                            + "          总耗时：" + formatElapsed(deployElapsedMs));
+                    // 总耗时已合并到"已更新 N 个包（耗时 X）"行，不再单独打末尾
 
                     // 保存回滚信息供手动回滚使用（仅在有备份时）
                     if (backupDir != null) {
@@ -1908,13 +1865,13 @@ public class DeployExecutionService {
                 logCallback.accept("[嵌入] 复用备份阶段本地副本: " + warName
                         + " (" + Files.size(downloadedWar) / 1024 / 1024 + " MB)");
             } else {
-                logCallback.accept("[嵌入] 下载远程 WAR: " + warName);
                 try (FtpSession session = new FtpSession(host, port)) {
                     session.connect(username, password);
                     FtpOperations ops = new FtpOperations(session);
                     String lockPath = lockRemoteDir + lockName;
                     ops.download(lockPath, downloadedWar);
-                    logCallback.accept("[嵌入] 下载完成: " + Files.size(downloadedWar) / 1024 / 1024 + " MB");
+                    logCallback.accept("[嵌入] 下载远程 WAR：" + warName
+                            + "（" + Files.size(downloadedWar) / 1024 / 1024 + " MB）");
                 }
             }
 
@@ -1989,7 +1946,7 @@ public class DeployExecutionService {
             DeployResult embedDeployResult = embedPipeline.execute();
 
             if (embedDeployResult.isSuccess()) {
-                logCallback.accept("[嵌入] " + warName + " 更新成功");
+                // 不再单独打 "xxx 更新成功"：[校验] SHA256 一致 + [解锁] xxx 已是充分标志
                 // 输出本 war 包内变更明细（操作人员可立即对账）
                 logPerWarPatchManifest(logCallback, warName, perWarManifest);
             } else {
@@ -2171,15 +2128,16 @@ public class DeployExecutionService {
                                         .append(" (").append(Files.size(downloadedWar) / 1024 / 1024)
                                         .append(" MB)\n");
                             } else {
-                                log.append("[嵌入] 下载远程 WAR: ").append(target.getTargetName()).append('\n');
                                 try (FtpSession session = new FtpSession(host, port)) {
                                     session.connect(username, password);
                                     FtpOperations ops = new FtpOperations(session);
                                     String lockPath = lockInfo[0] + lockInfo[1];
                                     ops.download(lockPath, downloadedWar);
-                                    log.append("[嵌入] 下载完成: ")
+                                    log.append("[嵌入] 下载远程 WAR：")
+                                            .append(target.getTargetName())
+                                            .append("（")
                                             .append(Files.size(downloadedWar) / 1024 / 1024)
-                                            .append(" MB\n");
+                                            .append(" MB）\n");
                                 }
                             }
                             return new EmbedDownload(tempDir, downloadedWar);
@@ -2285,7 +2243,7 @@ public class DeployExecutionService {
                             if (!embedDeployResult.isSuccess()) {
                                 throw new Exception(target.getTargetName() + " 部署流程失败");
                             }
-                            log.append("INFO  [嵌入] ").append(target.getTargetName()).append(" 更新成功\n");
+                            // 不再单独打 "xxx 更新成功"：[校验] SHA256 一致 + 包内变更明细 已是充分标志
                             // 输出本 war 包内变更明细（操作人员可立即对账）
                             // 走 PipelineExecutor 提供的 log buffer，跟随该 target 流水线统一刷出
                             appendPerWarPatchManifest(log, target.getTargetName(), e.manifest());
@@ -3116,8 +3074,6 @@ public class DeployExecutionService {
         String backupFilePath = backupDir + subDir + target.getTargetName();
         String displayName = (subDir.isEmpty() ? "" : subDir) + target.getTargetName();
 
-        logCallback.accept("[备份] " + displayName + " ...");
-
         // 备份阶段下载到本地的 temp 文件不再立刻删除：登记到 backupLocalCopies 后由
         // 嵌入阶段直接复用，跳过一次相同字节的远端下载（"1 下 + 2 上"优化）。
         // 本方法只在异常路径下负责删 temp；成功路径上 temp 的所有权移交给入口 finally 统一清理。
@@ -3151,7 +3107,7 @@ public class DeployExecutionService {
             handedOff = true;
 
             logCallback.accept("[备份] " + displayName
-                    + " -> " + backupFilePath + " (" + formatSize(backupSize) + ")");
+                    + " (" + formatSize(backupSize) + ")");
         } finally {
             // 异常路径或未登记成功 → 删除 temp，避免泄漏
             if (!handedOff) {
@@ -3251,20 +3207,33 @@ public class DeployExecutionService {
      * 实际产物没有变更；如果仍给它们追加"取包/传包"会与远端事实不一致，运维对账抓瞎。
      * 通过 {@code skippedRelativePaths} 把失败包的 relativePath 排除掉，note 只追加给真实成功的目标。</p>
      *
+     * <p>时间语义：取包时间 = 本次部署开始执行的实际时刻（{@code deployStartMs}，所有包共用）；
+     * 传包时间 = 该包自己上传/嵌入完成的实际时刻（{@code uploadFinishTimes} 按 remoteDir+relativePath 查），
+     * 多包各记各的、不串味。极端情况下某包查不到完成时刻时，兜底用写记录当下的实际时刻。</p>
+     *
      * @param skippedRelativePaths 不写 note 的目标 relativePath 集合（可为 null/空，表示全量写入）
+     * @param deployStartMs        本次部署开始执行的时刻（epoch millis），用作所有包的取包时间
+     * @param uploadFinishTimes    各目标上传/嵌入完成的实际时刻，按 remoteDir+relativePath 索引；可为 null
      * @author xumanyi
-     * @date 2026-05-08
+     * @date 2026-05-28
      */
     private static void updateNoteForAll(
             PluginDeployConfig pluginConfig,
             List<FtpTargetSelection> allTargets,
             java.util.Set<String> skippedRelativePaths,
+            long deployStartMs,
+            java.util.Map<String, java.time.LocalDateTime> uploadFinishTimes,
             String host, int port, String user, String pass,
             Consumer<String> logCallback) throws Exception {
 
         java.time.format.DateTimeFormatter timeFmt =
                 java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd HH:mm");
-        String now = java.time.LocalDateTime.now().format(timeFmt);
+        // 取包时间：全局——本次部署开始执行的实际时刻，所有包共用
+        String fetchTime = java.time.LocalDateTime.ofInstant(
+                java.time.Instant.ofEpochMilli(deployStartMs),
+                java.time.ZoneId.systemDefault()).format(timeFmt);
+        // 传包时间兜底：某目标未记录完成时刻时，用写记录当下的实际时刻（绝不用占位/假时间）
+        String noteNow = java.time.LocalDateTime.now().format(timeFmt);
 
         // 每个 note 文件用独立短连接（exists/download/upload 三次操作绑在一个会话里），
         // 避免共用一个长会话在多包遍历期间被服务端 421。
@@ -3288,9 +3257,7 @@ public class DeployExecutionService {
             // NoteFileNames.isNoteCandidate 谓词筛选候选 → pickPrimary 选目标 → 原地追加。
             // 不做合并/迁移/删除，已有文件名一律保留。
             final String canonicalNoteName = NoteFileNames.canonicalName(target.getTargetName());
-            final String canonicalNotePath = packageDir + canonicalNoteName;
             final String packageNameForMatch = target.getTargetName();
-            final String projectRootForSearch = target.getRemoteDir();
 
             Path tempNote = Files.createTempFile("note-", ".txt");
             try {
@@ -3300,18 +3267,25 @@ public class DeployExecutionService {
                 String operator = nullToEmpty(pluginConfig.getOperator());
                 String taskId = nullToEmpty(pluginConfig.getTaskId());
                 String customerId = nullToEmpty(pluginConfig.getCustomerId());
-                final String fetchRecord = "取包时间：" + now
+                // 传包时间：该包自己上传/嵌入完成的实际时刻（key 与 recordSucceededUpload 一致）
+                String targetKey = remoteDir + relPath;
+                java.time.LocalDateTime finishTime =
+                        uploadFinishTimes == null ? null : uploadFinishTimes.get(targetKey);
+                String uploadTime = finishTime != null ? finishTime.format(timeFmt) : noteNow;
+                final String fetchRecord = "取包时间：" + fetchTime
                         + " 开发：" + operator
                         + " 任务：" + taskId
                         + " 客服：" + customerId
                         + " 包名称：" + target.getTargetName();
-                final String uploadRecord = "传包时间：" + now
+                final String uploadRecord = "传包时间：" + uploadTime
                         + " 开发：" + operator
                         + " 任务：" + taskId
                         + " 客服：" + customerId
                         + " 包名称：" + target.getTargetName();
 
                 final String[] resolvedName = new String[]{canonicalNoteName};
+                // 把上传字节数从 lambda 内带出，供合并后的"已追加 X 条 (Y B)"日志使用
+                final long[] expectedBytesHolder = new long[1];
                 runFreshFtpSession(host, port, user, pass, (s, ops) -> {
                     // 1. 扫描包所在目录，按 NoteFileNames.isNoteCandidate 谓词筛选所有候选
                     java.util.List<FTPFile> dirListing = ops.listFiles(
@@ -3326,34 +3300,16 @@ public class DeployExecutionService {
                                 fname, fpath, downloadNoteString(ops, fpath)));
                     }
 
-                    // 2. 选目标文件：优先 canonical 精确匹配，否则字节最多者；
-                    //    都没有就按目录里别的包 .txt 的命名风格推一个新文件名。
+                    // 2. 选目标文件：优先 canonical 精确匹配，否则字节最多者；都没有就用 canonical 新建。
                     RemoteNoteEntry primary = pickPrimaryEntry(candidates, canonicalNoteName);
                     String writeName;
                     String writePath;
                     String baseContent;
                     if (primary == null) {
-                        java.util.List<String> dirFileNames = new java.util.ArrayList<>();
-                        for (FTPFile e : dirListing) {
-                            if (e != null && e.isFile()) dirFileNames.add(e.getName());
-                        }
-                        String inferred = NoteFileNames.inferNoteFilenameForNewPackage(
-                                packageNameForMatch, dirFileNames);
-                        // 当前目录推不出 → 向上最多 3 层（且不超过 remoteDir）找模板
-                        if (inferred == null) {
-                            inferred = findTemplateUpward(ops, packageDir,
-                                    projectRootForSearch, packageNameForMatch, logCallback);
-                        }
-                        writeName = (inferred != null) ? inferred : canonicalNoteName;
+                        writeName = canonicalNoteName;
                         writePath = packageDir + writeName;
                         baseContent = "";
-                        if (inferred != null && !inferred.equals(canonicalNoteName)) {
-                            logCallback.accept("[说明] 目录里无当前包 note，参考已有 .txt 命名风格新建: "
-                                    + writeName);
-                        } else if (inferred == null) {
-                            logCallback.accept("[说明] 当前目录及向上 3 层都未找到模板，使用默认命名: "
-                                    + canonicalNoteName);
-                        }
+                        logCallback.accept("[说明] 目录里无当前包 note，使用默认命名: " + writeName);
                     } else {
                         writeName = primary.name;
                         writePath = primary.path;
@@ -3380,13 +3336,12 @@ public class DeployExecutionService {
                     // 4. 上传到 writePath（原地覆盖，或新建 canonical）
                     Files.writeString(tempNote, finalContent,
                             java.nio.charset.StandardCharsets.UTF_8);
-                    long expectedBytes = Files.size(tempNote);
+                    expectedBytesHolder[0] = Files.size(tempNote);
                     ops.upload(tempNote, writePath);
-                    logCallback.accept("[说明] 已上传 " + writeName
-                            + " (" + expectedBytes + "B)");
                 });
 
-                logCallback.accept("[说明] " + resolvedName[0] + " 已追加 2 条记录");
+                logCallback.accept("[说明] " + resolvedName[0] + " 已追加 2 条记录 ("
+                        + expectedBytesHolder[0] + " B)");
             } finally {
                 Files.deleteIfExists(tempNote);
             }
@@ -3394,100 +3349,110 @@ public class DeployExecutionService {
     }
 
     /**
-     * 在当前目录推不出模板时，向上最多 3 层目录搜模板，逐层扫"该层目录直接文件 + 该层每个子目录"。
-     * 不超过 {@code projectRoot}（target.remoteDir，FTP 上的项目根）。命中即返回，未命中返回 null。
-     *
-     * @param ops              当前 FTP 会话
-     * @param packageDir       包所在目录（带末尾 /）
-     * @param projectRoot      项目根（带末尾 /），向上搜的天花板
-     * @param currentPkgFullName 当前包全名（用于 stem 排除）
-     * @param logCallback      日志回调
-     * @return 推断出的新文件名；未命中返回 null
-     * @throws java.io.IOException FTP list 失败
-     * @author xumanyi
-     * @date 2026-05-12
-     */
-    private static String findTemplateUpward(
-            FtpOperations ops,
-            String packageDir,
-            String projectRoot,
-            String currentPkgFullName,
-            Consumer<String> logCallback) throws java.io.IOException {
-        String dir = stripTrailingSlashForList(packageDir);
-        String ceiling = stripTrailingSlashForList(projectRoot);
-        for (int level = 1; level <= 3; level++) {
-            int slash = dir.lastIndexOf('/');
-            if (slash < 0) break;
-            String parent = dir.substring(0, slash);
-            // 不超过项目根
-            if (parent.length() < ceiling.length()) break;
-            if (!parent.equals(ceiling)
-                    && (!parent.startsWith(ceiling)
-                            || parent.charAt(ceiling.length()) != '/')) break;
-            logCallback.accept("[说明] 当前层无模板，向上扫第 " + level + " 层: " + parent);
-            java.util.List<FTPFile> listing = ops.listFiles(parent);
-            // 先扫该层目录下直接的文件
-            java.util.List<String> directFiles = new java.util.ArrayList<>();
-            for (FTPFile f : listing) {
-                if (f != null && f.isFile()) directFiles.add(f.getName());
-            }
-            String inferred = NoteFileNames.inferNoteFilenameForNewPackage(
-                    currentPkgFullName, directFiles);
-            if (inferred != null) {
-                logCallback.accept("[说明] 在 " + parent + " 找到模板");
-                return inferred;
-            }
-            // 再扫该层每个子目录（不递归更深）
-            for (FTPFile sub : listing) {
-                if (sub == null || !sub.isDirectory()) continue;
-                String subName = sub.getName();
-                if (".".equals(subName) || "..".equals(subName)) continue;
-                String subPath = parent + "/" + subName;
-                if (subPath.equals(dir)) continue; // 已经从这扫出来过
-                java.util.List<FTPFile> subListing = ops.listFiles(subPath);
-                java.util.List<String> subFiles = new java.util.ArrayList<>();
-                for (FTPFile f : subListing) {
-                    if (f != null && f.isFile()) subFiles.add(f.getName());
-                }
-                inferred = NoteFileNames.inferNoteFilenameForNewPackage(
-                        currentPkgFullName, subFiles);
-                if (inferred != null) {
-                    logCallback.accept("[说明] 在 " + subPath + " 找到模板");
-                    return inferred;
-                }
-            }
-            dir = parent;
-            if (parent.equals(ceiling)) break; // 已经扫到项目根，停
-        }
-        return null;
-    }
-
-    /**
-     * 从候选文件里选目标：优先精确匹配 canonical；否则字节最多者；候选为空返回 null。
+     * 从候选文件里选目标：0 个返回 null（调用者新建 canonical）；1 个直接返回；
+     * ≥2 个属于冲突——本应由预检阶段（auditNoteConflicts）拦截并要求用户手动清理；落到此处属异常路径，直接抛错避免误写。
      *
      * @param candidates 命中谓词的所有候选
-     * @param canonicalName canonical 文件名
+     * @param canonicalName canonical 文件名（仅用于异常信息）
      * @return 选中的目标，或 null
+     * @throws IllegalStateException 候选 ≥2 时（应在预检拦截）
      * @author xumanyi
      * @date 2026-05-11
      */
     private static RemoteNoteEntry pickPrimaryEntry(
             java.util.List<RemoteNoteEntry> candidates, String canonicalName) {
         if (candidates.isEmpty()) return null;
+        if (candidates.size() == 1) return candidates.get(0);
+        StringBuilder names = new StringBuilder();
         for (RemoteNoteEntry rn : candidates) {
-            if (rn.name.equals(canonicalName)) return rn;
+            if (names.length() > 0) names.append(", ");
+            names.append(rn.name);
         }
-        RemoteNoteEntry largest = candidates.get(0);
-        for (int i = 1; i < candidates.size(); i++) {
-            RemoteNoteEntry c = candidates.get(i);
-            int cmp = Long.compare(
-                    c.content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
-                    largest.content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
-            if (cmp > 0 || (cmp == 0 && c.name.compareTo(largest.name) < 0)) {
-                largest = c;
+        throw new IllegalStateException(
+                "note 候选 ≥2（预检阶段应已拦截，请手动清理后重试），canonical=" + canonicalName + "，候选=[" + names + "]");
+    }
+
+    /**
+     * 预检 note 审计：扫描每个目标包所在目录的 .txt 候选，一旦某个包命中 ≥2 个就弹窗提示并返回该包名。
+     *
+     * <p>调用条件：仅在用户勾选了「更新版本记录」（{@link PluginDeployConfig#isUpdateNote()}）时调用；
+     * 由 {@code dryRun} 分支在 {@link DeployPipeline#execute()} 通过后触发。</p>
+     *
+     * <p>纯只读操作（{@link FtpOperations#listFiles}）。单个目标 listFiles 失败时记 WARN 日志、跳过该目标，
+     * 不阻断整体（FTP 真不通会被前序 PreCheckGate 拦截）。</p>
+     *
+     * @return 第一个冲突的包名（已弹窗）；无冲突或全部扫描失败返回 null
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    private static String auditNoteConflicts(
+            PluginDeployConfig pluginConfig,
+            String ftpHost, int ftpPort, String ftpUsername, String ftpPassword,
+            Consumer<String> logCallback) {
+        java.util.List<FtpTargetSelection> toCheck = new ArrayList<>();
+        if (pluginConfig.getMainTargets() != null) toCheck.addAll(pluginConfig.getMainTargets());
+        if (pluginConfig.getEmbedTargets() != null) toCheck.addAll(pluginConfig.getEmbedTargets());
+        if (toCheck.isEmpty()) return null;
+
+        try (FtpSession session = new FtpSession(ftpHost, ftpPort)) {
+            session.connect(ftpUsername, ftpPassword);
+            FtpOperations ops = new FtpOperations(session);
+            for (FtpTargetSelection target : toCheck) {
+                String remoteDir = target.getRemoteDir();
+                if (remoteDir == null) continue;
+                if (!remoteDir.endsWith("/")) remoteDir = remoteDir + "/";
+                String relPath = target.getRelativePath() == null ? "" : target.getRelativePath();
+                int lastSlash = relPath.lastIndexOf('/');
+                String packageDir = lastSlash > 0
+                        ? remoteDir + relPath.substring(0, lastSlash + 1)
+                        : remoteDir;
+                String pkgName = target.getTargetName();
+
+                java.util.List<FTPFile> listing;
+                try {
+                    listing = ops.listFiles(stripTrailingSlashForList(packageDir));
+                } catch (java.io.IOException e) {
+                    logCallback.accept("WARN  [预检] note 审计跳过 " + pkgName + "：" + e.getMessage());
+                    continue;
+                }
+                java.util.List<String> hits = new ArrayList<>();
+                for (FTPFile f : listing) {
+                    if (f == null || !f.isFile()) continue;
+                    if (NoteFileNames.isNoteCandidate(pkgName, f.getName())) {
+                        hits.add(f.getName());
+                    }
+                }
+                if (hits.size() >= 2) {
+                    logCallback.accept("ERROR [预检] " + pkgName + " 命中 " + hits.size()
+                            + " 个 note 文件，需手动清理: " + String.join(", ", hits));
+                    showNoteConflictDialog(pkgName, hits);
+                    return pkgName;
+                }
             }
+        } catch (Exception e) {
+            logCallback.accept("WARN  [预检] note 审计失败，跳过（不阻断部署）: " + e.getMessage());
         }
-        return largest;
+        return null;
+    }
+
+    /**
+     * 在 EDT 上弹出 note 文件冲突对话框（标准 ErrorDialog，单按钮）。
+     *
+     * @param pkgName 目标包名
+     * @param hits    命中的所有 note 文件名（含扩展）
+     * @author xumanyi
+     * @date 2026-05-26
+     */
+    private static void showNoteConflictDialog(String pkgName, java.util.List<String> hits) {
+        StringBuilder body = new StringBuilder();
+        body.append("目标包 ").append(pkgName).append(" 远端命中多个 note 文件：\n");
+        for (String name : hits) {
+            body.append("\n  • ").append(name);
+        }
+        body.append("\n\n请手动保留其中一个后重试。");
+        final String message = body.toString();
+        ApplicationManager.getApplication().invokeAndWait(
+                () -> Messages.showErrorDialog(message, "Note 文件冲突"));
     }
 
     /**
@@ -3560,7 +3525,7 @@ public class DeployExecutionService {
 
                 String lockName = ftpLock.acquireLock(remoteDir, packageName, operator);
                 lockedPackages.add(new String[]{remoteDir, lockName});
-                logCallback.accept("[加锁] " + packageName + " 已加锁");
+                logCallback.accept("[加锁] " + packageName);
             }
         }
     }
@@ -3610,7 +3575,7 @@ public class DeployExecutionService {
                     if (origExists) {
                         ftpLock.releaseLock(remoteDir, lockName);
                         logCallback.accept("[解锁] " + (origName != null ? origName
-                                : lockName.split("__LOCK__")[0]) + " 已解锁");
+                                : lockName.split("__LOCK__")[0]));
                     } else {
                         // 防止数据丢失：锁文件就是原始内容，rename 回原名
                         attemptedRestore = true;
@@ -3822,7 +3787,7 @@ public class DeployExecutionService {
                         + "/" + subDir + t.getTargetName();
                 boolean exists = ops.exists(backupPath);
                 if (logCallback != null) {
-                    logCallback.accept((exists ? "INFO  [备份] 已存在 " : "INFO  [备份] 不存在 ") + backupPath);
+                    logCallback.accept((exists ? "INFO  [备份] 发现已有备份：" : "INFO  [备份] 无冲突：") + backupPath);
                 }
                 if (exists) {
                     conflicts.add((subDir.isEmpty() ? "" : subDir) + t.getTargetName());
@@ -3830,6 +3795,110 @@ public class DeployExecutionService {
             }
         }
         return conflicts;
+    }
+
+    /**
+     * 计算单个目标包所在目录（用于残留锁扫描）。
+     *
+     * <p>取 {@code remoteDir + relativePath} 的父目录并保证以 {@code /} 结尾。</p>
+     *
+     * @param t 目标包
+     * @return 目标包所在目录（以 / 结尾）
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    private static String lockDirFor(FtpTargetSelection t) {
+        String rp = t.getRemoteDir() + t.getRelativePath();
+        int lastSlash = rp.lastIndexOf('/');
+        String dir = lastSlash > 0 ? rp.substring(0, lastSlash + 1) : t.getRemoteDir();
+        return dir.endsWith("/") ? dir : dir + "/";
+    }
+
+    /**
+     * 诊断所有目标包目录下的残留锁。
+     *
+     * <p>供 UI 层在<b>部署确认对话框之前</b>调用，把残留锁的发现与处理统一前移到确认之前，
+     * 避免用户点「确认执行」后才被残留锁弹窗打断。返回合并后的诊断列表，由 UI 决定是否弹窗清理。</p>
+     *
+     * @param host        FTP 主机
+     * @param port        FTP 端口
+     * @param user        FTP 用户名
+     * @param pass        FTP 密码
+     * @param operator    当前开发（用于判定锁归属）
+     * @param targets     待扫描的目标包（主 + 嵌入）
+     * @param logCallback 日志回调，可为 null
+     * @return 所有目标合并后的残留锁诊断列表；无残留时为空列表
+     * @throws java.io.IOException FTP 连接或扫描失败
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    public static List<ResidualLockDiagnosis> diagnoseResidualLocks(
+            String host, int port, String user, String pass,
+            String operator, List<FtpTargetSelection> targets,
+            Consumer<String> logCallback) throws java.io.IOException {
+        List<ResidualLockDiagnosis> all = new ArrayList<>();
+        if (targets == null || targets.isEmpty()) {
+            return all;
+        }
+        try (FtpSession session = new FtpSession(host, port)) {
+            session.connect(user, pass);
+            FtpOperations ops = new FtpOperations(session);
+            FtpLock lock = new FtpLock(ops);
+            ResidualLockResolver resolver = new ResidualLockResolver(
+                    ResidualLockResolver.wrap(ops, lock), operator);
+            for (FtpTargetSelection t : targets) {
+                all.addAll(resolver.diagnose(lockDirFor(t), t.getTargetName()));
+            }
+        }
+        return all;
+    }
+
+    /**
+     * 应用用户勾选的残留锁清理动作，并复检剩余残留。
+     *
+     * <p>与 {@link #diagnoseResidualLocks} 配套，供 UI 层在确认对话框之前调用：用户在弹窗中
+     * 勾选要清理的诊断后，逐条 apply（删锁 / 恢复原文件名），随后重新扫描所有目标，返回仍存在的残留锁。</p>
+     *
+     * @param host        FTP 主机
+     * @param port        FTP 端口
+     * @param user        FTP 用户名
+     * @param pass        FTP 密码
+     * @param operator    当前开发
+     * @param targets     待复检的目标包（主 + 嵌入）
+     * @param selected    用户勾选要清理的诊断；为 null 视为不清理仅复检
+     * @param logCallback 日志回调，可为 null
+     * @return 清理后仍存在的残留锁；为空表示已清理干净
+     * @throws java.io.IOException FTP 连接失败，或某条清理动作失败
+     * @author xumanyi
+     * @date 2026-05-28
+     */
+    public static List<ResidualLockDiagnosis> applyResidualLockResolution(
+            String host, int port, String user, String pass,
+            String operator, List<FtpTargetSelection> targets,
+            List<ResidualLockDiagnosis> selected,
+            Consumer<String> logCallback) throws java.io.IOException {
+        List<ResidualLockDiagnosis> remaining = new ArrayList<>();
+        try (FtpSession session = new FtpSession(host, port)) {
+            session.connect(user, pass);
+            FtpOperations ops = new FtpOperations(session);
+            FtpLock lock = new FtpLock(ops);
+            ResidualLockResolver resolver = new ResidualLockResolver(
+                    ResidualLockResolver.wrap(ops, lock), operator);
+            if (selected != null) {
+                for (ResidualLockDiagnosis d : selected) {
+                    resolver.apply(d);
+                    if (logCallback != null) {
+                        logCallback.accept("INFO  [残留锁] 已清理: " + d.getLockFileName());
+                    }
+                }
+            }
+            if (targets != null) {
+                for (FtpTargetSelection t : targets) {
+                    remaining.addAll(resolver.diagnose(lockDirFor(t), t.getTargetName()));
+                }
+            }
+        }
+        return remaining;
     }
 
     /**
@@ -4033,8 +4102,8 @@ public class DeployExecutionService {
             logCallback.accept("[嵌入] " + warName + " 包内变更：整包替换内嵌 JAR（FULL 模式）");
             return;
         }
-        logCallback.accept("[嵌入] " + warName + " 包内更新明细 (共 "
-                + manifest.total() + " 项):");
+        logCallback.accept("[嵌入] " + warName + " 变更清单（共 "
+                + manifest.total() + " 项）：");
         for (String e : manifest.getReplaced()) logCallback.accept("    替换 " + e);
         for (String e : manifest.getAdded())    logCallback.accept("    新增 " + e);
         for (String e : manifest.getDeleted())  logCallback.accept("    删除 " + e);
@@ -4057,8 +4126,8 @@ public class DeployExecutionService {
             log.append("[嵌入] ").append(warName).append(" 包内变更：整包替换内嵌 JAR（FULL 模式）\n");
             return;
         }
-        log.append("[嵌入] ").append(warName).append(" 包内更新明细 (共 ")
-                .append(manifest.total()).append(" 项):\n");
+        log.append("[嵌入] ").append(warName).append(" 变更清单（共 ")
+                .append(manifest.total()).append(" 项）：\n");
         for (String e : manifest.getReplaced()) log.append("    替换 ").append(e).append('\n');
         for (String e : manifest.getAdded())    log.append("    新增 ").append(e).append('\n');
         for (String e : manifest.getDeleted())  log.append("    删除 ").append(e).append('\n');

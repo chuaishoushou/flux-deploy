@@ -169,7 +169,7 @@ public final class WarEmbedUtil {
                 message = "异常：" + changed + " 个文件发生变化（预期仅 1 个）";
             } else {
                 verified = true;
-                message = "校验通过：仅目标 JAR 变更，其他 " + unchanged + " 个文件未受影响";
+                message = "校验通过（仅目标 JAR 变更，其余 " + unchanged + " 个文件不变）";
             }
 
             System.out.println("INFO  [嵌入] " + message);

@@ -22,6 +22,9 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 import java.awt.*;
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.List;
 
@@ -201,6 +204,16 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             protected void onNodeStateChanged(CheckedTreeNode node) {
                 super.onNodeStateChanged(node);
                 if (!rebuildingPackageTree) {
+                    // 子节点勾选状态变化后，自底向上同步父级目录的勾选状态：
+                    // 仅当所有叶子都被勾选时目录才勾选，否则取消勾选（避免父节点遗留"部分选中"灰条）。
+                    // 用 rebuildingPackageTree 防 propagateDirChecked 内的 setChecked 触发递归回调。
+                    rebuildingPackageTree = true;
+                    try {
+                        propagateDirChecked(packageTreeRoot);
+                    } finally {
+                        rebuildingPackageTree = false;
+                    }
+                    packageTree.repaint();
                     syncVisibleCheckStateToKeys();
                 }
                 updateSelectionSummary();
@@ -1609,10 +1622,16 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
         deleteBtn.setFocusPainted(false);
         deleteBtn.setToolTipText(isCurrent ? "删除此账号并断开连接" : "删除此账号");
         deleteBtn.addActionListener(e -> {
-            int confirm = JOptionPane.showConfirmDialog(parent,
+            // 删除是不可逆操作：默认按钮落在「否」，避免误回车删账号
+            Object[] delOptions = {
+                    UIManager.getString("OptionPane.yesButtonText"),
+                    UIManager.getString("OptionPane.noButtonText")
+            };
+            int confirm = JOptionPane.showOptionDialog(parent,
                     "确认删除账号 " + acc.getUsername() + "@" + acc.getHost() + "？\n"
                             + (isCurrent ? "当前已连接的账号将被断开。" : ""),
-                    "删除账号", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    "删除账号", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
+                    null, delOptions, delOptions[1]);
             if (confirm != JOptionPane.YES_OPTION) return;
             com.flux.deploy.plugin.util.CredentialBridge.deleteCredential(
                     acc.getHost(), acc.getPort(), acc.getUsername());
@@ -2004,7 +2023,7 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
      * 让下游 {@code remoteDir + relativePath} 能拼出正确的 FTP 绝对路径。
      *
      * <p>若 prefix 为空或 packages 为空，原样返回（零拷贝）。
-     * subDirectory / packageName / type / size / fromBackup 字段全部保留。</p>
+     * subDirectory / packageName / type / size / fromBackup / modifiedTime 字段全部保留。</p>
      *
      * @param packages 扫描结果（relativePath 当前是相对 scan 根的）
      * @param prefix   要补的前缀（{@link #buildSubdirPrefix()} 的产物）
@@ -2025,7 +2044,8 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                     pkg.getType(),
                     prefix + pkg.getRelativePath(),
                     pkg.getSize(),
-                    pkg.isFromBackup()));
+                    pkg.isFromBackup(),
+                    pkg.getModifiedTime()));
         }
         return adjusted;
     }
@@ -2291,18 +2311,6 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
             if (value instanceof CheckedTreeNode node) {
                 Object userObj = node.getUserObject();
                 if (userObj instanceof PackageNodeData data) {
-                    String typeTag = " [" + data.info.getType() + "]";
-                    // 体积按数量级自适应：<1MB 显示 KB，否则显示 MB（保留 1 位小数），避免百 KB 级 jar 被截断成 "0 MB"
-                    long bytes = data.info.getSize();
-                    String sizeStr;
-                    if (bytes <= 0) {
-                        sizeStr = "";
-                    } else if (bytes < 1024 * 1024) {
-                        sizeStr = String.format(" (%.1f KB)", bytes / 1024.0);
-                    } else {
-                        sizeStr = String.format(" (%.1f MB)", bytes / (1024.0 * 1024.0));
-                    }
-
                     // 主目标加粗显示，便于识别；checkbox 不再置灰，允许用户取消
                     if (data.locked) {
                         getTextRenderer().append(data.info.getPackageName(),
@@ -2311,18 +2319,54 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         getTextRenderer().append(data.info.getPackageName(),
                                 SimpleTextAttributes.REGULAR_ATTRIBUTES);
                     }
-                    getTextRenderer().append(typeTag,
-                            new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN,
-                                    Color.GRAY));
-                    getTextRenderer().append(sizeStr,
-                            new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN,
-                                    Color.GRAY));
+                    // 包名后跟灰色「修改时间 · 体积」；不再显示 [WAR]/[JAR]（文件后缀已表明类型）
+                    String meta = formatPackageMeta(data.info.getModifiedTime(), data.info.getSize());
+                    if (!meta.isEmpty()) {
+                        getTextRenderer().append("   " + meta,
+                                new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN,
+                                        Color.GRAY));
+                    }
                 } else if (userObj instanceof String dirName) {
                     // 目录节点
                     getTextRenderer().append(dirName,
                             new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, null));
                 }
             }
+        }
+
+        /** 列表行「修改时间」格式，精确到分钟（FTP LIST 通常只给到分钟） */
+        private static final DateTimeFormatter META_TIME_FMT =
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+        /**
+         * 拼装包列表行右侧的灰色元信息：「修改时间 · 体积」。
+         *
+         * <p>修改时间按本地时区格式化为 {@code yyyy-MM-dd HH:mm}，为 0（FTP 未给时间戳）时省略；
+         * 体积按数量级自适应：&lt;1MB 显示 KB，否则显示 MB（各保留 1 位小数），&lt;=0 时省略，
+         * 避免百 KB 级 jar 被截断成 "0 MB"。两者都缺省时返回空串。</p>
+         *
+         * @param modifiedTime 文件最后修改时间（epoch 毫秒），0 表示未知
+         * @param sizeBytes    文件大小（字节），&lt;=0 表示未知
+         * @return 形如 "2026-05-28 14:30 · 1.8 MB" 的展示文本；无可展示信息时为空串
+         * @author xumanyi
+         * @date 2026-05-28
+         */
+        private static String formatPackageMeta(long modifiedTime, long sizeBytes) {
+            String timeStr = "";
+            if (modifiedTime > 0) {
+                timeStr = META_TIME_FMT.format(
+                        Instant.ofEpochMilli(modifiedTime).atZone(ZoneId.systemDefault()));
+            }
+            String sizeStr = "";
+            if (sizeBytes > 0) {
+                sizeStr = sizeBytes < 1024 * 1024
+                        ? String.format("%.1f KB", sizeBytes / 1024.0)
+                        : String.format("%.1f MB", sizeBytes / (1024.0 * 1024.0));
+            }
+            if (!timeStr.isEmpty() && !sizeStr.isEmpty()) {
+                return timeStr + " · " + sizeStr;
+            }
+            return timeStr + sizeStr;
         }
     }
 

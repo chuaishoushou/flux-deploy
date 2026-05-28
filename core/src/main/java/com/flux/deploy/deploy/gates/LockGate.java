@@ -65,6 +65,6 @@ public class LockGate implements Gate {
         target.setLockName(lockName);
         target.setStatus(TargetPackage.Status.LOCKED);
 
-        System.out.println("  [加锁] " + target.getPackageName() + " → " + lockName);
+        System.out.println("  [加锁] " + target.getPackageName());
     }
 }

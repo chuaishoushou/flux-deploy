@@ -117,8 +117,7 @@ public class UploadGate implements Gate {
         }
 
         target.setStatus(TargetPackage.Status.UPLOADED);
-        System.out.println("  [上传] " + target.getPackageName()
-                + " (" + formatSize(remoteSize) + ")");
+        // 大小信息已在外层 [上传] 头行打过，此处不重复
     }
 
     /**
@@ -133,17 +132,4 @@ public class UploadGate implements Gate {
         return path.endsWith("/") ? path : path + "/";
     }
 
-    /**
-     * 将字节数格式化为可读的大小字符串
-     *
-     * @param bytes 字节数
-     * @return 可读的大小字符串，如 "1.5 MB"
-     * @author xumanyi
-     * @date 2026-03-26
-     */
-    private static String formatSize(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
-    }
 }

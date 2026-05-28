@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>邮件模板 · FLUX</title>
+  <link rel="stylesheet" href="quill.snow.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="bg-layer" aria-hidden="true"></div>
+
+  <div class="app">
+    <!-- ─────── 顶部玻璃态导航条 ─────── -->
+    <header class="topbar" role="banner">
+      <div class="topbar-inner">
+        <!-- 品牌 -->
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="3"/>
+              <path d="M22 7l-10 7L2 7"/>
+            </svg>
+          </div>
+          <span class="brand-title">邮件模板</span>
+        </div>
+
+        <!-- 模板选择 pill -->
+        <div class="topbar-tpl">
+          <button class="template-pill" id="tplPillBtn" aria-haspopup="listbox" aria-expanded="false">
+            <span class="template-name" id="currentTplLabel">默认模板</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </button>
+          <div class="template-popover" id="tplPopover" role="listbox" hidden>
+            <div class="popover-inner" id="tplPopoverInner"></div>
+          </div>
+        </div>
+
+        <!-- 模板管理按钮组 -->
+        <div class="topbar-group">
+          <button class="tb-btn" id="newTplBtn" title="新建模板">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            <span>新建</span>
+          </button>
+          <button class="tb-btn" id="restoreBtn" title="恢复为内置默认模板">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+            </svg>
+            <span>恢复默认</span>
+          </button>
+          <button class="tb-btn danger" id="deleteBtn" title="删除当前模板">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            <span>删除</span>
+          </button>
+        </div>
+
+        <!-- 分隔 -->
+        <div class="topbar-spacer"></div>
+
+        <!-- 数据动作按钮组（主操作） -->
+        <div class="topbar-group">
+          <button class="tb-btn primary" id="importBtn" title="从插件导入主面板 / 部署历史的最新数据">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>导入数据</span>
+          </button>
+          <button class="tb-btn outlined" id="copyBtn" title="复制最终渲染好的邮件正文到剪贴板">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            <span>复制</span>
+          </button>
+          <button class="tb-btn" id="saveBtn" title="保存模板（Cmd/Ctrl+S）">
+            <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/>
+              <polyline points="7 3 7 8 15 8"/>
+            </svg>
+            <span>保存</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ─────── 编辑区 ─────── -->
+    <main class="content">
+      <div class="editor-card" id="editorCard">
+        <div id="editor"></div>
+      </div>
+    </main>
+
+    <!-- Toast -->
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  </div>
+
+  <script src="quill.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
