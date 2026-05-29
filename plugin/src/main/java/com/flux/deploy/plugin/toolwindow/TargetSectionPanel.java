@@ -2319,11 +2319,12 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         getTextRenderer().append(data.info.getPackageName(),
                                 SimpleTextAttributes.REGULAR_ATTRIBUTES);
                     }
-                    // 包名后跟灰色「修改时间 · 体积」；不再显示 [WAR]/[JAR]（文件后缀已表明类型）
+                    // 包名后跟灰色小字「体积 修改时间」：用 STYLE_SMALLER 缩小字号弱化次要信息，
+                    // 减轻长列表的视觉拥挤；不再显示 [WAR]/[JAR]（文件后缀已表明类型）
                     String meta = formatPackageMeta(data.info.getModifiedTime(), data.info.getSize());
                     if (!meta.isEmpty()) {
                         getTextRenderer().append("   " + meta,
-                                new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN,
+                                new SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER,
                                         Color.GRAY));
                     }
                 } else if (userObj instanceof String dirName) {
@@ -2339,15 +2340,15 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                 DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
         /**
-         * 拼装包列表行右侧的灰色元信息：「修改时间 · 体积」。
+         * 拼装包列表行右侧的灰色元信息：「体积 修改时间」（体积在前，两者间用空格分隔，不用「·」连接）。
          *
-         * <p>修改时间按本地时区格式化为 {@code yyyy-MM-dd HH:mm}，为 0（FTP 未给时间戳）时省略；
-         * 体积按数量级自适应：&lt;1MB 显示 KB，否则显示 MB（各保留 1 位小数），&lt;=0 时省略，
-         * 避免百 KB 级 jar 被截断成 "0 MB"。两者都缺省时返回空串。</p>
+         * <p>体积按数量级自适应：&lt;1MB 显示 KB，否则显示 MB（各保留 1 位小数），&lt;=0 时省略，
+         * 避免百 KB 级 jar 被截断成 "0 MB"；修改时间按本地时区格式化为 {@code yyyy-MM-dd HH:mm}，
+         * 为 0（FTP 未给时间戳）时省略。两者都缺省时返回空串。</p>
          *
          * @param modifiedTime 文件最后修改时间（epoch 毫秒），0 表示未知
          * @param sizeBytes    文件大小（字节），&lt;=0 表示未知
-         * @return 形如 "2026-05-28 14:30 · 1.8 MB" 的展示文本；无可展示信息时为空串
+         * @return 形如 "1.8 MB   2026-05-28 14:30" 的展示文本；无可展示信息时为空串
          * @author xumanyi
          * @date 2026-05-28
          */
@@ -2364,9 +2365,9 @@ public class TargetSectionPanel extends JBPanel<TargetSectionPanel> {
                         : String.format("%.1f MB", sizeBytes / (1024.0 * 1024.0));
             }
             if (!timeStr.isEmpty() && !sizeStr.isEmpty()) {
-                return timeStr + " · " + sizeStr;
+                return sizeStr + "   " + timeStr;
             }
-            return timeStr + sizeStr;
+            return sizeStr + timeStr;
         }
     }
 
