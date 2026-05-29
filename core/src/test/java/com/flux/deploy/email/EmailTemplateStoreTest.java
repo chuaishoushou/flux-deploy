@@ -87,9 +87,13 @@ class EmailTemplateStoreTest {
         // default.html 升级
         assertThat(Files.readString(root.resolve("default.html")))
                 .isEqualTo(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
-        // 备份保留
+        // 备份保留。注意 ensureInitialized 先跑 migrateRenamedPlaceholders（${客服编号}→${客服}、
+        // ${任务号}→${任务}）再做 legacy 升级备份，所以备份的是占位符迁移后的内容。
+        String expectedBak = partialLegacy
+                .replace("${客服编号}", "${客服}")
+                .replace("${任务号}", "${任务}");
         assertThat(Files.readString(root.resolve("default.legacy.bak")))
-                .isEqualTo(partialLegacy);
+                .isEqualTo(expectedBak);
     }
 
     @Test
@@ -105,21 +109,24 @@ class EmailTemplateStoreTest {
     }
 
     @Test
-    void ensureInitialized_doesNotTouchUserModifiedTemplate(@TempDir Path tmp) throws IOException {
+    void ensureInitialized_doesNotUpgradeUserModifiedTemplate(@TempDir Path tmp) throws IOException {
         Path root = tmp.resolve("templates");
         Files.createDirectories(root);
-        // 用户改过的内容（只要跟老模板字面值不完全匹配就不能动）
+        // 用户改过的内容（不含 v1 老占位符 ${项目名} 等，不触发整模板升级覆盖）
         String userEdited = "亲爱的：<br>"
                 + "&nbsp;&nbsp;你好，更新到了<br>"
                 + "&nbsp;&nbsp;任务: ${任务号}<br>";
         Files.writeString(root.resolve("default.html"), userEdited);
 
         new EmailTemplateStore(root).ensureInitialized();
-        assertThat(Files.readString(root.resolve("default.html"))).isEqualTo(userEdited);
+        // 不会被升级覆盖成 BUILTIN；但 ${任务号}→${任务} 这类重命名占位符会被
+        // migrateRenamedPlaceholders 无损迁移，属预期行为。
+        String expectedAfterMigration = userEdited.replace("${任务号}", "${任务}");
+        assertThat(Files.readString(root.resolve("default.html"))).isEqualTo(expectedAfterMigration);
     }
 
     @Test
-    void listNames_defaultAlwaysFirstAndAlphabeticalRest(@TempDir Path tmp) throws IOException {
+    void listNames_defaultAlwaysFirst(@TempDir Path tmp) throws IOException {
         Path root = tmp.resolve("templates");
         EmailTemplateStore store = new EmailTemplateStore(root);
         store.ensureInitialized();
@@ -127,8 +134,13 @@ class EmailTemplateStoreTest {
         store.createNew("alpha", "a");
         store.createNew("mango", "m");
 
+        // listNames 现按文件 creationTime 升序（新建的排末尾），default 永远第一。
+        // 其余顺序依赖文件系统的 creationTime 精度（ext4 等回落 lastModifiedTime），
+        // 这里只严格断言「default 第一 + 全部列出」，不锁定其余次序以免精度差异导致 flaky。
         List<String> names = store.listNames();
-        assertThat(names).containsExactly("default", "alpha", "mango", "zebra");
+        assertThat(names).hasSize(4);
+        assertThat(names.get(0)).isEqualTo("default");
+        assertThat(names).containsExactlyInAnyOrder("default", "alpha", "mango", "zebra");
     }
 
     @Test

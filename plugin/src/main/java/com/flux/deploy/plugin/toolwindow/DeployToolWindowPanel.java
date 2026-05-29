@@ -4,10 +4,9 @@ import com.flux.deploy.deploy.ResidualLockDiagnosis;
 import com.flux.deploy.email.EmailDraftManager;
 import com.flux.deploy.email.EmailTemplateStore;
 import com.flux.deploy.model.DeployResult;
+import com.flux.deploy.plugin.email.EmailJcefDialog;
 import com.flux.deploy.plugin.email.EmailRuntimeData;
 import com.flux.deploy.plugin.email.EmailRuntimeValuesBuilder;
-import com.flux.deploy.plugin.email.EmailWebServer;
-import com.flux.deploy.plugin.email.EmailWebServerService;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.flux.deploy.plugin.model.DeployTargetMode;
 import com.flux.deploy.plugin.model.FtpTargetSelection;
@@ -32,6 +31,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
+import com.intellij.ui.jcef.JBCefApp;
 import com.intellij.util.ui.JBUI;
 
 import javax.swing.*;
@@ -2176,40 +2176,41 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     // ============================================================
 
     /**
-     * 打开「通知邮件」编辑器：启动本地 HTTP 服务并用系统浏览器跳转打开 SPA 编辑器。
+     * 打开「通知邮件」编辑器：在 IDE 内嵌（JCEF）弹窗里运行 Quill 富文本 SPA。
      *
      * <p>由主面板「邮件模版」按钮和工具窗标题栏 {@code ShowEmailAction} 触发。
-     * Server 是项目级单例（{@link EmailWebServerService}），第一次调用时 lazy 启动，
-     * 之后跟随项目/IDE 存活——多次点按钮直接复用同一个 server（同端口同 token），
-     * 浏览器里旧标签页始终能用。</p>
+     * 每次点击新建一个非模态 {@link EmailJcefDialog}，前端通过 JS 桥拉模板 / 运行时数据、
+     * 复制到系统剪贴板，不再起本地 HTTP server、也不再跳系统浏览器。</p>
      *
-     * <p>每次进入都把当前主面板 + 部署历史的运行时变量供给者注入到 service，
-     * 浏览器点「导入数据」拉到的就是<b>当下</b>面板的最新快照。</p>
+     * <p>每次打开都把当前主面板 + 部署历史的运行时变量供给者交给弹窗，点「导入数据」
+     * 拉到的就是<b>当下</b>面板的最新快照。</p>
      *
-     * <p>历史：之前是 JCEF 内嵌弹窗，因为 JCEF 富文本体验不佳被废弃，
-     * 改为外部浏览器纯 SPA 方案。原 {@code EmailDialog} 类已删除。</p>
+     * <p>JCEF 不可用时（少数 IDE 配置 / 远程开发）弹提示引导开启
+     * {@code ide.browser.jcef.enabled} 后中止，不做外部浏览器降级。</p>
      *
      * @author xumanyi
-     * @date 2026-05-27
+     * @date 2026-05-29
      */
     public void openEmailDialog() {
         if (project == null) {
             com.intellij.openapi.ui.Messages.showErrorDialog((java.awt.Component) null,
-                    "未关联到具体项目，无法启动本地编辑服务。", "无法打开邮件模板编辑器");
+                    "未关联到具体项目，无法打开邮件模板编辑器。", "无法打开邮件模板编辑器");
             return;
         }
-        try {
-            EmailWebServerService svc = EmailWebServerService.getInstance(project);
-            // 把当前 panel 的运行时数据供给者注入：浏览器点「导入数据」会经此拉到
-            // 最新的主面板字段 + 部署历史快照
-            svc.updateDataSupplier(() ->
-                    new EmailRuntimeValuesBuilder(this, deployHistoryCache).build());
-            EmailWebServer server = svc.getOrStart(emailDraftManager.getStore());
-            com.intellij.ide.BrowserUtil.browse(server.getEditorUrl());
-        } catch (java.io.IOException ioEx) {
+        if (!JBCefApp.isSupported()) {
             com.intellij.openapi.ui.Messages.showErrorDialog(project,
-                    "启动本地服务失败: " + ioEx.getMessage(), "无法打开邮件模板编辑器");
+                    "当前 IDE 未启用内置浏览器内核（JCEF），无法打开内嵌邮件编辑器。\n"
+                            + "请在 Registry 中开启 ide.browser.jcef.enabled 后重启 IDE 再试。",
+                    "无法打开邮件模板编辑器");
+            return;
         }
+        // 每次打开新建非模态弹窗：store 走 draft manager，运行时数据供给者绑定当前 panel +
+        // 部署历史，前端点「导入数据」时按需拉最新快照。
+        EmailJcefDialog dialog = new EmailJcefDialog(
+                project,
+                emailDraftManager.getStore(),
+                () -> new EmailRuntimeValuesBuilder(this, deployHistoryCache).build());
+        dialog.show();
     }
 
 

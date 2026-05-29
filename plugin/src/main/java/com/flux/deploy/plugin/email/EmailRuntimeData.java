@@ -8,7 +8,7 @@ import java.util.Map;
  *
  * <p>由 {@code DeployToolWindowPanel} 实现并在初始化时注入。
  * 把"如何从 InfoSectionPanel / TargetSectionPanel 拼凑字段值"的细节留在
- * 主面板里，让 {@link EmailRuntimeValuesBuilder}（浏览器编辑器的 runtime-data API 后端）
+ * 主面板里，让 {@link EmailRuntimeValuesBuilder}（JCEF 邮件编辑器的运行时数据后端）
  * 不直接耦合这些 UI 类。</p>
  *
  * @author xumanyi

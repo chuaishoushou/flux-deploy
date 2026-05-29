@@ -1,9 +1,9 @@
 /* ============================================================
    邮件模板编辑器 SPA · 现代版
-   - REST 同步插件本地 server
+   - 通过 JBCefJSQuery 桥与插件 Java 端通信（list / load / save /
+     delete / restore / runtime-data / copyToClipboard）
    - Quill 2 富文本 + FluxField embed 变量 chip
    - 自绘模板 popover、toast 栈、状态指示器
-   - 所有 API 请求带 X-Flux-Token header（从 location.hash 解析）
    ============================================================ */
 (function () {
   'use strict';
@@ -12,7 +12,6 @@
   //   全局状态
   // ──────────────────────────────────────────────────────────
   const state = {
-    token: '',
     templates: [],
     defaultName: 'default',
     currentName: '',
@@ -53,25 +52,62 @@
   function nameOf(label) {
     return label === DEFAULT_DISPLAY_LABEL ? state.defaultName : label;
   }
-  function parseToken() {
-    const m = (location.hash || '').match(/token=([0-9a-fA-F]+)/);
-    state.token = m ? m[1] : '';
+  // ──────────────────────────────────────────────────────────
+  //   插件桥：所有数据通道走 JBCefJSQuery（替代原来的 REST fetch）
+  //   window.fluxBridge 由 JCEF 宿主在页面加载完成后注入；下面把原来的
+  //   RESTful (path, method, body) 翻译成 {op,...} 桥消息，这样上层
+  //   apiListTemplates / apiLoadTemplate / ... 一行都不用改。
+  // ──────────────────────────────────────────────────────────
+  function bridgeCall(payload) {
+    return new Promise(function (resolve, reject) {
+      if (typeof window.fluxBridge !== 'function') {
+        reject(new Error('插件桥未就绪，请重新打开邮件模板编辑器'));
+        return;
+      }
+      window.fluxBridge(JSON.stringify(payload), function (response) {
+        try {
+          const data = response ? JSON.parse(response) : null;
+          if (data && data.error) reject(new Error(data.error));
+          else resolve(data);
+        } catch (e) {
+          reject(new Error('桥响应解析失败：' + e.message));
+        }
+      }, function (errCode, errMsg) {
+        reject(new Error('桥调用失败：' + (errMsg || errCode)));
+      });
+    });
+  }
+
+  /* 把原 REST 风格的 (path, method, body) 翻译成桥消息 {op,...}。
+     返回结构与原 server 端保持一致：list→{templates,defaultName}、
+     load/restore→{name,content}、save/delete→{ok:true}、runtimeData→{key:val}。 */
+  function restToBridgePayload(path, method, body) {
+    if (path === '/api/runtime-data') return { op: 'runtimeData' };
+    if (path === '/api/templates') return { op: 'list' };
+    const prefix = '/api/templates/';
+    if (path.indexOf(prefix) === 0) {
+      const rest = path.substring(prefix.length);
+      const restoreSuffix = '/restore';
+      if (rest.slice(-restoreSuffix.length) === restoreSuffix) {
+        const rn = decodeURIComponent(rest.substring(0, rest.length - restoreSuffix.length));
+        return { op: 'restore', name: rn };
+      }
+      const name = decodeURIComponent(rest);
+      if (method === 'PUT') {
+        let content = '';
+        try { content = body ? (JSON.parse(body).content || '') : ''; } catch (e) { content = ''; }
+        return { op: 'save', name: name, content: content };
+      }
+      if (method === 'DELETE') return { op: 'delete', name: name };
+      return { op: 'load', name: name };
+    }
+    throw new Error('未知 API 路径：' + path);
   }
 
   async function api(path, opts) {
     opts = opts || {};
-    const headers = Object.assign({}, opts.headers || {});
-    headers['X-Flux-Token'] = state.token;
-    if (opts.body != null && !headers['Content-Type']) {
-      headers['Content-Type'] = 'application/json';
-    }
-    const r = await fetch(path, Object.assign({}, opts, { headers: headers }));
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      throw new Error('HTTP ' + r.status + ' ' + (text || r.statusText));
-    }
-    const ct = r.headers.get('Content-Type') || '';
-    return ct.includes('application/json') ? r.json() : r.text();
+    const method = (opts.method || 'GET').toUpperCase();
+    return bridgeCall(restToBridgePayload(path, method, opts.body));
   }
 
   // ──────────────────────────────────────────────────────────
@@ -475,6 +511,10 @@
   const apiRestoreTemplate= name       => api('/api/templates/' + encodeURIComponent(name)
                                           + '/restore', { method: 'POST' });
   const apiRuntimeData    = ()         => api('/api/runtime-data');
+  /* 复制到剪贴板：JCEF 里 navigator.clipboard 可能被禁，统一走桥让 Java 端
+     用 HtmlClipboardTransferable 写系统剪贴板，跨平台表现一致。 */
+  const apiCopyToClipboard = (html, plain) =>
+                                          bridgeCall({ op: 'copyToClipboard', html: html, plain: plain });
 
   // ──────────────────────────────────────────────────────────
   //   模板 popover：自绘下拉列表
@@ -671,27 +711,9 @@
     const html = serializeRendered();
     const plain = stripHtml(html);
     try {
-      if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
-        const item = new ClipboardItem({
-          'text/html': new Blob([html], { type: 'text/html' }),
-          'text/plain': new Blob([plain], { type: 'text/plain' }),
-        });
-        await navigator.clipboard.write([item]);
-      } else {
-        const tmp = document.createElement('div');
-        tmp.innerHTML = html;
-        tmp.style.position = 'fixed';
-        tmp.style.left = '-9999px';
-        document.body.appendChild(tmp);
-        const range = document.createRange();
-        range.selectNodeContents(tmp);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-        document.execCommand('copy');
-        sel.removeAllRanges();
-        document.body.removeChild(tmp);
-      }
+      // JCEF 里 navigator.clipboard / execCommand 对系统剪贴板的写入都不可靠，
+      // 统一走桥交给 Java 端的 HtmlClipboardTransferable 写系统剪贴板。
+      await apiCopyToClipboard(html, plain);
       flashBtn($('#copyBtn'), '✓ 已复制');
       toast('已复制到剪贴板', 'success');
     } catch (e) {
@@ -737,17 +759,14 @@
   //   引导
   // ──────────────────────────────────────────────────────────
   async function bootstrap() {
-    parseToken();
-    if (!state.token) {
-      toast('未检测到 token，请从插件按钮跳转打开本页面', 'error', 5000);
-      return;
-    }
-    /* 不预加载 runtime data —— 跟 JCEF 版语义一致：初次打开时 chip 都是空占位，
-       值只有点「导入数据」时才统一刷新。这样用户对"什么时候 chip 被填"有明确控制。 */
+    /* 不预加载 runtime data —— 初次打开时 chip 都是空占位，值只有点「导入数据」
+       时才统一刷新。这样用户对"什么时候 chip 被填"有明确控制。 */
     state.runtimeValues = {};
     await refreshTemplateList();
     await reloadEditorWithCurrent();
   }
 
-  bootstrap();
+  // 不自启动：把入口挂到 window，由 JCEF 宿主在注入 window.fluxBridge 之后立即调用，
+  // 确保 bootstrap 拉模板 / 数据时桥已就绪。
+  window.__fluxBootstrap = bootstrap;
 })();

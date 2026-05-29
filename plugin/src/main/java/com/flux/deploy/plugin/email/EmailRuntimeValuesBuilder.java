@@ -14,11 +14,11 @@ import java.util.Set;
  * 邮件模板"运行时变量值"快照构造器
  *
  * <p>从 {@link EmailRuntimeData}（主面板任务 / 客服）和 {@link DeployHistoryCache}
- * （部署历史里的更新包 / 备份目录）合并出一份 key → 值的 map，供浏览器编辑器
- * {@code GET /api/runtime-data} 拉取（即用户点「导入数据」按钮触发）。</p>
+ * （部署历史里的更新包 / 备份目录）合并出一份 key → 值的 map，供 JCEF 邮件编辑器
+ * 点「导入数据」按钮时经 JS 桥（{@code op=runtimeData}）拉取。</p>
  *
- * <p>历史背景：此逻辑原先在 {@code EmailDialog.buildRuntimeValuesMap()}。删除 JCEF 弹窗后
- * 抽到这里，让 {@code DeployToolWindowPanel} 直接构造给 {@link EmailWebServerService} 用。</p>
+ * <p>历史背景：此逻辑原先在 {@code EmailDialog.buildRuntimeValuesMap()}，抽到这里后由
+ * {@code DeployToolWindowPanel} 构造，交给 {@link EmailJcefDialog} 的桥后端调用。</p>
  *
  * <p>返回 map 永远非 null；主面板和部署历史都没值时返回空 map，前端据此弹"暂无可导入内容"。</p>
  *
