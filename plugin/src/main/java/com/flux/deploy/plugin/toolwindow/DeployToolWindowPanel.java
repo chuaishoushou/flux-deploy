@@ -23,10 +23,9 @@ import com.flux.deploy.plugin.util.BackupTargetGuard;
 import com.flux.deploy.plugin.util.DeployRunLogger;
 import com.flux.deploy.plugin.util.DeployRunMeta;
 import com.flux.deploy.plugin.util.DeployRunStatus;
+import com.flux.deploy.plugin.util.PluginVersionProvider;
 import com.intellij.icons.AllIcons;
-import com.intellij.ide.plugins.PluginManager;
 import com.intellij.openapi.application.ApplicationInfo;
-import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -2094,19 +2093,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     }
 
     /**
-     * 从 IDEA 插件管理器读取本插件版本号，用于日志开头横幅、每次操作起头后缀以及
-     * RunLogger 元数据三处共享。
+     * 读取本插件版本号，用于日志开头横幅、每次操作起头后缀以及 RunLogger 元数据三处共享。
      *
-     * <p>取不到 descriptor（极少数沙盒/调试态）时回退 {@code "unknown"}，让日志仍然可读，
-     * 而不是抛 NPE 中断面板初始化。</p>
+     * <p>版本号由 {@link PluginVersionProvider} 从构建期注入的 classpath 资源读取，
+     * 不再走平台 {@code PluginManager} 的 descriptor 查询 API（该方法族自 IDEA 2026.2 起被标记
+     * {@code @ApiStatus.Internal}，会被 Marketplace Plugin Verifier 驳回）。读不到资源
+     * （极少数沙盒 / 调试态）时回退 {@code "unknown"}，让日志仍然可读，而不是抛异常中断面板初始化。</p>
      *
-     * @return 形如 {@code "1.2.8"} 的版本字符串
+     * @return 形如 {@code "1.3.3"} 的版本字符串
      * @author xumanyi
      * @date 2026-05-08
      */
     private static String currentPluginVersion() {
-        var plugin = PluginManager.getInstance().findEnabledPlugin(PluginId.getId("com.flux.deploy.plugin"));
-        return plugin != null ? plugin.getVersion() : "unknown";
+        String version = PluginVersionProvider.currentVersionOrNull();
+        return version != null ? version : "unknown";
     }
 
     /**
@@ -2140,9 +2140,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         String ideVersion = "IntelliJ IDEA " + ApplicationInfo.getInstance().getFullVersion();
         String pluginVersion = "flux-deploy-plugin (unknown)";
-        var plugin = PluginManager.getInstance().findEnabledPlugin(PluginId.getId("com.flux.deploy.plugin"));
-        if (plugin != null) {
-            pluginVersion = "flux-deploy-plugin " + plugin.getVersion();
+        String version = PluginVersionProvider.currentVersionOrNull();
+        if (version != null) {
+            pluginVersion = "flux-deploy-plugin " + version;
         }
         return new DeployRunMeta(
                 packageFileName,

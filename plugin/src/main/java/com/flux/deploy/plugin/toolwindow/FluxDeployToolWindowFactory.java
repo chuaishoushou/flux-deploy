@@ -1,5 +1,6 @@
 package com.flux.deploy.plugin.toolwindow;
 
+import com.flux.deploy.plugin.util.PluginVersionProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
@@ -55,17 +56,19 @@ public class FluxDeployToolWindowFactory implements ToolWindowFactory {
     }
 
     /**
-     * 从 IDEA 插件管理器动态获取本插件版本号
+     * 获取本插件版本号，用于工具窗口标题栏展示。
      *
-     * <p>使用公共 API {@link com.intellij.ide.plugins.PluginManager#findEnabledPlugin}
-     * 替代 internal {@code PluginManagerCore.getPlugin}，
-     * 通过 Marketplace Plugin Verifier。</p>
+     * <p>版本号来自构建期注入的 classpath 资源，由 {@link PluginVersionProvider} 统一读取，
+     * 不再调用 {@code PluginManager} 的插件 descriptor 查询 API——该方法族自 IDEA 2026.2 起被
+     * 标记 {@code @ApiStatus.Internal}，会被 Marketplace Plugin Verifier 驳回。</p>
+     *
+     * @return 形如 {@code "1.3.3"} 的版本串；读不到资源时回退 {@code "1.0.0"}
+     * @author xumanyi
+     * @date 2026-05-29
      */
     private static String getPluginVersion() {
-        com.intellij.ide.plugins.IdeaPluginDescriptor plugin =
-                com.intellij.ide.plugins.PluginManager.getInstance().findEnabledPlugin(
-                        com.intellij.openapi.extensions.PluginId.getId("com.flux.deploy.plugin"));
-        return plugin != null ? plugin.getVersion() : "1.0.0";
+        String version = PluginVersionProvider.currentVersionOrNull();
+        return version != null ? version : "1.0.0";
     }
 
     private static final com.intellij.openapi.util.Key<DeployToolWindowPanel> PANEL_KEY =

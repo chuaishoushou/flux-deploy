@@ -223,15 +223,25 @@ fun renderChangeNotesHtml(versions: List<ChangelogVersion>, limit: Int): String 
     return sb.toString().trimEnd()
 }
 
-// processResources 后置：把生成产物里 docs/changelog.html 的占位符替换成渲染好的版本块
+// processResources 后置：
+//   1. 把生成产物里 docs/changelog.html 的占位符替换成渲染好的版本块
+//   2. 把工程版本号写入 classpath 资源 META-INF/flux-deploy-version.txt，
+//      供运行期 PluginVersionProvider 读取——替代已被标记 @ApiStatus.Internal 的
+//      PluginManager 插件 descriptor 查询 API（通过 Marketplace Plugin Verifier）。
 tasks.processResources {
     val mdFile = rootProject.file("CHANGELOG.md")
     inputs.file(mdFile)
+    val pluginVersion = project.version.toString()
+    inputs.property("pluginVersion", pluginVersion)
     doLast {
-        val target = destinationDir.resolve("docs/changelog.html")
-        if (!target.exists()) return@doLast
-        val raw = target.readText(Charsets.UTF_8)
-        val rendered = renderVersionsHtml(parseChangelog(mdFile.readText(Charsets.UTF_8)))
-        target.writeText(raw.replace("<!-- VERSIONS -->", rendered), Charsets.UTF_8)
+        val changelog = destinationDir.resolve("docs/changelog.html")
+        if (changelog.exists()) {
+            val raw = changelog.readText(Charsets.UTF_8)
+            val rendered = renderVersionsHtml(parseChangelog(mdFile.readText(Charsets.UTF_8)))
+            changelog.writeText(raw.replace("<!-- VERSIONS -->", rendered), Charsets.UTF_8)
+        }
+        val versionFile = destinationDir.resolve("META-INF/flux-deploy-version.txt")
+        versionFile.parentFile.mkdirs()
+        versionFile.writeText(pluginVersion, Charsets.UTF_8)
     }
 }
