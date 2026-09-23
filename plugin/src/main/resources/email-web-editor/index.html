@@ -72,7 +72,7 @@
 
         <!-- 数据动作按钮组（主操作） -->
         <div class="topbar-group">
-          <button class="tb-btn primary" id="importBtn" title="从插件导入主面板 / 部署历史的最新数据">
+          <button class="tb-btn outlined" id="importBtn" title="从插件导入主面板 / 部署历史的最新数据">
             <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -89,7 +89,7 @@
             </svg>
             <span>复制</span>
           </button>
-          <button class="tb-btn" id="saveBtn" title="保存模板（Cmd/Ctrl+S）">
+          <button class="tb-btn primary" id="saveBtn" title="保存模板（Cmd/Ctrl+S）">
             <svg class="tb-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
@@ -99,6 +99,14 @@
             <span>保存</span>
           </button>
         </div>
+
+        <!-- 关闭：移到顶部，跨平台一致的弹窗内关闭入口（系统标题栏关闭按钮仍可用） -->
+        <button class="tb-btn tb-close" id="closeBtn" title="关闭" aria-label="关闭">
+          <svg class="tb-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
     </header>
 

@@ -3,6 +3,7 @@ package com.flux.deploy.plugin.toolwindow;
 import com.flux.deploy.plugin.model.DeployMode;
 import com.intellij.icons.AllIcons;
 import com.intellij.util.IconUtil;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.NamedColorUtil;
 import com.flux.deploy.plugin.service.ModuleEnumerator;
@@ -103,6 +104,38 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
     /** 模块树弹窗是否已打开（防重入） */
     private boolean modulePopupOpen;
 
+    // ==================== Vue 源工程状态（VUE 卡） ====================
+    /** 是否处于 Vue 源工程模式（选中的工程是 Vue 模块式 Web 工程时激活） */
+    private boolean vueMode;
+    /** Vue 工程上下文名（serve.yaml 的 content 值，如 tm01webVue） */
+    private String vueContent;
+    /** Vue 工程业务模块列表（含构建状态与产物时间） */
+    private List<com.flux.deploy.plugin.service.VueProjectResolver.VueModule> vueModules = List.of();
+    /** 勾选的 Vue 模块号集合（保持勾选顺序） */
+    private final Set<String> checkedVueModuleIds = new LinkedHashSet<>();
+    /** VUE 卡中的模块勾选列表控件 */
+    private com.intellij.ui.CheckBoxList<String> vueModuleList;
+    /** Vue 模块勾选变化回调（外部据此刷新目标面板的模块目录条目与默认勾选） */
+    private Runnable vueSelectionChangedCallback;
+    /** 进入 Vue 模式前用户的更新模式（进入时切 FULL 并整行隐藏，退出时恢复原选择） */
+    private DeployMode modeBeforeVue;
+    /** 「模式」表单行的标签（Vue 模式下整行隐藏——Vue 没有整包/增量概念） */
+    private JBLabel modeFormLabel;
+    /** 「模式」表单行的输入区容器（含下拉与展开/折叠按钮） */
+    private JPanel modeRowPanel;
+    /** 底部状态行的编译提示（Vue 模式下换成自动构建说明） */
+    private JBLabel compileHintLabel;
+    /** 编译提示默认文案（退出 Vue 模式时恢复） */
+    private static final String COMPILE_HINT_DEFAULT = "⚠ 请手动编译/打包，静态文件无需编译";
+
+    /** 增量模式下勾选含 .java 文件时的提示：明确要求先编译 */
+    private static final String COMPILE_HINT_JAVA = "⚠ 已选 Java 文件，请手动编译/打包后再更新";
+
+    /** 增量模式下勾选全为静态文件（js/css/jsp 等）时的提示：无需编译 */
+    private static final String COMPILE_HINT_STATIC = "静态文件无需编译，可直接更新";
+    /** 编译提示 Vue 文案 */
+    private static final String COMPILE_HINT_VUE = "执行更新时将自动构建勾选的模块";
+
     /**
      * 构造源信息面板
      *
@@ -146,6 +179,8 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
                     syncVisibleCheckedState();
                 }
                 updateFileCountLabel();
+                // Vue 增量：源文件勾选变化可能改变涉及模块集，联动目标面板
+                notifyVueFileSelectionChanged();
             }
 
             @Override
@@ -239,7 +274,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
         // 标题栏右侧动作按钮：刷新 + 搜索切换。
         // styleHeaderIconButton 与运行日志卡片头部三个图标按钮一致（透明底 + 22×22 + 不抢焦点）。
-        this.refreshButton = new JButton(AllIcons.Actions.Refresh);
+        this.refreshButton = new JButton(PluginIcons.REFRESH);
         PanelChromes.styleHeaderIconButton(refreshButton);
         refreshButton.setToolTipText("刷新工程与文件列表");
         refreshButton.addActionListener(e -> {
@@ -360,14 +395,16 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         moduleRow.add(moduleActions, BorderLayout.EAST);
         addFormRow(body, gbc, 0, "工程", moduleRow);
 
-        // 表单第 1 行：更新模式下拉 + 展开 / 折叠
+        // 表单第 1 行：更新模式下拉 + 展开 / 折叠（Vue 模式下整行隐藏）
         JPanel modeRow = new JPanel(new BorderLayout(4, 0));
         modeRow.setOpaque(false);
         modeRow.add(modeComboBox, BorderLayout.CENTER);
         modeRow.add(modeActions, BorderLayout.EAST);
-        addFormRow(body, gbc, 1, "模式", modeRow);
+        this.modeRowPanel = modeRow;
+        this.modeFormLabel = addFormRow(body, gbc, 1, "模式", modeRow);
 
-        // 动态内容区：FULL 卡显示整包更新信息卡，FILE_LIST 卡承载 搜索框 + 文件树
+        // 动态内容区：FULL 卡显示整包更新信息卡，FILE_LIST 卡承载 搜索框 + 文件树，
+        // VUE 卡承载 Vue 工程的业务模块勾选列表
         dynamicContent.add(buildFullModeCard(), "FULL");
         JPanel fileListPanel = new JPanel(new BorderLayout(0, 2));
         fileListPanel.setOpaque(false);
@@ -375,6 +412,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         fileListPanel.add(fileSearchField, BorderLayout.NORTH);
         fileListPanel.add(fileScrollPane, BorderLayout.CENTER);
         dynamicContent.add(fileListPanel, "FILE_LIST");
+        dynamicContent.add(buildVueModuleCard(), "VUE");
 
         gbc.gridx = 0; gbc.gridy = 2; gbc.gridwidth = 2;
         gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 1.0;
@@ -414,15 +452,16 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         card.add(iconLabel);
         card.add(Box.createVerticalStrut(14));
 
-        // 卡片标题
+        // 卡片标题（相对字号：默认 Label 字体 +1 加粗，跟随 IDE 全局字号设置）
         JBLabel title = new JBLabel("整包更新模式");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 14f));
+        title.setFont(JBFont.label().biggerOn(1f).asBold());
         title.setAlignmentX(Component.CENTER_ALIGNMENT);
         card.add(title);
         card.add(Box.createVerticalStrut(12));
 
-        // 产物文件名：等宽字体 + 主色强调
-        fullModeArtifactLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        // 产物文件名：等宽字体 + 主色强调（字号相对 Label -1，跟随 IDE 全局字号设置）
+        fullModeArtifactLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN,
+                JBFont.label().lessOn(1f).getSize()));
         fullModeArtifactLabel.setForeground(PanelChromes.accentColor());
         fullModeArtifactLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         card.add(fullModeArtifactLabel);
@@ -437,6 +476,74 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         g.insets = JBUI.insetsBottom(60);
         wrapper.add(card, g);
         return wrapper;
+    }
+
+    /**
+     * 构造 VUE 卡：Vue 工程业务模块勾选列表。
+     *
+     * <p>每行一个业务模块（如 t0107），行文本附带产物状态：已构建的显示 dist 产物时间，
+     * 未构建的标注「未构建」。勾选变化实时更新计数并通知外部回调（联动目标面板）。</p>
+     *
+     * @return VUE 卡面板
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private JPanel buildVueModuleCard() {
+        vueModuleList = new com.intellij.ui.CheckBoxList<>();
+        vueModuleList.setCheckBoxListListener((index, value) -> {
+            String id = vueModuleList.getItemAt(index);
+            if (id == null) return;
+            if (value) {
+                checkedVueModuleIds.add(id);
+            } else {
+                checkedVueModuleIds.remove(id);
+            }
+            updateFileCountLabel();
+            if (vueSelectionChangedCallback != null) {
+                vueSelectionChangedCallback.run();
+            }
+        });
+        JPanel panel = new JPanel(new BorderLayout(0, 2));
+        panel.setOpaque(false);
+        JBLabel hint = new JBLabel("勾选要更新的业务模块，右侧展开模块目录可精确到文件");
+        hint.setForeground(NamedColorUtil.getInactiveTextColor());
+        hint.setBorder(JBUI.Borders.empty(2, 4));
+        panel.add(hint, BorderLayout.NORTH);
+        JBScrollPane scroll = new JBScrollPane(vueModuleList);
+        scroll.setBorder(JBUI.Borders.empty());
+        panel.add(scroll, BorderLayout.CENTER);
+        return panel;
+    }
+
+    /**
+     * 生成 Vue 模块列表的行文本
+     *
+     * @param moduleId 模块号
+     * @return 形如 {@code t0107   （产物 2026-08-12 14:35）} / {@code t0104   （未构建）}
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private String vueModuleLabel(String moduleId) {
+        for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : vueModules) {
+            if (m.id.equals(moduleId)) {
+                // 未构建不加后缀：多数模块常态未构建，逐行提示是纯噪音——
+                // 顶部提示与底部状态行已说明"更新时自动构建"
+                if (!m.built) {
+                    return moduleId;
+                }
+                if (m.isStale()) {
+                    return moduleId + "   （已过期）";
+                }
+                if (m.distMtime > 0) {
+                    String time = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                            .format(java.time.Instant.ofEpochMilli(m.distMtime)
+                                    .atZone(java.time.ZoneId.systemDefault()));
+                    return moduleId + "   （产物 " + time + "）";
+                }
+                return moduleId;
+            }
+        }
+        return moduleId;
     }
 
     /**
@@ -465,8 +572,8 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      * @param label  标签文本（不带冒号）
      * @param input  输入控件
      */
-    private static void addFormRow(JPanel parent, GridBagConstraints gbc,
-                                   int row, String label, JComponent input) {
+    private static JBLabel addFormRow(JPanel parent, GridBagConstraints gbc,
+                                      int row, String label, JComponent input) {
         gbc.gridx = 0; gbc.gridy = row;
         gbc.anchor = GridBagConstraints.EAST;
         gbc.fill = GridBagConstraints.NONE;
@@ -483,15 +590,16 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         gbc.weightx = 1.0;
         gbc.insets = new Insets(3, 0, 3, 0);
         parent.add(input, gbc);
+        return lbl;
     }
 
     /**
-     * 构造底部状态行：上分隔线 + 左 fileCountLabel + 右 编译提示。
+     * 构造底部状态行：左 fileCountLabel + 右 编译提示。
      */
     private JPanel buildStatusRow() {
         fileCountLabel.setForeground(NamedColorUtil.getInactiveTextColor());
         fileCountLabel.setToolTipText("勾选要部署的文件");
-        JBLabel compileHintLabel = new JBLabel("⚠ 请手动编译/打包，静态文件无需编译");
+        this.compileHintLabel = new JBLabel(COMPILE_HINT_DEFAULT);
         compileHintLabel.setForeground(NamedColorUtil.getInactiveTextColor());
         compileHintLabel.setToolTipText("部署前请手动编译，静态文件除外");
 
@@ -502,7 +610,11 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         statusRow.setOpaque(false);
         statusRow.setBorder(JBUI.Borders.empty(5, 12));
         statusRow.add(fileCountLabel, BorderLayout.WEST);
-        statusRow.add(compileHintLabel, BorderLayout.EAST);
+        // 编译提示放 CENTER 右对齐而非 EAST：BorderLayout 的 WEST/EAST 都按首选宽度
+        // 刚性占位，窄面板（低分辨率屏幕）下两段文字会互相叠字；CENTER 会被压缩，
+        // JLabel 空间不足时自动画省略号，完整文案仍可通过 tooltip 查看。
+        compileHintLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+        statusRow.add(compileHintLabel, BorderLayout.CENTER);
         return statusRow;
     }
 
@@ -541,14 +653,18 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
             if (mode != null) {
                 CardLayout cl = (CardLayout) dynamicContent.getLayout();
-                cl.show(dynamicContent, mode == DeployMode.FULL ? "FULL" : "FILE_LIST");
+                // Vue 源：整包 = 模块列表卡（全选只读）；增量 = 源文件树（FILE_LIST，
+                // git 变更标注，勾选文件 → 派生涉及模块）。后端源维持原两卡。
+                String card = mode == DeployMode.FULL
+                        ? (vueMode ? "VUE" : "FULL") : "FILE_LIST";
+                cl.show(dynamicContent, card);
                 if (mode == DeployMode.FULL) {
                     dynamicContent.setVisible(currentModulePath != null);
                 }
-                // 工具条按钮仅在文件列表（INCREMENTAL）模式下有意义：
-                //   - 展开 / 折叠：作用对象是文件树；FULL 模式没有树
-                //   - 搜索切换：搜索框在 FILE_LIST 卡里，FULL 模式下展开它也看不到
-                // 切到 FULL 时一并禁用并自动收起已展开的搜索框。⟳ 刷新一直可用。
+                if (vueMode) {
+                    applyVueModeSelectionState(mode);
+                }
+                // 工具条按钮仅在文件树（INCREMENTAL）下有意义（Vue 增量的源文件树同样适用）
                 boolean treeOpsEnabled = mode == DeployMode.INCREMENTAL;
                 searchToggleButton.setEnabled(treeOpsEnabled);
                 expandAllButton.setEnabled(treeOpsEnabled);
@@ -662,6 +778,8 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
             moduleCombo.setText("点击选择工程");
             metaLabel.setText("");
             dynamicContent.setVisible(false);
+            // 清空工程时一并退出 Vue 模式（重置面板等路径都会走到这里）
+            clearVueMode();
         }
         updateFileCountLabel();
     }
@@ -709,6 +827,12 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      */
     public void refreshCurrentMode() {
         if (currentModulePath == null) return;
+        // Vue 工程的 ⟳ 刷新：重新解析模块清单与构建状态（独立回调，
+        // 与模式切换分流——模式切换不应触发工程重载）
+        if (vueMode) {
+            if (vueProjectRefreshCallback != null) vueProjectRefreshCallback.run();
+            return;
+        }
         if (modeChangeCallback == null) return;
         DeployMode mode = (DeployMode) modeComboBox.getSelectedItem();
         if (mode != null) modeChangeCallback.accept(mode);
@@ -760,6 +884,323 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      */
     public DeployMode getMode() {
         return (DeployMode) modeComboBox.getSelectedItem();
+    }
+
+    // ==================== Vue 源工程 API ====================
+
+    /**
+     * 切换到 Vue 源工程模式并填充业务模块列表
+     *
+     * <p>Vue 工程没有文件级增量语义：模式固定为整包（模块级 zip）并禁用模式下拉；
+     * 动态内容区切到 VUE 卡展示模块勾选列表；文件树旧状态清空避免残留勾选串味。</p>
+     *
+     * @param content           工程上下文名（serve.yaml 的 content 值）
+     * @param modules           业务模块列表（含构建状态）
+     * @param defaultCheckedIds 默认勾选的模块号集合（如 git 检测到变更的模块）；可为 null
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueProject(String content,
+                              List<com.flux.deploy.plugin.service.VueProjectResolver.VueModule> modules,
+                              Set<String> defaultCheckedIds) {
+        // 首次进入 Vue 模式时记住用户原来的更新模式，退出时恢复（Vue 内切换工程不覆盖）
+        if (!vueMode) {
+            modeBeforeVue = getMode();
+        }
+        this.vueMode = true;
+        this.vueContent = content;
+        this.vueModules = modules != null ? modules : List.of();
+        checkedVueModuleIds.clear();
+
+        // 清掉文件树旧状态：切工程时避免 getSelectedFiles 残留上一个工程的勾选
+        this.rawFiles = List.of();
+        this.allFileEntries = List.of();
+        this.checkedFilePaths.clear();
+
+        // Vue 的两档模式与后端语义对齐：
+        //   整包更新 = 整个工程包（全部业务模块）覆盖更新；
+        //   增量更新 = 只更新勾选的模块（默认档，目标树里还可精确到文件）。
+        setMode(DeployMode.INCREMENTAL);
+        modeComboBox.setEnabled(true);
+        if (compileHintLabel != null) {
+            compileHintLabel.setText(COMPILE_HINT_VUE);
+            compileHintLabel.setToolTipText("执行更新时自动重新构建勾选的模块，确保产物为最新代码");
+        }
+        if (fileSearchField.isVisible()) {
+            hideSearchField();
+        }
+        revalidate();
+        repaint();
+
+        // 填充模块列表：默认勾选集合先落 model 再同步控件勾选态
+        List<String> ids = new ArrayList<>();
+        for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : this.vueModules) {
+            ids.add(m.id);
+        }
+        vueModuleList.setItems(ids, this::vueModuleLabel);
+        if (defaultCheckedIds != null) {
+            for (String id : ids) {
+                if (defaultCheckedIds.contains(id)) {
+                    checkedVueModuleIds.add(id);
+                    vueModuleList.setItemSelected(id, true);
+                }
+            }
+        }
+        vueModuleList.repaint();
+
+        metaLabel.setText(content != null ? content + " · Vue 模块包" : "Vue 模块包");
+        // setMode 同值时不触发 listener，这里按当前模式显式定卡：
+        // 整包 = 模块列表卡；增量 = 源文件树（内容由外部 onModeChanged 填充）
+        ((CardLayout) dynamicContent.getLayout()).show(dynamicContent,
+                getMode() == DeployMode.FULL ? "VUE" : "FILE_LIST");
+        dynamicContent.setVisible(true);
+        updateFileCountLabel();
+    }
+
+    /**
+     * 退出 Vue 源工程模式（切回 Maven 工程或清空工程时调用）
+     *
+     * <p>恢复模式下拉可用性与文件树工具按钮状态，动态内容区切回当前模式对应的卡。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void clearVueMode() {
+        if (!vueMode) return;
+        vueMode = false;
+        vueContent = null;
+        vueModules = List.of();
+        checkedVueModuleIds.clear();
+        modeComboBox.setEnabled(true);
+        if (vueModuleList != null) vueModuleList.setEnabled(true);
+        if (compileHintLabel != null) {
+            compileHintLabel.setText(COMPILE_HINT_DEFAULT);
+            compileHintLabel.setToolTipText("部署前请手动编译，静态文件除外");
+        }
+        // 恢复进入 Vue 模式前的更新模式（Vue 强制切成了 FULL）
+        if (modeBeforeVue != null) {
+            setMode(modeBeforeVue);
+            modeBeforeVue = null;
+        }
+        DeployMode mode = getMode();
+        boolean treeOpsEnabled = mode == DeployMode.INCREMENTAL;
+        searchToggleButton.setEnabled(treeOpsEnabled);
+        expandAllButton.setEnabled(treeOpsEnabled);
+        collapseAllButton.setEnabled(treeOpsEnabled);
+        ((CardLayout) dynamicContent.getLayout()).show(dynamicContent,
+                mode == DeployMode.FULL ? "FULL" : "FILE_LIST");
+        updateFileCountLabel();
+    }
+
+    /** 共享库模式的库名（sce-vcom-components 等；null = 非共享库模式） */
+    private String sharedLibName;
+
+    /**
+     * 切换到共享库源工程模式（sce-vcom-components / stores / utils 等纯库工程）。
+     *
+     * <p>共享库没有模块 / 文件勾选语义：产物是单个 UMD 文件，更新目标由执行阶段
+     * 自动探测 login 包定位。源面板只展示库名与自动构建说明，模式下拉禁用。</p>
+     *
+     * @param libName 库名（package.json 的 name）
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    public void setSharedLibProject(String libName) {
+        clearVueMode();
+        this.sharedLibName = libName;
+        this.rawFiles = List.of();
+        this.allFileEntries = List.of();
+        this.checkedFilePaths.clear();
+        modeComboBox.setEnabled(false);
+        if (compileHintLabel != null) {
+            compileHintLabel.setText("执行更新时自动构建，并更新 login 包 lib/ 下的库文件");
+            compileHintLabel.setToolTipText("npm run build-only → 上传 lib/" + libName
+                    + ".umd.js 并刷新 index.html 缓存参数");
+        }
+        if (fileSearchField.isVisible()) {
+            hideSearchField();
+        }
+        metaLabel.setText(libName + " · 共享库工程");
+        setChangedFiles(List.of());
+        updateFileCountLabel();
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * 退出共享库源工程模式（切换到其他类型工程时调用）
+     *
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    public void clearSharedLibMode() {
+        if (sharedLibName == null) return;
+        sharedLibName = null;
+        modeComboBox.setEnabled(true);
+        if (compileHintLabel != null) {
+            compileHintLabel.setText(COMPILE_HINT_DEFAULT);
+            compileHintLabel.setToolTipText("部署前请手动编译，静态文件除外");
+        }
+    }
+
+    /**
+     * 是否处于共享库源工程模式
+     *
+     * @return true 表示当前工程是共享库工程
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    public boolean isSharedLibMode() {
+        return sharedLibName != null;
+    }
+
+    /**
+     * 获取共享库模式的库名
+     *
+     * @return 库名；非共享库模式返回 null
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    public String getSharedLibName() {
+        return sharedLibName;
+    }
+
+    /**
+     * 是否处于 Vue 源工程模式
+     *
+     * @return true 表示当前工程是 Vue 模块式 Web 工程
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public boolean isVueMode() { return vueMode; }
+
+    /**
+     * 获取 Vue 工程上下文名
+     *
+     * @return content 值；非 Vue 模式为 null
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public String getVueContent() { return vueContent; }
+
+    /**
+     * 获取勾选的 Vue 模块号列表（按模块列表顺序）
+     *
+     * @return 勾选的模块号列表；非 Vue 模式返回空列表
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public List<String> getSelectedVueModules() {
+        List<String> result = new ArrayList<>();
+        if (!vueMode) return result;
+        // 整包更新 = 整个工程包覆盖：全部业务模块都参与，忽略勾选状态
+        if (getMode() == DeployMode.FULL) {
+            for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : vueModules) {
+                result.add(m.id);
+            }
+            return result;
+        }
+        // 增量：从勾选的源文件路径（{模块号}/...，可带 git 状态前缀）派生涉及模块
+        Set<String> seen = new LinkedHashSet<>();
+        for (String raw : getSelectedFiles()) {
+            String rel = stripVueStatusPrefix(raw).replace('\\', '/');
+            int slash = rel.indexOf('/');
+            if (slash <= 0) continue;
+            String seg = rel.substring(0, slash);
+            for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : vueModules) {
+                if (m.id.equalsIgnoreCase(seg) && seen.add(m.id)) {
+                    result.add(m.id);
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 剥掉源文件条目的 git 状态前缀（"M path" / "A path" 形式）
+     *
+     * @param raw 原始条目
+     * @return 纯相对路径
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private static String stripVueStatusPrefix(String raw) {
+        String path = raw == null ? "" : raw;
+        if (path.length() > 2 && path.charAt(1) == ' ') {
+            path = path.substring(path.indexOf(' ')).trim();
+        }
+        return path;
+    }
+
+    /**
+     * Vue 增量：文件勾选变化时若派生模块集发生变化，通知目标面板重种目标条目
+     *
+     * <p>逐文件勾选高频触发，仅在模块集合真正变化时回调，避免目标树反复重建。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private List<String> lastDerivedVueModules;
+
+    private void notifyVueFileSelectionChanged() {
+        if (!vueMode || getMode() != DeployMode.INCREMENTAL) return;
+        List<String> derived = getSelectedVueModules();
+        if (derived.equals(lastDerivedVueModules)) return;
+        lastDerivedVueModules = new ArrayList<>(derived);
+        if (vueSelectionChangedCallback != null) {
+            vueSelectionChangedCallback.run();
+        }
+    }
+
+    /**
+     * 按更新模式套用 Vue 模块列表的展示状态
+     *
+     * <p>整包：全部模块显示为选中且列表只读（整个工程包覆盖，无从取消）；
+     * 增量：恢复用户的勾选集，列表可编辑。切换不丢用户在增量档的勾选。</p>
+     *
+     * @param mode 当前更新模式
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private void applyVueModeSelectionState(DeployMode mode) {
+        if (vueModuleList == null) return;
+        boolean full = mode == DeployMode.FULL;
+        for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : vueModules) {
+            vueModuleList.setItemSelected(m.id,
+                    full || checkedVueModuleIds.contains(m.id));
+        }
+        vueModuleList.setEnabled(!full);
+        vueModuleList.repaint();
+        updateFileCountLabel();
+        if (vueSelectionChangedCallback != null) {
+            vueSelectionChangedCallback.run();
+        }
+    }
+
+    /**
+     * 设置 Vue 模块勾选变化回调
+     *
+     * @param callback 回调（勾选集合变化时触发）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueSelectionChangedCallback(Runnable callback) {
+        this.vueSelectionChangedCallback = callback;
+    }
+
+    /** Vue 工程 ⟳ 刷新回调（重新解析模块清单与构建状态） */
+    private Runnable vueProjectRefreshCallback;
+
+    /**
+     * 设置 Vue 工程刷新回调
+     *
+     * @param callback 回调（点 ⟳ 时触发）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueProjectRefreshCallback(Runnable callback) {
+        this.vueProjectRefreshCallback = callback;
     }
 
     /**
@@ -888,16 +1329,27 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         String keyword = fileSearchField.getText().trim();
         List<FileEntry> visibleEntries = filterFileEntries(keyword);
         filteredFileCount = visibleEntries.size();
-        treeRoot = new CheckedTreeNode("变更文件");
+        // Vue 源：根节点显示树的实际来源目录并可见，提供"一键全选全部模块"的入口。
+        // 显示 src/modules 而不是工程包名——这棵树列的就是 {工程根}/src/modules 下的源码，
+        // 挂工程包名会让人以为对应远端目录结构，与 IDE 项目树对不上
+        boolean vueRootVisible = vueMode && vueContent != null && !visibleEntries.isEmpty();
+        treeRoot = new CheckedTreeNode(vueRootVisible
+                ? com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR
+                : "变更文件");
         if (!visibleEntries.isEmpty()) {
             buildDirectoryTree(treeRoot, visibleEntries, checkedFilePaths);
+        }
+        if (vueRootVisible) {
+            // 根勾选态 = 是否全选（与目录节点口径一致），避免默认 checked=true 误显示全选
+            treeRoot.setChecked(!checkedFilePaths.isEmpty()
+                    && getSelectedFiles().size() == rawFiles.size());
         }
 
         rebuildingFileTree = true;
         try {
             DefaultTreeModel model = new DefaultTreeModel(treeRoot);
             fileTree.setModel(model);
-            fileTree.setRootVisible(false);
+            fileTree.setRootVisible(vueRootVisible);
             fileTreeHoverRow = -1;
             expandFileTreeAfterRebuild(!keyword.isEmpty());
         } finally {
@@ -1140,12 +1592,36 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
      * @date 2026-05-07
      */
     private void updateFileCountLabel() {
+        if (vueMode) {
+            int totalModules = vueModules.size();
+            if (totalModules == 0) {
+                fileCountLabel.setText("未发现业务模块");
+                return;
+            }
+            if (getMode() == DeployMode.FULL) {
+                fileCountLabel.setText("整包更新：全部 " + totalModules + " 个模块");
+                return;
+            }
+            // 增量：常规文件计数 + 派生模块数
+            int total = rawFiles.size();
+            if (total == 0) {
+                fileCountLabel.setText("");
+                return;
+            }
+            int checked = getSelectedFiles().size();
+            int modules = getSelectedVueModules().size();
+            fileCountLabel.setText("已选 " + checked + " / " + total + " 个文件 · 涉及 "
+                    + modules + " 个模块");
+            return;
+        }
         int total = rawFiles.size();
         if (total == 0) {
             fileCountLabel.setText("");
+            updateCompileHintForSelection(List.of());
             return;
         }
-        int checked = getSelectedFiles().size();
+        List<String> selectedFiles = getSelectedFiles();
+        int checked = selectedFiles.size();
         String keyword = fileSearchField.getText().trim();
         if (keyword.isEmpty()) {
             fileCountLabel.setText("已选 " + checked + " / " + total + " 个文件");
@@ -1154,6 +1630,42 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
         } else {
             fileCountLabel.setText("已选 " + checked + " / " + total
                     + " 个文件，筛选 " + filteredFileCount + " 个");
+        }
+        updateCompileHintForSelection(selectedFiles);
+    }
+
+    /**
+     * 按当前勾选的文件类型切换右下角编译提示（仅后端源的增量模式生效）。
+     *
+     * <p>勾选中含 {@code .java} → 明确要求先手动编译/打包；勾选全为静态文件（js/css/jsp 等）
+     * → 提示无需编译可直接更新；未勾选任何文件 → 恢复通用提示。Vue 源不走本方法
+     * （提示固定为"自动构建"文案）。</p>
+     *
+     * @param selectedFiles 当前勾选的文件原始路径列表
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private void updateCompileHintForSelection(List<String> selectedFiles) {
+        if (vueMode || compileHintLabel == null) return;
+        // 整包模式必然携带编译产物，按文件类型细分无意义，维持通用提示
+        if (getMode() == DeployMode.FULL || selectedFiles == null || selectedFiles.isEmpty()) {
+            compileHintLabel.setText(COMPILE_HINT_DEFAULT);
+            compileHintLabel.setToolTipText("部署前请手动编译，静态文件除外");
+            return;
+        }
+        boolean hasJava = false;
+        for (String f : selectedFiles) {
+            if (f != null && f.toLowerCase(java.util.Locale.ROOT).endsWith(".java")) {
+                hasJava = true;
+                break;
+            }
+        }
+        if (hasJava) {
+            compileHintLabel.setText(COMPILE_HINT_JAVA);
+            compileHintLabel.setToolTipText("勾选中包含 Java 源文件，更新前请确认已手动编译/打包出最新产物");
+        } else {
+            compileHintLabel.setText(COMPILE_HINT_STATIC);
+            compileHintLabel.setToolTipText("勾选的均为静态文件，无需编译，直接更新即可");
         }
     }
 
@@ -1205,8 +1717,7 @@ public class SourceSectionPanel extends JBPanel<SourceSectionPanel> {
 
         List<ModuleTreeNode> moduleTree = ModuleEnumerator.getModuleTree(project);
         if (moduleTree.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "未找到 Maven 模块",
-                    "提示", JOptionPane.INFORMATION_MESSAGE);
+            com.flux.deploy.plugin.util.FluxDialogs.info(this, "未找到可部署工程（Maven / Vue）", "工程检测");
             return;
         }
 

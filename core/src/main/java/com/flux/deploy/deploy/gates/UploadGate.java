@@ -86,6 +86,16 @@ public class UploadGate implements Gate {
             }
         }
 
+        // 发布前检查（新建目标）：远端必须仍不存在同名文件。
+        // 插件主目标 pipeline 走 skipLock（PreCheckGate 不入链），预检到真正上传之间存在
+        // 时间窗（确认对话框可停留任意久），他人可能抢先上传同名包；此处不校验的话，
+        // 后续 rename 在 POSIX 语义 FTP 服务端会把他人的文件无备份地覆盖掉。
+        if (target.isCreateNew() && ops.exists(target.getRemotePath())) {
+            throw new GateException(name(),
+                    "新建目标在远端已存在同名文件: " + target.getRemotePath()
+                            + "，可能他人已上传，停止上传（请刷新目标列表后重试）");
+        }
+
         // 3. 上传到临时文件名（带重试 + 断点续传）
         // 临时文件 .__UPLOADING__ 后缀让 Stage 0 残留扫描能识别上次中断的滞留物，
         // uploadResumable 自身也会读临时文件 SIZE 决定续传 offset，让网络抖断后接续上传。
@@ -94,7 +104,14 @@ public class UploadGate implements Gate {
         ops.uploadResumable(target.getLocalStagingFile(), tempPath, retryPolicy, prompter,
                 msg -> System.out.println("  " + msg));
 
-        // 4. 重命名为目标文件名
+        // 4. 重命名为目标文件名。新建目标再做一次临近校验：上传大文件耗时可观，
+        //    rename 前的最后一刻远端仍必须不存在同名文件
+        if (target.isCreateNew() && ops.exists(target.getRemotePath())) {
+            try { ops.delete(tempPath); } catch (IOException ignored) {}
+            throw new GateException(name(),
+                    "新建目标在上传期间被他人抢先创建: " + target.getRemotePath()
+                            + "，已清理临时文件并停止发布（请刷新目标列表后重试）");
+        }
         try {
             ops.rename(tempPath, target.getRemotePath());
         } catch (IOException e) {

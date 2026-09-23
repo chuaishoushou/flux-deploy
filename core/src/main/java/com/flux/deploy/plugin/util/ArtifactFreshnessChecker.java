@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.stream.Stream;
 
 /**
- * 部署前编译产物新鲜度校验器（纯函数，无 IDE 依赖）。
+ * 部署前编译产物时间校验器（纯函数，无 IDE 依赖）。
  *
  * <p>{@link ArtifactPresenceValidator} 只校验"存在性"；本类在存在性通过后再做一次
  * "源码 vs 编译产物 mtime 对比"，识别"用户改了 .java 但忘了重新编译/打包"的场景，
@@ -20,10 +20,10 @@ import java.util.stream.Stream;
  * <p>校验范围只盯 {@code .java}：</p>
  * <ul>
  *   <li>{@link DeployMode#INCREMENTAL}：遍历 {@code changedFiles} 中的 {@code .java}，
- *       逐个比对 {@code target/classes/.../X.class} mtime。任一 {@code .java} 比对应
- *       {@code .class} 新 → 标记为 stale。</li>
+ *       逐个比对 {@code target/classes/.../X.class} mtime。任一 {@code .java} 不早于
+ *       对应 {@code .class}（晚于或等于）→ 标记为 stale，即要求编译产物严格晚于源码。</li>
  *   <li>{@link DeployMode#FULL}：扫描 {@code src/main/java/**\/*.java}，与
- *       {@code target/<artifactFileName>} 对比。任一 {@code .java} 比 jar 新 → 标记为 stale。</li>
+ *       {@code target/<artifactFileName>} 对比。任一 {@code .java} 不早于 jar → 标记为 stale。</li>
  * </ul>
  *
  * <p>不校验 {@code resources/}、{@code webapp/}、{@code .properties} 等非 .java 资源：
@@ -136,7 +136,7 @@ public final class ArtifactFreshnessChecker {
                 .filter(p -> isJavaFile(p.getFileName().toString()))
                 .forEach(p -> {
                     try {
-                        if (Files.getLastModifiedTime(p).compareTo(artifactMtime) > 0) {
+                        if (Files.getLastModifiedTime(p).compareTo(artifactMtime) >= 0) {
                             stale.add(toForwardSlash(moduleRoot.relativize(p).toString()));
                         }
                     } catch (IOException ignored) {
@@ -186,11 +186,50 @@ public final class ArtifactFreshnessChecker {
             try {
                 FileTime javaMtime = Files.getLastModifiedTime(javaFile);
                 FileTime classMtime = Files.getLastModifiedTime(classFile);
-                if (javaMtime.compareTo(classMtime) > 0) {
+                // 安全口径：要求编译产物严格晚于源码；相等（class mtime == java mtime）也判过期，
+                // 因为无法证明该 .class 已包含 .java 的最新改动（防止上传未重新编译的旧字节）。
+                if (javaMtime.compareTo(classMtime) >= 0) {
                     stale.add(rel);
                 }
             } catch (IOException ignored) {
                 // 读 mtime 失败按 fresh 处理，避免环境异常阻断部署
+            }
+        }
+        stale.sort(String::compareTo);
+        return new Result(stale, modulePath);
+    }
+
+    /**
+     * Vue 工程：校验选中模块的构建产物是否比源码新。
+     *
+     * <p>逐模块比对 {@code src/modules/{模块号}/} 与 {@code dist/umd/{模块号}/} 子树内文件的
+     * 最新 mtime；源码更新（不早于产物）→ 该模块记入 stale 列表，提示用户先重新构建。
+     * 产物缺失（distMtime=0）不在此报——由存在性校验专门处理，避免两个校验器抢报错。
+     * 源码目录缺失（只有产物没有源码，比如产物是从别处同步来的）视为 fresh。</p>
+     *
+     * @param modulePath 工程根绝对路径；null 返回 fresh
+     * @param moduleIds  选中的模块号列表
+     * @return 校验结果（staleSources 内容为过期模块的 {@code src/modules/{模块号}} 路径）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public static Result checkVueModules(String modulePath, List<String> moduleIds) {
+        if (modulePath == null || moduleIds == null || moduleIds.isEmpty()) {
+            return new Result(List.of(), modulePath);
+        }
+        Path projectRoot = Path.of(modulePath);
+        List<String> stale = new ArrayList<>();
+        for (String id : moduleIds) {
+            Path distDir = projectRoot.resolve(
+                    com.flux.deploy.plugin.service.VueProjectResolver.DIST_UMD_DIR).resolve(id);
+            Path srcDir = projectRoot.resolve(
+                    com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR).resolve(id);
+            long distMtime = com.flux.deploy.plugin.service.VueProjectResolver.latestMtime(distDir);
+            long srcMtime = com.flux.deploy.plugin.service.VueProjectResolver.latestMtime(srcDir);
+            if (distMtime == 0L || srcMtime == 0L) continue;
+            // 与后端口径一致：产物必须严格晚于源码，相等也判过期
+            if (srcMtime >= distMtime) {
+                stale.add(com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR + "/" + id);
             }
         }
         stale.sort(String::compareTo);

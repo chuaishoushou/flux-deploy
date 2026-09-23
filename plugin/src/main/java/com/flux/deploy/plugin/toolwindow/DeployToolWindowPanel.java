@@ -24,6 +24,7 @@ import com.flux.deploy.plugin.util.DeployRunMeta;
 import com.flux.deploy.plugin.util.DeployRunStatus;
 import com.flux.deploy.plugin.util.PluginVersionProvider;
 import com.intellij.icons.AllIcons;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
@@ -31,7 +32,6 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
-import com.intellij.ui.jcef.JBCefApp;
 import com.intellij.util.ui.JBUI;
 
 import javax.swing.*;
@@ -106,6 +106,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private final com.flux.deploy.email.DeployHistoryCache deployHistoryCache =
             new com.flux.deploy.email.DeployHistoryCache();
 
+    /**
+     * 当前打开的邮件模板弹窗引用（非模态，同一时间只允许一个）。
+     *
+     * <p>「邮件模版」按钮弹出的是非模态 {@link EmailJcefDialog}，快速连点会叠出多个窗口。
+     * 这里持有活跃实例做防重入：已有弹窗时聚焦置顶而非新建，弹窗关闭时由
+     * {@link com.intellij.openapi.util.Disposer} 回调清空本引用。</p>
+     */
+    private EmailJcefDialog activeEmailDialog;
+
     // FTP 模式按钮
     private final JButton preCheckButton;
     private final JButton deployButton;
@@ -120,14 +129,28 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     // 备份选项
     private final JCheckBox backupCheckBox;
 
+    /** 左列容器（BorderLayout：CENTER=源工程 / SOUTH=执行操作卡或其折叠条），下排联动折叠在此换 SOUTH 槽 */
+    private JPanel leftColumn;
     /** 右列容器（BorderLayout：CENTER=目标卡 / SOUTH=日志卡或日志折叠条），状态切换在此换 SOUTH 槽 */
     private JPanel rightColumn;
+    /** 执行操作卡（标题栏 + 表单 + 按钮组），下排联动折叠时从 leftColumn 摘出 */
+    private JPanel execCard;
+    /** 执行操作卡折叠态的折叠条（只剩标题栏），折叠时挂到 leftColumn 的 SOUTH 槽 */
+    private JPanel execClosedBar;
     /** 日志整体容器（上方横条 + 下方日志卡片），最小化或全屏时从 rightColumn 摘出 */
     private JPanel logCard;
     /** 日志最小化态的折叠条（只剩标题栏），最小化时挂到 rightColumn 的 SOUTH 槽 */
     private JPanel logClosedBar;
-    /** 日志是否处于关闭状态 */
-    private boolean logClosed = false;
+    /**
+     * 下排（执行操作 + 运行日志）是否处于联动折叠状态。
+     *
+     * <p>两卡永远同折同展：折叠时两列 SOUTH 槽各挂一根只剩标题栏的折叠条，
+     * 源工程树与目标树吃掉腾出的纵向空间——低分辨率屏幕的主要受益点。</p>
+     */
+    private boolean bottomRowCollapsed = false;
+
+    /** 下排联动折叠状态的持久化 key（application 级：折叠偏好跟人走，不随项目变化、不进项目 .idea） */
+    private static final String KEY_BOTTOM_ROW_COLLAPSED = "flux.deploy.bottomRowCollapsed";
 
     /** 部署视图根容器，用于日志全屏切换时替换内容 */
     private JPanel deployCard;
@@ -136,15 +159,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     /** 日志是否处于插件级全屏状态（占满整个 deployCard） */
     private boolean logFullscreen = false;
 
-    // 日志卡片头部三按钮：清空 / 全屏 / 最小化。
-    // 展开态（logCard）与折叠态（logClosedBar）各持有一组（同一 JButton 实例不能跨容器复用），
-    // 通过 refreshHeaderIcons 统一刷新 6 个按钮的图标与 tooltip，确保两套头部状态一致。
+    // 日志卡片头部三按钮：清空 / 全屏 / 最小化；执行操作卡头部与折叠条各有一个最小化按钮。
+    // 展开态（logCard / execCard）与折叠态（logClosedBar / execClosedBar）各持有一组
+    // （同一 JButton 实例不能跨容器复用），通过 refreshHeaderIcons 统一刷新
+    // 图标与 tooltip，确保各处头部状态一致。四个最小化按钮都触发下排联动折叠。
     private JButton logHeaderClearButton;
     private JButton logHeaderFullscreenButton;
     private JButton logHeaderMinimizeButton;
     private JButton logClosedClearButton;
     private JButton logClosedFullscreenButton;
     private JButton logClosedMinimizeButton;
+    private JButton execHeaderMinimizeButton;
+    private JButton execClosedMinimizeButton;
 
     /** 模式感知的按钮卡片容器 */
     private JPanel buttonsCard;
@@ -190,6 +216,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     public DeployToolWindowPanel(Project project) {
         super(new BorderLayout());
         this.project = project;
+        // 弹窗定位锚点：插件内的所有 Messages 弹窗统一相对本面板居中
+        // （不加锚点时会依附随手传入的子组件，弹在面板一角）
+        putClientProperty(com.flux.deploy.plugin.util.FluxDialogs.DIALOG_ANCHOR_KEY, Boolean.TRUE);
 
         // 工具窗口首次打开时静默触发一次配置加载：
         // ~/.flux-deploy/config.toml 不存在时会自动生成默认模板，便于新用户发现可调项。
@@ -226,6 +255,30 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         sourceSection.setModuleSelectedCallback(this::onModuleSelected);
         sourceSection.setModeChangeCallback(this::onModeChanged);
+        // Vue 模块勾选变化 → 目标面板按新勾选集刷新模块目录条目与默认勾选
+        sourceSection.setVueSelectionChangedCallback(() -> {
+            if (sourceSection.isVueMode()) {
+                targetSection.setSourceVue(
+                        sourceSection.getVueContent(), sourceSection.getSelectedVueModules(),
+                        currentModulePath);
+            }
+        });
+        // Vue 工程 ⟳ 刷新：重新解析模块清单与构建/过期状态，保留当前勾选
+        sourceSection.setVueProjectRefreshCallback(() -> {
+            if (!sourceSection.isVueMode() || currentModulePath == null) return;
+            java.nio.file.Path projectRoot = java.nio.file.Path.of(currentModulePath);
+            if (!com.flux.deploy.plugin.service.VueProjectResolver.isVueModuleProject(projectRoot)) {
+                return;
+            }
+            Set<String> keep = new HashSet<>(sourceSection.getSelectedVueModules());
+            String content = com.flux.deploy.plugin.service.VueProjectResolver.readContent(projectRoot);
+            List<com.flux.deploy.plugin.service.VueProjectResolver.VueModule> modules =
+                    com.flux.deploy.plugin.service.VueProjectResolver.listModules(projectRoot);
+            keep.addAll(detectChangedVueModules(projectRoot, modules));
+            sourceSection.setVueProject(content, modules, keep);
+            targetSection.setSourceVue(content, sourceSection.getSelectedVueModules(),
+                    projectRoot.toString());
+        });
         targetContainer.setModeChangeCallback(this::onTargetModeChanged);
         // 本地面板读取源面板已勾选文件数
         targetContainer.getLocalPanel().setFileCountSupplier(
@@ -255,7 +308,12 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         this.targetSection.setContextChangeCallback(() -> SwingUtilities.invokeLater(() -> {
             this.infoSection.clearSessionBackupRoot();
             this.infoSection.refreshBackupLocationLabel();
+            // 连接/系统一变，上次部署的回滚清单就未必对得上远端了，按现状刷新按钮
+            updateRollbackButtonState();
         }));
+        // 目标面板的 Vue 服务包目录探测过程（开始 / 定位到哪 / 失败原因）写进运行日志，
+        // 事后能追溯"为什么右侧没有目标"（appendLog 自身线程安全）
+        this.targetSection.setLogSink(logSection::appendLog);
 
         initUI();
         initListeners();
@@ -277,8 +335,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             docsPanel.prewarm();
         });
 
-        // 日志栏默认展开：首启就能看到「[版本] FLUX Deploy vX.X.X」横幅和后续运行日志，
-        // 用户若想腾出纵向空间可手动点日志卡片头部的最小化图标折叠。
+        // 日志栏首装默认展开：首启就能看到「[版本] FLUX Deploy vX.X.X」横幅和后续运行日志。
+        // 用户点最小化图标可把下排（执行操作 + 运行日志）联动折叠腾出纵向空间，
+        // 该偏好带 application 级记忆（见 initUI 尾部的恢复逻辑），重启后保持。
     }
 
     private void initUI() {
@@ -320,9 +379,14 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         buttonsCard.add(buildLocalButtons(), CARD_LOCAL);
         execContent.add(buttonsCard);
 
-        JPanel execCard = createCardPanel("执行操作", execContent);
+        // 执行操作卡头部 / 折叠条各持有一个最小化按钮，与日志卡的最小化按钮联动折叠整个下排
+        execHeaderMinimizeButton = createHeaderMinimizeButton();
+        execClosedMinimizeButton = createHeaderMinimizeButton();
+
+        execCard = createCardPanel("执行操作", execContent, execHeaderMinimizeButton);
         // 下排面板自己画 1px 顶边线，跟 deployCard 顶部那条 customLine 同款
         execCard.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0));
+        execClosedBar = buildExecClosedBar();
 
         // ═══ 目标卡片 ═══
         // targetContainer 自己（JTabbedPane）没有左右 padding，直接交给 createCardPanel
@@ -335,8 +399,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         // ═══ 日志卡片：标题栏右侧三个图标（清空 / 全屏 / 最小化），三态常驻 ═══
         // 三个按钮在「展开 / 最小化 / 全屏」三态下都常驻显示，每次点击一步到位：
         //   - 清空：始终清空日志正文，不切换状态；
-        //   - 全屏：非全屏 → 全屏（含最小化态直达）；全屏 → 还原展开态；
-        //   - 最小化：非最小化 → 最小化（含全屏态直达）；最小化 → 展开。
+        //   - 全屏：非全屏 → 全屏（含折叠态直达）；全屏 → 还原展开态；
+        //   - 最小化：联动折叠/展开整个下排（执行操作 + 运行日志），含全屏态直达折叠。
         // 展开态与折叠态各有一组按钮，通过 refreshHeaderIcons 同步图标/tooltip。
         logHeaderClearButton = createHeaderClearButton();
         logHeaderFullscreenButton = createHeaderFullscreenButton();
@@ -366,16 +430,28 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         logCard.setPreferredSize(new Dimension(
                 logCard.getPreferredSize().width, sharedBottomHeight));
 
-        JPanel leftColumn = new JPanel(new BorderLayout());
+        leftColumn = new JPanel(new BorderLayout());
         // 源工程面板自己渲染圆角外框 + 标题栏 + 状态行（PanelChromes / SourceSectionPanel#initUI），
         // 不再用 createCardPanel 再包一层标题与边框
         leftColumn.add(sourceSection, BorderLayout.CENTER);
         leftColumn.add(execCard, BorderLayout.SOUTH);
 
-        // rightColumn 作为字段保留：日志最小化 / 全屏切换需要在 SOUTH 槽里换组件。
+        // 两列都作为字段保留：下排联动折叠 / 日志全屏切换需要在各自 SOUTH 槽里换组件。
         rightColumn = new JPanel(new BorderLayout());
         rightColumn.add(targetCard, BorderLayout.CENTER);
         rightColumn.add(logCard, BorderLayout.SOUTH);
+
+        // 恢复上次的下排联动折叠偏好（application 级记忆）：低分辨率屏幕的用户折一次，
+        // 之后每次启动保持折叠。首次安装无记忆值，默认展开——保证首启就能在日志里
+        // 看到版本横幅；折叠期间日志仍在后台累积，展开即可见。
+        if (PropertiesComponent.getInstance().getBoolean(KEY_BOTTOM_ROW_COLLAPSED, false)) {
+            leftColumn.remove(execCard);
+            leftColumn.add(execClosedBar, BorderLayout.SOUTH);
+            rightColumn.remove(logCard);
+            rightColumn.add(logClosedBar, BorderLayout.SOUTH);
+            bottomRowCollapsed = true;
+            refreshHeaderIcons();
+        }
 
         // ═══ 主分割：左列 | 右列。GridLayout(1,2) 强制严格等宽（左右 preferred 不同也不会失衡），
         // 中间 1px 分隔线通过给 leftColumn 加右边框实现，不可拖动 ═══
@@ -444,7 +520,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         }
     }
 
-    /** FTP 模式的按钮行：执行更新 / 本地打包 / 回滚 / 重置 [...glue...] 邮件（贴右边框） */
+    /** FTP 模式的按钮行：执行更新 / 回滚 / 重置 [...glue...] 邮件（贴右边框） */
     private JPanel buildFtpButtons() {
         JPanel p = new JPanel(new GridBagLayout());
         GridBagConstraints gc = new GridBagConstraints();
@@ -463,20 +539,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         deployButton.setToolTipText("生成新包并上传到 FTP");
         gc.gridx = 0; p.add(deployButton, gc);
 
-        localOnlyButton.setMargin(JBUI.insets(3, 8));
-        localOnlyButton.setToolTipText("生成新包保存到本地");
-        gc.gridx = 1; p.add(localOnlyButton, gc);
+        // 「本地打包」按钮已下线 UI（localOnlyButton 对象与状态机引用保留，不再渲染到面板）
 
         rollbackButton.setMargin(JBUI.insets(3, 8));
         rollbackButton.setToolTipText("回滚上次部署");
-        gc.gridx = 2; p.add(rollbackButton, gc);
+        gc.gridx = 1; p.add(rollbackButton, gc);
 
         resetButton.setMargin(JBUI.insets(3, 8));
         resetButton.setToolTipText("重置所有选择");
-        gc.gridx = 3; p.add(resetButton, gc);
+        gc.gridx = 2; p.add(resetButton, gc);
 
         // glue 把"邮件"按钮推到最右
-        gc.gridx = 4; gc.weightx = 1.0; gc.fill = GridBagConstraints.HORIZONTAL;
+        gc.gridx = 3; gc.weightx = 1.0; gc.fill = GridBagConstraints.HORIZONTAL;
         p.add(Box.createHorizontalGlue(), gc);
 
         // 邮件按钮贴右：right inset = 0 紧贴 execContent 右内边框
@@ -484,7 +558,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         emailTemplateButton.setMargin(JBUI.insets(3, 8));
         emailTemplateButton.setToolTipText("打开邮件模板");
         emailTemplateButton.addActionListener(e -> openEmailDialog());
-        gc.gridx = 5;
+        gc.gridx = 4;
         gc.weightx = 0;
         gc.fill = GridBagConstraints.NONE;
         gc.anchor = GridBagConstraints.EAST;
@@ -494,7 +568,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         return p;
     }
 
-    /** 本地模式的按钮行 */
+    /** 本地模式的按钮行：本地打包（主操作） / 重置 */
     private JPanel buildLocalButtons() {
         JPanel p = new JPanel(new GridBagLayout());
         GridBagConstraints gc = new GridBagConstraints();
@@ -502,11 +576,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         gc.gridy = 0; gc.insets = JBUI.insets(4, 0, 4, 4);
         gc.anchor = GridBagConstraints.WEST;
 
+        // 本地模式没有 FTP 上传，「本地打包」就是本模式的更新主操作。
+        // 与 FTP 模式 deployButton 同款的强调样式：default 类型 + 加粗 + 强调色。
         localBuildButton.putClientProperty("JButton.buttonType", "default");
         localBuildButton.setFont(localBuildButton.getFont().deriveFont(Font.BOLD));
         localBuildButton.setForeground(accentBlue());
         localBuildButton.setMargin(JBUI.insets(3, 10));
-        localBuildButton.setToolTipText("对本地包打补丁生成新包");
+        localBuildButton.setToolTipText("在本地生成打补丁后的新包，不上传 FTP");
         gc.gridx = 0; p.add(localBuildButton, gc);
 
         localResetButton.setMargin(JBUI.insets(3, 8));
@@ -533,16 +609,34 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 return;
             }
             logSection.appendLog("INFO  [界面] 点击「执行更新」");
+            // 共享库源：独立流程（自动构建 + 探测 login 目录 + 单文件更新），
+            // 不走模块勾选 / 目标包 / 预检那套校验
+            if (sourceSection.isSharedLibMode()) {
+                runSharedLibDeployFlow();
+                return;
+            }
+            logSection.appendLog("INFO  [校验] 开始：执行更新前置校验");
+            // 每次点「执行更新」都强制重新预检：hasPreChecked 表示"本次执行更新流程是否已预检"，
+            // 必须在流程入口复位。否则同一 session 内上一个包部署成功后该标志残留为 true（onComplete
+            // 不复位它，只有重置 / 回滚才复位），换包再次执行更新会在 proceedToDeployOrPreCheck 走
+            // else 分支直接跳过预检（含 note 文件冲突审计），使冲突漏拦、直到写版本记录阶段才失败
+            // （此时本包已上传、版本记录未写，留下不一致）。
+            hasPreChecked = false;
+            pendingPostPrecheckAction = null;
             // 执行更新：硬性前置校验，任何缺失都弹窗阻断
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
-                logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
                 showPrerequisiteDialog(missing, "执行更新");
                 return;
             }
             // 首要安全前置：勾选的目标包是否落在备份目录下。早停（命中一个即弹窗），
             // 避免后续 checkBackupConflictAndProceed 对几千个误勾包做 FTP 当天备份空检。
             if (!confirmIfBackupTargetSelected()) {
+                return;
+            }
+            // 上次回滚还有文件没恢复成功：它们的原始版本只存在于备份里，
+            // 本次若按"覆盖备份"再跑一遍就会把唯一的原始版本冲掉，先讲清楚再让用户决定
+            if (!confirmIfIncompleteRollback()) {
                 return;
             }
             // 编译产物校验（缺失 / 过期）与备份目录校验同属"点击即跑"的本地前置，前移到此处：
@@ -555,6 +649,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             if (!backupCheckBox.isSelected() && !confirmNoBackupOrAbort()) {
                 return;
             }
+            logSection.appendLog("INFO  [校验] 本地前置校验通过，继续远端核对");
             // 残留锁扫描+处理：前移到确认框之前（原在确认后的真实部署阶段才弹窗），
             // 处理完成后再走"备份冲突检查 / 预检 + 确认框"，让「确认执行」后只剩纯执行。
             resolveResidualLocksAndProceed(() -> {
@@ -567,11 +662,16 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             });
         });
         localOnlyButton.addActionListener(e -> {
-            logSection.appendLog("INFO  [界面] 点击「本地打包」（FTP 模式产出本地包）");
+            if (sourceSection.isSharedLibMode()) {
+                com.flux.deploy.plugin.util.FluxDialogs.info(this,
+                        "共享库工程不支持本地打包，请直接「执行更新」。", "共享库工程");
+                return;
+            }
+            logSection.appendLog("INFO  [界面] 点击「本地打包」，FTP 模式产出本地包");
             // 本地打包（FTP 模式）：同样强制校验（需要 FTP 下载远端原包）
+            logSection.appendLog("INFO  [校验] 开始：本地打包前置校验");
             List<String> missing = validateFtpPrerequisites();
             if (!missing.isEmpty()) {
-                logSection.appendLog("ERROR [界面] 前置条件未满足：" + String.join("；", missing));
                 showPrerequisiteDialog(missing, "本地打包");
                 return;
             }
@@ -579,6 +679,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             if (!verifyFtpArtifactsOrPrompt()) {
                 return;
             }
+            logSection.appendLog("INFO  [校验] 完成：全部前置校验通过");
             if (!confirmFtpLocalBuild()) {
                 logSection.appendLog("INFO  [界面] 用户取消本地打包");
                 return;
@@ -594,7 +695,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         // ── 本地模式按钮 ──
         localBuildButton.addActionListener(e -> {
-            logSection.appendLog("INFO  [界面] 点击「本地打包」（本地模式）");
+            logSection.appendLog("INFO  [界面] 点击「本地打包」，本地模式");
             doLocalBuild();
         });
         localResetButton.addActionListener(e -> resetLocalMode());
@@ -632,6 +733,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * 本地模式执行打包：先预检 → 弹确认清单 → 确认后打包
      */
     private void doLocalBuild() {
+        // 本地模式是「往本地 jar/war 里打补丁」的场景，Vue 模块 zip 没有对应语义；
+        // Vue 工程请走 FTP 模式（执行更新 / 本地打包产出 zip）
+        if (sourceSection.isVueMode()) {
+            com.flux.deploy.plugin.util.FluxDialogs.info(this,
+                    "本地模式暂不支持 Vue 工程，请切换到 FTP 模式更新 Vue 模块。", "暂不支持");
+            return;
+        }
         if (!validateLocalInputs()) return;
         LocalTargetSelection lt = targetContainer.getLocalPanel().getSelection();
         List<String> files = sourceSection.getSelectedFiles();
@@ -650,15 +758,14 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 lt.getPackagePath(), logSection::appendLog);
         if (!pre.isOk()) {
             logSection.appendLog("ERROR [本地] 预检失败：" + pre.getErrorMessage());
-            JOptionPane.showMessageDialog(this,
-                    "预检失败：\n" + pre.getErrorMessage(),
-                    "无法打包", JOptionPane.WARNING_MESSAGE);
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "预检失败：\n" + pre.getErrorMessage(), "无法打包");
             return;
         }
         if (pre.getPreviews().isEmpty()) {
-            JOptionPane.showMessageDialog(this,
+            com.flux.deploy.plugin.util.FluxDialogs.info(this,
                     "未产生任何变更（选中文件与包内现状一致或未编译）。",
-                    "无可打包内容", JOptionPane.INFORMATION_MESSAGE);
+                    "无可打包内容");
             return;
         }
         String pkgName = new File(lt.getPackagePath()).getName();
@@ -691,46 +798,55 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @date 2026-05-07
      */
     private boolean verifyArtifactsOrPrompt(DeployMode mode, List<String> files, boolean hasEmbedTargets) {
+        // 纯静态增量：勾选清单非空且不含任何 .java 源码 —— StagingPackageBuilder 直读源文件入包，
+        // 既不消费 target/classes/*.class 也不消费 target/<artifact>，编译产物校验无对象。
+        // 直接跳过两道编译产物校验，且不打"校验：通过"日志（否则会误导用户以为做了实际编译核对）。
+        boolean hasJavaSource = files != null && files.stream()
+                .anyMatch(s -> s != null && s.toLowerCase().endsWith(".java"));
+        if (mode == DeployMode.INCREMENTAL && files != null && !files.isEmpty() && !hasJavaSource) {
+            logSection.appendLog("INFO  [校验] 本次仅更新静态资源，无需编译，跳过编译产物校验");
+            return true;
+        }
         ArtifactPresenceValidator.Result r = ArtifactPresenceValidator.validate(
                 mode, currentModulePath, currentArtifactFileName, files, hasEmbedTargets);
-        if (r.isOk()) {
-            ArtifactFreshnessValidator.Outcome f = ArtifactFreshnessValidator.verifyOrPrompt(
-                    this, mode, currentModulePath, currentArtifactFileName, files);
-            switch (f.decision) {
-                case USER_CONFIRMED_STALE:
-                    logSection.appendLog("WARN  [界面] 编译产物比源代码旧 " + f.staleSources.size()
-                            + " 个，用户确认继续：");
-                    for (String rel : f.staleSources) {
-                        logSection.appendLog(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
-                                + "            " + rel);
-                    }
-                    return true;
-                case CANCELED:
-                    logSection.appendLog("INFO  [界面] 用户取消部署：编译产物比源代码旧 "
-                            + f.staleSources.size() + " 个");
-                    return false;
-                case FRESH:
-                default:
-                    return true;
+        if (!r.isOk()) {
+            logSection.appendLog("ERROR [校验] 编译产物存在校验：缺失 " + r.missing.size() + " 个");
+            for (String rel : r.missing) {
+                logSection.appendLog(LogSectionPanel.RAW_LINE_MARK + rel);
             }
+            logSection.appendLog("INFO  [校验] 请手动执行编译/打包后重试");
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "编译产物缺失，请手动执行编译/打包后重试。", "编译产物缺失");
+            return false;
         }
+        logSection.appendLog("INFO  [校验] 编译产物存在校验：通过，编译产物齐全");
 
-        logSection.appendLog("ERROR [界面] 编译产物缺失 " + r.missing.size() + " 个，已中止本次操作：");
-        for (String rel : r.missing) {
-            logSection.appendLog(com.flux.deploy.plugin.toolwindow.LogSectionPanel.RAW_LINE_MARK
-                    + "            " + rel);
+        ArtifactFreshnessValidator.Outcome f = ArtifactFreshnessValidator.verifyOrPrompt(
+                this, mode, currentModulePath, currentArtifactFileName, files);
+        switch (f.decision) {
+            case USER_CONFIRMED_STALE:
+                logSection.appendLog("WARN  [校验] 编译产物时间校验：" + f.staleSources.size()
+                        + " 个源码不早于编译产物，用户确认继续");
+                for (String rel : f.staleSources) {
+                    logSection.appendLog(LogSectionPanel.RAW_LINE_MARK + rel);
+                }
+                return true;
+            case CANCELED:
+                logSection.appendLog("INFO  [校验] 编译产物时间校验：" + f.staleSources.size()
+                        + " 个源码不早于编译产物，用户取消");
+                return false;
+            case FRESH:
+            default:
+                logSection.appendLog("INFO  [校验] 编译产物时间校验：通过，编译产物均晚于对应源码");
+                return true;
         }
-        logSection.appendLog("INFO [界面] 请手动执行编译/打包后重试");
-        JOptionPane.showMessageDialog(this, "编译产物缺失，请手动执行编译/打包后重试。",
-                "请手动执行编译/打包", JOptionPane.WARNING_MESSAGE);
-        return false;
     }
 
     /**
      * FTP 模式（执行更新 / 本地打包）点击即跑的编译产物前置校验。
      *
      * <p>取源选择区当前勾选的全部文件与嵌入目标状态，委托 {@link #verifyArtifactsOrPrompt} 完成
-     * "缺失存在性 + 新鲜度"两道校验。与 {@link #confirmIfBackupTargetSelected} 同属"点击即跑"的
+     * "缺失存在性 + 编译时间"两道校验。与 {@link #confirmIfBackupTargetSelected} 同属"点击即跑"的
      * 本地前置：在 FTP 预检、部署确认对话框之前完成，避免用户确认更新后才被产物问题打断。</p>
      *
      * <p>校验范围是源选择区全集，而非部署确认对话框里最终勾选的子集——前移到点击阶段时尚无确认框，
@@ -741,10 +857,166 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @date 2026-05-28
      */
     private boolean verifyFtpArtifactsOrPrompt() {
+        if (sourceSection.isVueMode()) {
+            return verifyVueArtifactsOrPrompt();
+        }
         List<FtpTargetSelection> embeds = targetSection.getEmbedTargets();
         boolean hasEmbedTargets = embeds != null && !embeds.isEmpty();
         return verifyArtifactsOrPrompt(
                 sourceSection.getMode(), sourceSection.getSelectedFiles(), hasEmbedTargets);
+    }
+
+    /**
+     * 拼「模块不匹配」弹窗正文：一句话说清哪个目录 / 模块对不上，一行灰字给检查方向。
+     *
+     * <p>正文只列目录名（不列全路径）——用户要的是"哪个模块勾错了"，全路径在右侧树上就能看到，
+     * 摊进弹窗只会把三行话撑成一屏。详细清单落日志，不占弹窗。</p>
+     *
+     * @param modules      左侧已勾选的模块号
+     * @param nameMismatch 目录名与任何勾选模块都不一致的目录全路径
+     * @param dupTarget    目录名命中模块、但该模块已有另一个勾选目标的目录全路径
+     * @return HTML 正文
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private String buildVueTargetMismatchMessage(List<String> modules,
+                                                 List<String> nameMismatch,
+                                                 List<String> dupTarget) {
+        StringBuilder sb = new StringBuilder("<html><body style='width:360px'>");
+        if (!nameMismatch.isEmpty()) {
+            sb.append("<b>右侧目录 ").append(escapeHtml(joinBaseNames(nameMismatch)))
+              .append(" 不在已勾选模块中</b><br>");
+        }
+        if (!dupTarget.isEmpty()) {
+            sb.append("<b>模块 ").append(escapeHtml(joinBaseNames(dupTarget)))
+              .append(" 勾了多个目标目录</b><br>");
+        }
+        sb.append("<br><span style='color:")
+          .append(com.flux.deploy.plugin.util.FluxDialogs.HINT_COLOR).append("'>")
+          .append("已勾选模块：").append(escapeHtml(String.join("、", modules)))
+          .append("<br>请检查两侧勾选后重试。</span>");
+        return sb.append("</body></html>").toString();
+    }
+
+    /**
+     * 取一组目录全路径的目录名，去重后拼成顿号串（超过 6 个以「等 N 个」收尾）
+     *
+     * @param dirs 目录全路径
+     * @return 目录名串
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private static String joinBaseNames(List<String> dirs) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        for (String d : dirs) {
+            names.add(d.substring(d.lastIndexOf('/') + 1));
+        }
+        List<String> list = new ArrayList<>(names);
+        if (list.size() <= 6) {
+            return String.join("、", list);
+        }
+        return String.join("、", list.subList(0, 6)) + " 等 " + list.size() + " 个";
+    }
+
+    /**
+     * HTML 文本转义（弹窗正文里嵌路径 / 模块号用）
+     *
+     * @param s 原始文本
+     * @return 转义后的文本
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * Vue 工程的前置校验：模块选择非空即可。
+     *
+     * <p>产物缺失 / 过期不再在此拦截——执行更新时会对涉及模块自动构建
+     * （{@code build:one --force}，失败中止且远端零变更），这里只提前告知会构建哪些。</p>
+     *
+     * @return true 表示校验通过、可继续；false 表示已弹窗、调用方应 return
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private boolean verifyVueArtifactsOrPrompt() {
+        List<String> modules = sourceSection.getSelectedVueModules();
+        if (modules.isEmpty()) {
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "请先勾选要更新的 Vue 业务模块。", "未选择模块");
+            return false;
+        }
+        // zip 目标校验：Vue 更新只认服务包目录，勾了 zip 直接拦下说明，不静默忽略
+        List<String> checkedZips = targetSection.getVueCheckedZips();
+        if (!checkedZips.isEmpty()) {
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "<html><body style='width:360px'><b>Vue 更新不支持 zip 目标</b><br>"
+                            + "Vue 工程只能逐文件更新到服务包目录（模块目录），请取消勾选："
+                            + escapeHtml(joinBaseNames(checkedZips)) + "</body></html>",
+                    "目标形态不符");
+            logSection.appendLog("ERROR [校验] 勾选了 zip 目标，Vue 更新只支持服务包目录，已中止："
+                    + String.join("、", checkedZips));
+            return false;
+        }
+        // 自由勾选校验：右侧勾选了与左侧模块不匹配的目录 → 拦截并说明原因。
+        // 勾选阶段不做限制（用户可自由勾选），部署语义在这里统一把关
+        List<String> unmatched = targetSection.getVueUnmatchedCheckedDirs();
+        if (!unmatched.isEmpty()) {
+            // 拆分两类原因：目录名与任何勾选模块都不一致 / 名称一致但该模块已有别的勾选目标
+            List<String> nameMismatch = new ArrayList<>();
+            List<String> dupTarget = new ArrayList<>();
+            for (String d : unmatched) {
+                String base = d.substring(d.lastIndexOf('/') + 1);
+                boolean matchesModule = modules.stream().anyMatch(m -> m.equalsIgnoreCase(base));
+                (matchesModule ? dupTarget : nameMismatch).add(d);
+            }
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    buildVueTargetMismatchMessage(modules, nameMismatch, dupTarget),
+                    "模块不匹配");
+            logSection.appendLog("ERROR [校验] 目标目录校验未通过，已中止："
+                    + String.join("、", unmatched));
+            return false;
+        }
+        // 排除文件确认：右侧取消勾选的文件本次不覆盖，属于"部分更新"，让用户明确确认
+        java.util.Map<String, List<String>> excluded =
+                sourceSection.getMode() == DeployMode.INCREMENTAL
+                        ? targetSection.getVueExcludedFiles() : null;
+        int excludedCount = 0;
+        List<String> excludedSamples = new ArrayList<>();
+        if (excluded != null) {
+            for (java.util.Map.Entry<String, List<String>> e : excluded.entrySet()) {
+                if (e.getValue() == null) continue;
+                String moduleName = e.getKey().substring(e.getKey().lastIndexOf('/') + 1);
+                for (String rel : e.getValue()) {
+                    excludedCount++;
+                    if (excludedSamples.size() < 8) {
+                        excludedSamples.add(moduleName + "/" + rel);
+                    }
+                }
+            }
+        }
+        if (excludedCount > 0) {
+            StringBuilder sb = new StringBuilder("有 ").append(excludedCount)
+                    .append(" 个文件被取消勾选，本次更新将保留远端现有版本（不覆盖）：\n\n");
+            for (String s : excludedSamples) {
+                sb.append("  ").append(s).append("\n");
+            }
+            if (excludedCount > excludedSamples.size()) {
+                sb.append("  ...等共 ").append(excludedCount).append(" 个\n");
+            }
+            sb.append("\n部分更新可能造成模块内文件版本不一致，请确认这是有意的选择。");
+            boolean proceed = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(project,
+                    "部分文件不更新", sb.toString(), "继续更新");
+            if (!proceed) {
+                logSection.appendLog("INFO  [校验] 存在取消勾选的文件，用户选择取消更新");
+                return false;
+            }
+            logSection.appendLog("WARN  [校验] 用户确认：" + excludedCount + " 个取消勾选的文件本次不覆盖");
+        }
+        // 提前告知：勾选模块会在更新前统一自动构建（真正的构建在执行阶段做，失败远端零变更）
+        logSection.appendLog("INFO  [校验] 更新前将自动构建勾选的模块：" + String.join("、", modules));
+        return true;
     }
 
     /** 实际执行本地打包的异步任务 */
@@ -758,7 +1030,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         config.setChangedFiles(files);
         config.setLocalTarget(lt);
 
-        logSection.appendLog("INFO  [本地] 开始打包... (v" + currentPluginVersion() + ")");
+        logSection.appendLog("INFO  [本地] 开始打包，插件版本 v" + currentPluginVersion());
         setLocalButtonsEnabled(false);
         logSection.setProgressVisible(true);
 
@@ -778,18 +1050,43 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                     setLocalButtonsEnabled(true);
                     if (result != null && result.isSuccess()) {
                         showLocalSuccess(result);
+                    } else {
+                        // 与成功路径的 showLocalSuccess 弹窗对齐：失败时也要显式弹一次，
+                        // 避免用户只在日志里看不到、误以为打包成功
+                        showLocalFailure(result);
                     }
                 }));
+    }
+
+    /**
+     * 本地模式打包失败后的反馈：弹错误弹窗，错误原因取自 {@link LocalPackagePatchService.LocalPatchResult#getErrorMessage()}；
+     * result 为 null（service 端 catch 兜底）时给一个通用错误。
+     *
+     * @param result 失败结果（可能为 null）
+     * @author xumanyi
+     * @date 2026-07-01
+     */
+    private void showLocalFailure(LocalPackagePatchService.LocalPatchResult result) {
+        String reason;
+        if (result == null) {
+            reason = "本地打包未能完成（详见日志面板）";
+        } else {
+            String err = result.getErrorMessage();
+            reason = (err == null || err.isBlank())
+                    ? "本地打包失败（无具体错误信息，详见日志面板）"
+                    : err;
+        }
+        com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                "原因：" + reason, "本地打包失败");
     }
 
     /** 本地模式打包成功后的反馈 */
     private void showLocalSuccess(LocalPackagePatchService.LocalPatchResult result) {
         Path out = result.getOutputPackage();
-        String msg = "✓ 打包成功\n\n输出包：" + out + "\n变更：" + result.getChangedCount() + " 个条目";
-        Object[] options = {"打开所在目录", "复制路径", "关闭"};
-        int choice = JOptionPane.showOptionDialog(this, msg, "本地打包完成",
-                JOptionPane.DEFAULT_OPTION, JOptionPane.INFORMATION_MESSAGE, null,
-                options, options[0]);
+        String msg = "打包成功\n\n输出包：" + out + "\n变更：" + result.getChangedCount() + " 个条目";
+        String[] options = {"打开所在目录", "复制路径", "关闭"};
+        int choice = com.flux.deploy.plugin.util.FluxDialogs.choose(this, "本地打包完成",
+                msg, options, 0, com.intellij.openapi.ui.Messages.getInformationIcon());
         if (choice == 0) {
             openContainingDir(out);
         } else if (choice == 1) {
@@ -816,21 +1113,19 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      */
     private boolean validateLocalInputs() {
         if (currentModulePath == null || currentArtifactFileName == null) {
-            JOptionPane.showMessageDialog(this, "请先选择源工程", "提示", JOptionPane.WARNING_MESSAGE);
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this, "请先选择源工程", "无法打包");
             return false;
         }
         LocalTargetSelection lt = targetContainer.getLocalPanel().getSelection();
         if (lt == null) {
-            JOptionPane.showMessageDialog(this, "请先选择本地包和输出目录", "提示",
-                    JOptionPane.WARNING_MESSAGE);
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this, "请先选择本地包和输出目录", "无法打包");
             return false;
         }
         // 整包更新模式不需要勾选文件（整体覆盖）
         if (sourceSection.getMode() != DeployMode.FULL) {
             List<String> files = sourceSection.getSelectedFiles();
             if (files == null || files.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "请先勾选待更新文件", "提示",
-                        JOptionPane.WARNING_MESSAGE);
+                com.flux.deploy.plugin.util.FluxDialogs.warn(this, "请先勾选待更新文件", "无法打包");
                 return false;
             }
         }
@@ -852,7 +1147,8 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         lastFilesLoadedForModule = null;
         sourceSection.setModule(null);
         sourceSection.setArtifact(null);
-        sourceSection.setMode(DeployMode.FULL);
+        // 重置回默认的「增量更新」模式（与构造时的初始默认一致），不要回落到整包更新
+        sourceSection.setMode(DeployMode.INCREMENTAL);
         sourceSection.setChangedFiles(null);
         // 本地目标面板
         targetContainer.getLocalPanel().resetAll();
@@ -872,7 +1168,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         lastFilesLoadedForModule = null;
         sourceSection.setModule(null);
         sourceSection.setArtifact(null);
-        sourceSection.setMode(DeployMode.FULL);
+        sourceSection.clearSharedLibMode();
+        // 重置回默认的「增量更新」模式（与构造时的初始默认一致），不要回落到整包更新
+        sourceSection.setMode(DeployMode.INCREMENTAL);
         sourceSection.setChangedFiles(null);
         targetSection.resetAll();
         infoSection.reset();
@@ -880,33 +1178,190 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         hasDeployed = false;
         hasPreChecked = false;
         pendingPostPrecheckAction = null;
-        rollbackButton.setEnabled(false);
+        // 「重置」= 这一轮到此为止：service 里的回滚清单一并清掉，按钮才会真正保持置灰
+        // （只置灰不清清单，下一次 setButtonsEnabled 会按 hasRollbackData 把它又点亮）
+        DeployExecutionService.clearRollbackData();
+        updateRollbackButtonState();
         // 部署历史缓存跟随主面板「重置」一起清空：邮件弹窗的「导入」按钮从此显示空
         deployHistoryCache.clear();
     }
 
+    /**
+     * 共享库更新流程：前置校验 → 自动探测 login 目录（含确认）→ 构建 + 单文件更新。
+     *
+     * <p>目标探测在当前系统扫描根（含子目录收窄）范围内有界搜索含
+     * {@code lib/{库名}.umd.js} 的目录；唯一候选直接进确认框，多候选让用户挑一个。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private void runSharedLibDeployFlow() {
+        final String libName = sourceSection.getSharedLibName();
+        logSection.appendLog("INFO  [校验] 共享库更新前置校验：" + libName);
+        if (currentModulePath == null || currentModulePath.isEmpty()) {
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this, "未选择工程。", "无法更新");
+            return;
+        }
+        if (!targetSection.isFtpConnected()) {
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this, "FTP 未连接。", "无法更新");
+            return;
+        }
+        final String scanRoot = targetSection.getScanRootAbs();
+        if (scanRoot == null) {
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "请先选择项目与系统。", "无法更新");
+            return;
+        }
+        final String host = targetSection.getConnectedHost();
+        final int port = targetSection.getConnectedPort();
+        final String user = targetSection.getConnectedUsername();
+        final String pass = targetSection.getConnectedPassword();
+        final java.nio.file.Path projectRoot = java.nio.file.Path.of(currentModulePath);
+
+        logSection.appendLog("INFO  [探测] 在 " + scanRoot + " 范围内查找含 lib/"
+                + libName + ".umd.js 的 login 目录...");
+        setButtonsEnabled(false);
+        logSection.setProgressVisible(true);
+        com.intellij.openapi.application.ApplicationManager.getApplication()
+                .executeOnPooledThread(() -> {
+            List<String> candidates;
+            try {
+                candidates = DeployExecutionService.findSharedLibLoginDirs(
+                        host, port, user, pass, scanRoot, libName);
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    setButtonsEnabled(true);
+                    logSection.setProgressVisible(false);
+                    logSection.appendLog("ERROR [探测] login 目录探测失败：" + ex.getMessage());
+                    com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                            "login 目录探测失败：" + ex.getMessage(), "共享库更新");
+                });
+                return;
+            }
+            SwingUtilities.invokeLater(() ->
+                    confirmSharedLibTarget(projectRoot, libName, scanRoot, candidates,
+                            host, port, user, pass));
+        });
+    }
+
+    /**
+     * 共享库更新的目标确认：展示候选 login 目录，确认后启动执行。
+     *
+     * @param projectRoot 共享库工程根目录
+     * @param libName     库名
+     * @param scanRoot    扫描根绝对路径（以 / 结尾）
+     * @param candidates  探测到的候选目录（相对 scanRoot）
+     * @param host        FTP 主机
+     * @param port        FTP 端口
+     * @param user        FTP 用户名
+     * @param pass        FTP 密码
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private void confirmSharedLibTarget(java.nio.file.Path projectRoot, String libName,
+            String scanRoot, List<String> candidates,
+            String host, int port, String user, String pass) {
+        setButtonsEnabled(true);
+        logSection.setProgressVisible(false);
+        if (candidates.isEmpty()) {
+            logSection.appendLog("ERROR [探测] 未找到含 lib/" + libName + ".umd.js 的目录");
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this,
+                    "当前系统范围内没有找到含 lib/" + libName + ".umd.js 的 login 目录。\n"
+                    + "请确认系统 / 子目录选择是否正确。", "未找到更新目标");
+            return;
+        }
+        String chosenRel;
+        if (candidates.size() == 1) {
+            chosenRel = candidates.get(0);
+        } else {
+            String[] display = candidates.toArray(new String[0]);
+            int idx = com.intellij.openapi.ui.Messages.showChooseDialog(
+                    "找到 " + candidates.size() + " 个含该库的 login 目录，选择要更新的一个：",
+                    "选择更新目标", display, display[0],
+                    com.intellij.openapi.ui.Messages.getQuestionIcon());
+            if (idx < 0) {
+                logSection.appendLog("INFO  [界面] 用户取消共享库更新");
+                return;
+            }
+            chosenRel = candidates.get(idx);
+        }
+        final String targetAbs = scanRoot + (chosenRel.isEmpty() ? "" : chosenRel + "/");
+        String msg = "确认更新共享库？\n\n"
+                + "库：" + libName + "（npm run build-only 自动构建）\n"
+                + "目标：" + targetAbs + "lib/" + libName + ".umd.js\n\n"
+                + "更新动作：\n"
+                + "  · 备份远端库文件与 index.html\n"
+                + "  · 上传新构建的 UMD 文件覆盖\n"
+                + "  · 刷新 index.html 中该库的 ?v1= 缓存参数（浏览器才会加载新文件）\n\n"
+                + "⚠ 覆盖远端共享库影响该系统全部页面，请确认没有其他人正在更新。";
+        boolean ok = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(project,
+                "确认共享库更新", msg, "开始更新");
+        if (!ok) {
+            logSection.appendLog("INFO  [界面] 用户取消共享库更新");
+            return;
+        }
+        logSection.appendLog("INFO  [界面] 确认共享库更新：" + targetAbs);
+        setButtonsEnabled(false);
+        rollbackButton.setEnabled(false);
+        logSection.setProgressVisible(true);
+        DeployExecutionService.executeSharedLibUpdate(project, projectRoot, libName,
+                targetAbs, infoSection.getOperator(), host, port, user, pass,
+                logSection::appendLog,
+                success -> {
+                    setButtonsEnabled(true);
+                    logSection.setProgressVisible(false);
+                    hasDeployed = DeployExecutionService.hasRollbackData();
+                    updateRollbackButtonState();
+                });
+    }
+
+    /**
+     * 回滚入口：只撤销本次更新的内容。
+     *
+     * <p>插件不做"选某个历史备份写回远端"——历史备份属于跨次数据，谁在什么时候动过
+     * 无从判定，误恢复的代价远大于收益，这类操作交由人工在 FTP 上处理。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-14
+     */
     private void doRollback() {
-        if (!DeployExecutionService.hasRollbackData()) {
+        boolean hasData = DeployExecutionService.hasRollbackData();
+        if (!hasData) {
             logSection.appendLog("INFO  [回滚] 没有可回滚的部署记录");
             rollbackButton.setEnabled(false);
             return;
         }
-        // 不可逆破坏类：默认按钮落在「否」，避免误回车触发回滚
-        Object[] rollbackOptions = {
-                UIManager.getString("OptionPane.yesButtonText"),
-                UIManager.getString("OptionPane.noButtonText")
-        };
-        int confirm = JOptionPane.showOptionDialog(this,
-                "确认回滚上次部署？\n\n"
-                + "此操作将：\n"
-                + "  1. 恢复所有已更新的包为备份版本\n"
-                + "  2. 撤销版本记录中新增的记录\n"
-                + "  3. 删除备份目录\n\n"
-                + "⚠ 回滚不可撤销。\n"
-                + "⚠ 请确认当前没有其他人正在更新同一系统的包。",
-                "确认回滚", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
-                null, rollbackOptions, rollbackOptions[1]);
-        if (confirm != JOptionPane.YES_OPTION) {
+        doRollbackLast();
+    }
+
+    /**
+     * 回滚最近一次部署（原回滚流程）。
+     *
+     * <p>确认文案按"上次部署是否有备份"切换：无备份时只能删除本次新增的文件，
+     * 被覆盖的文件无法恢复——如实说明能力边界，避免用户误以为能整体还原。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private void doRollbackLast() {
+        boolean hadBackup = DeployExecutionService.lastRunHadBackup();
+        int newCount = DeployExecutionService.lastRunNewFileCount();
+        String message;
+        if (hadBackup) {
+            message = "确认回滚上次部署？\n\n"
+                    + "将把已更新的包恢复为备份版本、撤销本次新增的版本记录，并清理本次备份。\n\n"
+                    + "⚠ 回滚不可撤销，请确认没有其他人正在更新同一系统的包。";
+        } else {
+            message = "上次部署未执行备份，回滚能力有限：\n\n"
+                    + "仅能删除本次新增的 " + newCount + " 个文件；"
+                    + "被覆盖的文件已无旧版本可恢复，将保持当前内容。\n\n"
+                    + "⚠ 回滚不可撤销，请确认没有其他人正在更新同一系统的包。";
+        }
+        // 不可逆破坏类：confirmDanger 默认聚焦「取消」，避免误回车触发回滚。
+        // 用 Project 版本挂 IDE 主窗口居中——组件版本依附工具窗口，长文案会被裁切
+        boolean confirmed = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(project,
+                "确认回滚", message, "确认回滚");
+        if (!confirmed) {
             logSection.appendLog("INFO  [界面] 用户取消回滚");
             return;
         }
@@ -926,9 +1381,62 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                     logSection.setProgressVisible(false);
                     hasDeployed = false;
                     hasPreChecked = false;
-        pendingPostPrecheckAction = null;
-                    rollbackButton.setEnabled(false);
+                    pendingPostPrecheckAction = null;
+                    updateRollbackButtonState();
+                    // Vue 目录直更回滚后：右侧模块文件视图刷新为回滚后的远端现状
+                    if (sourceSection.isVueMode()) {
+                        targetSection.refreshVueFileViews();
+                    }
                 });
+    }
+
+    /**
+     * 刷新回滚按钮启用态与提示。
+     *
+     * <p>唯一判据是「本次更新是否还有可撤销的内容」：未更新、回滚已执行完、
+     * 或本次更新既无备份也无新增文件时一律置灰。</p>
+     *
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private void updateRollbackButtonState() {
+        boolean hasData = DeployExecutionService.hasRollbackData();
+        rollbackButton.setEnabled(hasData);
+        rollbackButton.setToolTipText(hasData
+                ? "回滚上次部署" : "没有可回滚的内容");
+    }
+
+    /**
+     * 上次回滚留有未恢复文件时的二次确认。
+     *
+     * <p>这种状态下远端是"部分新版本"，未恢复文件的原始版本只存在于备份目录里。
+     * 直接开始新一次更新并按默认的「覆盖备份」策略跑，会用当前（半更新）的远端状态
+     * 覆盖掉那份唯一的原始备份，之后再也恢复不回去。这里如实说明并让用户决定。</p>
+     *
+     * @return true 表示无未完成回滚或用户确认继续；false 表示用户选择先处理回滚
+     * @author xumanyi
+     * @date 2026-09-23
+     */
+    private boolean confirmIfIncompleteRollback() {
+        String summary = com.flux.deploy.plugin.service.DeployExecutionService
+                .incompleteRollbackSummary();
+        if (summary == null) {
+            return true;
+        }
+        boolean proceed = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(project,
+                "上次回滚未完成",
+                summary + "。\n\n"
+                        + "现在开始新的更新：备份策略若选「覆盖备份」，这份原始版本会被本次备份覆盖，"
+                        + "之后无法再恢复。\n\n"
+                        + "建议先点「回滚」把它们恢复完；确要继续更新，请在备份冲突提示里选择"
+                        + "「新建备份目录」保留原始备份。",
+                "继续更新");
+        if (!proceed) {
+            logSection.appendLog("INFO  [界面] 上次回滚未完成，用户选择先处理回滚");
+        } else {
+            logSection.appendLog("WARN  [界面] 上次回滚未完成，用户确认继续更新");
+        }
+        return proceed;
     }
 
     /**
@@ -945,22 +1453,22 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private boolean confirmIfBackupTargetSelected() {
         BackupTargetGuard.Hit hit = BackupTargetGuard.findFirstHit(
                 targetSection.getMainTargets(), targetSection.getEmbedTargets());
-        if (hit == null) return true;
+        if (hit == null) {
+            logSection.appendLog("INFO  [校验] 目标包疑似备份校验：通过，目标包未落在备份目录");
+            return true;
+        }
         String msg = "勾选的目标包路径包含「" + hit.matchedSegment + "」，疑似备份目录。\n\n"
                 + "是否确认更新？";
-        // 安全警告类：默认按钮落在「否」，避免误回车直接覆盖备份目录
-        Object[] options = {
-                UIManager.getString("OptionPane.yesButtonText"),
-                UIManager.getString("OptionPane.noButtonText")
-        };
-        int warn = JOptionPane.showOptionDialog(this, msg,
-                "目标包疑似备份目录", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
-                null, options, options[1]);
-        if (warn != JOptionPane.YES_OPTION) {
-            logSection.appendLog("INFO  [界面] 用户取消（目标包位于备份目录的安全警告）");
+        // 安全警告类：confirmDanger 默认聚焦「取消」，避免误回车直接覆盖备份目录
+        boolean proceed = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(this,
+                "目标包疑似备份目录", msg, "继续更新");
+        if (!proceed) {
+            logSection.appendLog("INFO  [校验] 目标包疑似备份校验：路径含「"
+                    + hit.matchedSegment + "」疑似备份目录，用户取消");
             return false;
         }
-        logSection.appendLog("WARN  [界面] 用户确认：将更新到备份目录下的目标包");
+        logSection.appendLog("WARN  [校验] 目标包疑似备份校验：路径含「"
+                + hit.matchedSegment + "」疑似备份目录，用户确认继续");
         return true;
     }
 
@@ -985,7 +1493,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
 
         // 禁用按钮 + 日志提示
         setButtonsEnabled(false);
-        logSection.appendLog("INFO  [备份] 检查当日是否已有备份...");
+        logSection.appendLog("INFO  [备份] 检查当日是否已存在该开发的备份目录...");
 
         com.intellij.openapi.application.ApplicationManager.getApplication()
                 .executeOnPooledThread(() -> {
@@ -998,7 +1506,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                         msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
-                    logSection.appendLog("INFO  [备份] 检查失败（忽略此步骤继续）: " + ex.getMessage());
+                    logSection.appendLog("INFO  [备份] 检查失败，忽略此步骤继续：" + ex.getMessage());
                     setButtonsEnabled(true);
                     proceedToDeployOrPreCheck();
                 });
@@ -1007,7 +1515,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             SwingUtilities.invokeLater(() -> {
                 setButtonsEnabled(true);
                 if (conflicts.isEmpty()) {
-                    logSection.appendLog("INFO  [备份] 检查完成：无冲突");
+                    logSection.appendLog("INFO  [备份] 检查完成，未发现当日同名备份");
                     proceedToDeployOrPreCheck();
                 } else {
                     BackupConflictDialog dialog = new BackupConflictDialog(project, conflicts);
@@ -1069,20 +1577,17 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @date 2026-05-28
      */
     private boolean confirmNoBackupOrAbort() {
-        Object[] noBackupOptions = {
-                UIManager.getString("OptionPane.yesButtonText"),
-                UIManager.getString("OptionPane.noButtonText")
-        };
-        int warn = JOptionPane.showOptionDialog(this,
-                "⚠ 未勾选「执行备份」，更新失败后将无法自动回滚！\n\n"
+        // 安全警告类：confirmDanger 默认聚焦「取消」，避免误回车跳过备份
+        boolean proceed = com.flux.deploy.plugin.util.FluxDialogs.confirmDanger(this,
+                "安全警告",
+                "未勾选「执行备份」，更新失败后将无法自动回滚！\n\n"
                 + "确定不备份直接更新到 FTP？",
-                "安全警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
-                null, noBackupOptions, noBackupOptions[1]);
-        if (warn != JOptionPane.YES_OPTION) {
-            logSection.appendLog("INFO  [界面] 用户取消（未勾选备份的安全警告）");
+                "继续更新");
+        if (!proceed) {
+            logSection.appendLog("INFO  [校验] 未勾选备份：用户取消");
             return false;
         }
-        logSection.appendLog("INFO  [界面] 用户确认：不备份直接更新");
+        logSection.appendLog("WARN  [校验] 未勾选备份：用户确认继续，更新失败将无法自动回滚");
         return true;
     }
 
@@ -1119,7 +1624,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         String pass = targetSection.getConnectedPassword();
 
         setButtonsEnabled(false);
-        logSection.appendLog("INFO  [残留锁] 检查残留锁...");
+        logSection.appendLog("INFO  [残留锁] 检查上次部署是否遗留未释放的锁或上传临时文件...");
 
         com.intellij.openapi.application.ApplicationManager.getApplication()
                 .executeOnPooledThread(() -> {
@@ -1130,7 +1635,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                         msg -> SwingUtilities.invokeLater(() -> logSection.appendLog(msg)));
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
-                    logSection.appendLog("INFO  [残留锁] 检查失败（忽略此步骤继续）: " + ex.getMessage());
+                    logSection.appendLog("INFO  [残留锁] 检查失败，忽略此步骤继续：" + ex.getMessage());
                     setButtonsEnabled(true);
                     next.run();
                 });
@@ -1139,7 +1644,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             SwingUtilities.invokeLater(() -> {
                 setButtonsEnabled(true);
                 if (found.isEmpty()) {
-                    logSection.appendLog("INFO  [残留锁] 检查完成：无残留锁");
+                    logSection.appendLog("INFO  [残留锁] 检查完成，无遗留锁，无需清理");
                     next.run();
                     return;
                 }
@@ -1168,7 +1673,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                         setButtonsEnabled(true);
                         if (!remaining.isEmpty()) {
                             logSection.appendLog("INFO  [残留锁] 仍有 " + remaining.size()
-                                    + " 个未处理的残留锁，已中止");
+                                    + " 个未处理的遗留锁，已中止");
                             return;
                         }
                         next.run();
@@ -1190,49 +1695,177 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private List<String> validateFtpPrerequisites() {
         List<String> missing = new java.util.ArrayList<>();
 
-        // 工程 & 产物
+        // 工程模块：显示模块名，便于确认选对了模块
         if (currentModulePath == null || currentModulePath.isEmpty()) {
+            logSection.appendLog("ERROR [校验] 工程模块：未选择");
             missing.add("未选择工程");
+        } else {
+            logSection.appendLog("INFO  [校验] 工程模块：" + moduleDisplayName());
         }
 
-        // FTP 连接
+        // FTP 连接：未连接才报错阻断；已连接是常态（按钮逻辑已保证连上才走到这），不单独占行
         if (!targetSection.isFtpConnected()) {
+            logSection.appendLog("ERROR [校验] FTP 连接：未连接");
             missing.add("FTP 未连接");
         }
 
-        // 目标包（主 or 嵌入）
-        boolean hasMainTarget = !targetSection.getMainTargets().isEmpty();
+        // 目标包：列出实际包名，而非只报数量
+        List<FtpTargetSelection> mains = targetSection.getMainTargets();
         List<FtpTargetSelection> embeds = targetSection.getEmbedTargets();
-        boolean hasEmbedTarget = embeds != null && !embeds.isEmpty();
-        if (!hasMainTarget && !hasEmbedTarget) {
-            missing.add("未选择目标包");
+        int mainCnt = mains == null ? 0 : mains.size();
+        int embedCnt = embeds == null ? 0 : embeds.size();
+        if (mainCnt + embedCnt == 0) {
+            logSection.appendLog("ERROR [校验] 目标包：未选择");
+            if (sourceSection.isVueMode()) {
+                // Vue 更新只认服务包目录：没有模块目录目标时把探测状态一并带出
+                // （探测失败 = 网络问题可刷新重试；未找到 = 手动展开勾选；勾了 zip = 不是目标），
+                // 用户看得懂原因才知道该怎么处理，而不是只看到"未勾选"
+                String hint = targetSection.getVueTargetStatusHint();
+                String reason = "右侧未勾选要更新的模块目录（目录名需与左侧模块号一致）"
+                        + (hint == null ? "" : "：" + hint);
+                logSection.appendLog("ERROR [校验] " + reason);
+                missing.add(reason);
+            } else {
+                missing.add("未选择目标包");
+            }
+        } else {
+            appendTargetPackagesToLog("目标包", mains);
+            appendTargetPackagesToLog("嵌入目标", embeds);
         }
 
-        // 待更新文件（非整包模式要求至少一个）
+        // 待更新文件：列出实际文件，而非只报数量
         DeployMode mode = sourceSection.getMode();
-        if (mode != DeployMode.FULL) {
+        if (sourceSection.isVueMode()) {
+            List<String> vueMods = sourceSection.getSelectedVueModules();
+            if (vueMods.isEmpty()) {
+                logSection.appendLog("ERROR [校验] Vue 模块：未勾选");
+                missing.add("未勾选任何 Vue 业务模块");
+            } else {
+                logSection.appendLog("INFO  [校验] Vue 模块：" + String.join(", ", vueMods));
+            }
+        } else if (mode == DeployMode.FULL) {
+            logSection.appendLog("INFO  [校验] 待更新文件：整包模式，替换整个远程包");
+        } else {
             List<String> files = sourceSection.getSelectedFiles();
-            if (files == null || files.isEmpty()) {
+            int fileCnt = files == null ? 0 : files.size();
+            if (fileCnt == 0) {
+                logSection.appendLog("ERROR [校验] 待更新文件：未勾选");
                 missing.add("未勾选任何待更新文件");
+            } else {
+                appendSelectedFilesToLog(files);
             }
         }
 
-        // 版本记录 / 备份要求的字段
+        // 版本更新记录 / 备份所需信息：直接显示「任务 / 客服 / 开发」实际填写内容
         boolean updateNote = infoSection.isUpdateNote();
         boolean backup = backupCheckBox.isSelected();
         if (updateNote) {
             String task = infoSection.getTaskId();
             String cust = infoSection.getCustomerId();
             if ((task == null || task.isEmpty()) && (cust == null || cust.isEmpty())) {
+                logSection.appendLog("ERROR [校验] 更新记录信息：任务与客服均未填，至少填一项");
                 missing.add("勾选了更新版本记录，请至少填写任务或客服");
+            } else {
+                if (task != null && !task.isEmpty()) {
+                    logSection.appendLog("INFO  [校验] 任务：" + task);
+                }
+                if (cust != null && !cust.isEmpty()) {
+                    logSection.appendLog("INFO  [校验] 客服：" + cust);
+                }
             }
         }
-        if ((updateNote || backup)
-                && (infoSection.getOperator() == null || infoSection.getOperator().isEmpty())) {
-            missing.add("勾选了更新版本记录或执行备份，请填写开发");
+        if (updateNote || backup) {
+            String op = infoSection.getOperator();
+            if (op == null || op.isEmpty()) {
+                logSection.appendLog("ERROR [校验] 开发：未填");
+                missing.add("勾选了更新版本记录或执行备份，请填写开发");
+            } else {
+                logSection.appendLog("INFO  [校验] 开发：" + op);
+            }
         }
 
         return missing;
+    }
+
+    /**
+     * 取当前工程模块展示名：模块根目录末段名，便于在日志中确认选对模块。
+     *
+     * @return 模块目录名；路径为空时返回原始值
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private String moduleDisplayName() {
+        if (currentModulePath == null || currentModulePath.isEmpty()) {
+            return currentModulePath;
+        }
+        java.nio.file.Path name = java.nio.file.Path.of(currentModulePath).getFileName();
+        return name == null ? currentModulePath : name.toString();
+    }
+
+    /**
+     * 在校验日志中列出目标包：单个直接显示包名，多个先报数量再逐行列出相对路径。
+     *
+     * <p>逐行项以 {@link LogSectionPanel#RAW_LINE_MARK} 输出，由面板段落样式自动缩进对齐，
+     * 不在文本中手动补空格。</p>
+     *
+     * @param label   分类标签（如「目标包」「嵌入目标」）
+     * @param targets 目标列表；为空时不输出
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private void appendTargetPackagesToLog(String label, List<FtpTargetSelection> targets) {
+        if (targets == null || targets.isEmpty()) {
+            return;
+        }
+        if (targets.size() == 1) {
+            logSection.appendLog("INFO  [校验] " + label + "：" + targets.get(0).getTargetName());
+            return;
+        }
+        logSection.appendLog("INFO  [校验] " + label + " 共 " + targets.size() + " 个：");
+        for (FtpTargetSelection t : targets) {
+            logSection.appendLog("INFO  [校验] " + t.getRelativePath());
+        }
+    }
+
+    /**
+     * 在校验日志中列出待更新文件：剥离 VCS 状态前缀后，单个直接显示，多个先报数量再逐行列出。
+     *
+     * @param files 勾选文件（可能带形如「M 」的 VCS 状态前缀）
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private void appendSelectedFilesToLog(List<String> files) {
+        List<String> paths = new java.util.ArrayList<>();
+        for (String raw : files) {
+            paths.add(stripVcsStatusPrefix(raw));
+        }
+        if (paths.size() == 1) {
+            logSection.appendLog("INFO  [校验] 待更新文件：" + paths.get(0));
+            return;
+        }
+        logSection.appendLog("INFO  [校验] 待更新文件 共 " + paths.size() + " 个：");
+        for (String p : paths) {
+            logSection.appendLog("INFO  [校验] " + p);
+        }
+    }
+
+    /**
+     * 剥离文件项的 VCS 状态前缀（形如「M path」），返回纯路径；与
+     * {@code SourceSectionPanel.parseFileEntries} 的剥离口径一致。
+     *
+     * @param raw 原始文件项
+     * @return 纯路径
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private static String stripVcsStatusPrefix(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        if (raw.length() > 2 && raw.charAt(1) == ' ') {
+            return raw.substring(raw.indexOf(' ')).trim();
+        }
+        return raw.trim();
     }
 
     /**
@@ -1249,40 +1882,27 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         List<FtpTargetSelection> embeds = targetSection.getEmbedTargets();
         DeployMode mode = sourceSection.getMode();
 
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body style='width:460px;'>");
-        html.append("<b>即将执行「本地打包」</b><br><br>");
+        StringBuilder msg = new StringBuilder();
+        msg.append("模式：").append(mode == null ? "未选" : mode.name()).append("\n\n");
 
-        html.append("模式：<code>").append(mode == null ? "未选" : mode.name()).append("</code><br>");
-
-        html.append("<b>目标包：</b><ul style='margin-top:2px;'>");
+        msg.append("目标包：\n");
         for (FtpTargetSelection t : mainTargets) {
-            html.append("<li>").append(t.getRelativePath()).append("</li>");
+            msg.append("  · ").append(t.getRelativePath()).append("\n");
         }
         if (embeds != null) {
             for (FtpTargetSelection t : embeds) {
-                html.append("<li>").append(t.getRelativePath()).append("  <i>(WAR 嵌入)</i></li>");
+                msg.append("  · ").append(t.getRelativePath()).append("  (WAR 嵌入)\n");
             }
         }
-        html.append("</ul>");
+        msg.append("\n将执行：\n");
+        msg.append("  1. 从 FTP 下载每个目标的远端原包\n");
+        msg.append("  2. 替换本地选中的 class / 资源，或按模式整体替换\n");
+        msg.append("  3. 合成包输出到 target/flux-deploy-output/\n\n");
+        msg.append("不上传、不备份、不加锁、不改动远端任何文件；\n");
+        msg.append("输出包生成后你可以手动上传 / 发给客户 / 本地验证。");
 
-        html.append("<b>将执行：</b><ol style='margin-top:2px;'>");
-        html.append("<li>编译项目（mvn clean package）</li>");
-        html.append("<li>从 FTP 下载每个目标的远端原包</li>");
-        html.append("<li>替换本地选中的 class / 资源，或按模式整体替换</li>");
-        html.append("<li>合成包输出到 <code>target/flux-deploy-output/</code></li>");
-        html.append("</ol>");
-
-        html.append("<span style='color:#85c88a;'>✓ 不上传、不备份、不加锁、不改动远端任何文件</span><br>");
-        html.append("<span style='color:#8a8e93;'>输出包生成后你可以手动上传 / 发给客户 / 本地验证</span>");
-        html.append("</body></html>");
-
-        Object[] options = {"开始打包", "取消"};
-        int choice = JOptionPane.showOptionDialog(this, html.toString(),
-                "本地打包确认",
-                JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE,
-                null, options, options[0]);
-        return choice == 0;
+        return com.flux.deploy.plugin.util.FluxDialogs.confirm(this,
+                "本地打包确认", msg.toString(), "开始打包");
     }
 
     /**
@@ -1292,18 +1912,13 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @param action  用户正尝试的操作名（用于对话框标题）
      */
     private void showPrerequisiteDialog(List<String> missing, String action) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body style='width:360px;'>");
-        html.append("<b>⚠ 以下条件未满足，无法执行「").append(action).append("」：</b><br><br>");
-        html.append("<ul style='margin-top:0;'>");
+        StringBuilder msg = new StringBuilder();
+        msg.append("以下条件未满足，无法执行「").append(action).append("」：\n\n");
         for (String m : missing) {
-            html.append("<li>").append(m).append("</li>");
+            msg.append("  · ").append(m).append("\n");
         }
-        html.append("</ul>");
-        html.append("请补齐后重试。");
-        html.append("</body></html>");
-        JOptionPane.showMessageDialog(this, html.toString(),
-                "条件不满足", JOptionPane.WARNING_MESSAGE);
+        msg.append("\n请补齐后重试。");
+        com.flux.deploy.plugin.util.FluxDialogs.warn(this, msg.toString(), "条件不满足");
     }
 
     private void showConfirmAndDeploy() {
@@ -1353,14 +1968,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         DeployConfirmDialog dialog = new DeployConfirmDialog(
                 project, targetPkg, remotePath, mode, files);
 
+        logSection.appendLog("INFO  [界面] 前置检查通过，弹出确认更新对话框，等待用户确认");
         if (dialog.showAndGet()) {
-            logSection.appendLog("INFO  [界面] 用户确认部署");
+            logSection.appendLog("INFO  [界面] 用户点击确认执行，开始更新");
             // 未勾选备份的安全警告已前移到 deployButton 点击阶段（confirmNoBackupOrAbort），
             // 确认执行后只剩纯执行，不再弹任何警告 / 校验。
             List<String> selectedFiles = dialog.getSelectedFiles();
             executeDeploy(false, selectedFiles);
         } else {
-            logSection.appendLog("INFO  [界面] 用户取消部署确认");
+            logSection.appendLog("INFO  [界面] 用户点击取消，未执行更新");
         }
     }
 
@@ -1375,17 +1991,30 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private void executeDeploy(boolean dryRun, List<String> selectedFiles, boolean localOnly) {
         // 不再清空日志：保留前置步骤（前置校验、备份冲突检查）的输出，
         // 方便用户在失败时往上滚动看到完整上下文。想清空可点日志区「清空」按钮。
-        // 版本后缀只在"实际打包"动作里加（打包并上传 / 打包不上传），预检不打：预检不消费本地产物
-        String roundLabel = dryRun ? "预检" : localOnly ? "本地打包" : "执行更新";
-        String versionSuffix = dryRun ? "" : " (v" + currentPluginVersion() + ")";
-        // 去掉原"新一轮"前缀：用户点过一次后再次点击不必每次标"新一轮"；点了就是开始
-        logSection.appendLog("INFO  [界面] 开始" + roundLabel + versionSuffix);
+        // 预检说明实际动作；执行更新带插件版本号；本地打包独立措辞。版本号不再用括号包裹
+        if (dryRun) {
+            logSection.appendLog("INFO  [预检] 开始：连接远端核对目标包与版本记录文件");
+        } else if (localOnly) {
+            logSection.appendLog("INFO  [界面] 开始本地打包");
+        } else {
+            logSection.appendLog("INFO  [界面] 开始执行更新 v" + currentPluginVersion());
+        }
 
         PluginDeployConfig pluginConfig = new PluginDeployConfig();
         pluginConfig.setTargetMode(DeployTargetMode.FTP);
         pluginConfig.setModulePath(currentModulePath);
         pluginConfig.setArtifactFileName(currentArtifactFileName);
         pluginConfig.setMode(sourceSection.getMode());
+        if (sourceSection.isVueMode()) {
+            pluginConfig.setSourceProjectType(
+                    com.flux.deploy.plugin.model.SourceProjectType.VUE);
+            pluginConfig.setVueContent(sourceSection.getVueContent());
+            pluginConfig.setVueModules(sourceSection.getSelectedVueModules());
+            // 目标面板模块文件视图里被取消勾选的文件（排除式；仅增量档生效——
+            // 整包更新语义是全量覆盖，不应用任何文件排除）
+            pluginConfig.setVueExcludedFiles(sourceSection.getMode() == DeployMode.INCREMENTAL
+                    ? targetSection.getVueExcludedFiles() : null);
+        }
         pluginConfig.setMainTargets(targetSection.getMainTargets());
         pluginConfig.setEmbedTargets(targetSection.getEmbedTargets());
         pluginConfig.setBackupConflictStrategy(pendingBackupStrategy);
@@ -1423,7 +2052,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         }
         if (pluginConfig.getMainTargets().isEmpty()
                 && (pluginConfig.getEmbedTargets() == null || pluginConfig.getEmbedTargets().isEmpty())) {
-            logSection.appendLog("ERROR [界面] 请选择目标（项目 / 系统 / 目标包）");
+            logSection.appendLog("ERROR [界面] 请选择目标：项目 / 系统 / 目标包");
             return;
         }
         if (updateNote) {
@@ -1464,18 +2093,16 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                     }
                     exitToIdleState();
                     logSection.setProgressVisible(false);
-                    // KEEP_SUCCEEDED 路径下 service 已登记 lastUpdatedPackages，启用回滚按钮
-                    boolean keptForManualRollback = DeployExecutionService.hasRollbackData();
-                    if (result != null && result.isSuccess() && !dryRun && !localOnly
-                            && backupCheckBox.isSelected()) {
-                        hasDeployed = true;
-                        rollbackButton.setEnabled(true);
-                    } else if (keptForManualRollback) {
-                        hasDeployed = true;
-                        rollbackButton.setEnabled(true);
+                    // 回滚按钮只认 service 登记的回滚清单（成功部署、KEEP_SUCCEEDED 收尾都会登记）：
+                    // 勾了备份但实际无内容可撤销时不该亮着，判据统一收到 hasRollbackData
+                    hasDeployed = DeployExecutionService.hasRollbackData();
+                    updateRollbackButtonState();
+                    // 一次真实部署结束后重置备份冲突策略为默认，避免污染下次操作。
+                    // dryRun（预检）不能重置：冲突弹窗选择的策略要留到预检通过后的真实部署才消费，
+                    // 否则「使用原始备份 / 新增目录」在预检完成时即被清回 OVERWRITE
+                    if (!dryRun) {
+                        pendingBackupStrategy = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
                     }
-                    // 一次部署结束后重置备份冲突策略为默认，避免污染下次操作
-                    pendingBackupStrategy = com.flux.deploy.plugin.model.BackupConflictStrategy.OVERWRITE;
 
                     // 通知邮件「导入」缓存累积：只有"打包并上传"且整体成功才记。
                     // 直接读 pluginConfig.getMainTargets() + getEmbedTargets()——这是用户实际选的所有目标，
@@ -1512,6 +2139,11 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                                 ? computeBackupRootForEmail() : null;
                         deployHistoryCache.recordDeploy(
                                 targetSection.getCurrentProjectDir(), packagePaths, backupDir);
+
+                        // Vue 目录直更成功后：右侧模块文件视图刷新为更新后的远端最新现状
+                        if (sourceSection.isVueMode()) {
+                            targetSection.refreshVueFileViews();
+                        }
                     }
 
                     // 消费"预检后自动继续部署"的 pending action：
@@ -1522,7 +2154,6 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                             && postAction != null) {
                         // 只有预检真正通过才标记"已预检"，失败保持 false 以便下次重跑校验（note 审计等）
                         hasPreChecked = true;
-                        logSection.appendLog("INFO  [界面] 预检通过，自动进入部署确认");
                         postAction.run();
                     }
                 }));
@@ -1533,8 +2164,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         deployButton.setEnabled(enabled);
         localOnlyButton.setEnabled(enabled);
         resetButton.setEnabled(enabled);
-        if (enabled && hasDeployed) {
-            rollbackButton.setEnabled(true);
+        if (enabled) {
+            // 回滚按钮不跟着一起放开：仍按"是否还有可撤销内容"判定，回滚完即置灰
+            updateRollbackButtonState();
         }
     }
 
@@ -1591,13 +2223,18 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             return;
         }
         boolean dryRun = DeployExecutionService.isCurrentDryRun();
+        boolean vueDir = DeployExecutionService.isCurrentVueDirDeploy();
         int total = DeployExecutionService.getLiveTotalTargets();
         java.util.List<String> succeededNames = DeployExecutionService.getLiveSucceededNames();
         int succeeded = succeededNames.size();
 
         StringBuilder msg = new StringBuilder();
         msg.append(dryRun ? "预检进行中。\n\n" : "部署进行中。\n\n");
-        if (total > 0 && !dryRun) {
+        if (vueDir && !dryRun) {
+            // Vue 目录直更：成功登记是逐文件的（删除保护用），不适合按"包"罗列；
+            // 且停止语义为整体回滚，这里只说明后果，不提供"保留部分"的选项
+            msg.append("Vue 目录更新按整体回滚：停止后本次已上传的文件将全部恢复为更新前状态。\n");
+        } else if (total > 0 && !dryRun) {
             msg.append("已成功：").append(succeeded).append(" / ").append(total).append("\n");
             if (!succeededNames.isEmpty()) {
                 for (String n : succeededNames) {
@@ -1608,15 +2245,15 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         msg.append("\n请选择如何处理：");
 
         String[] options;
-        if (succeeded > 0 && !dryRun) {
+        if (succeeded > 0 && !dryRun && !vueDir) {
             options = new String[]{"继续部署", "停止并回滚已成功的包", "停止但保留已成功的包"};
         } else {
-            options = new String[]{"继续部署", "停止"};
+            options = new String[]{"继续部署", vueDir && !dryRun ? "停止并回滚全部" : "停止"};
         }
-        int choice = JOptionPane.showOptionDialog(this, msg.toString(),
-                dryRun ? "停止预检？" : "停止部署？",
-                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
-                null, options, options[0]);
+        // 默认聚焦「继续部署」（安全项），停止属于用户显式动作
+        int choice = com.flux.deploy.plugin.util.FluxDialogs.choose(this,
+                dryRun ? "停止预检" : "停止部署", msg.toString(), options, 0,
+                com.intellij.openapi.ui.Messages.getQuestionIcon());
         // 0 = 继续 / -1 = ESC 关闭：都视为继续
         if (choice <= 0) {
             logSection.appendLog("INFO  [界面] 用户取消停止，继续部署");
@@ -1645,7 +2282,7 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      * @return 已挂监听的按钮实例
      */
     private JButton createHeaderClearButton() {
-        JButton btn = new JButton(AllIcons.Actions.GC);
+        JButton btn = new JButton(PluginIcons.DELETE);
         PanelChromes.styleHeaderIconButton(btn);
         btn.setToolTipText("清空运行日志");
         btn.addActionListener(e -> logSection.clear());
@@ -1667,48 +2304,48 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     }
 
     /**
-     * 创建「最小化 / 展开」按钮（展开态 / 折叠态各一份）。
+     * 创建「最小化 / 展开」按钮（执行操作卡与日志卡的展开态 / 折叠态各一份，共四份）。
      *
-     * <p>图标 / Tooltip 由 {@link #refreshHeaderIcons} 按当前状态统一刷新。</p>
+     * <p>点击联动折叠 / 展开整个下排（执行操作 + 运行日志），
+     * 图标 / Tooltip 由 {@link #refreshHeaderIcons} 按当前状态统一刷新。</p>
      *
      * @return 已挂监听的按钮实例
      */
     private JButton createHeaderMinimizeButton() {
         JButton btn = new JButton();
         PanelChromes.styleHeaderIconButton(btn);
-        btn.addActionListener(e -> toggleLogMinimized());
+        btn.addActionListener(e -> toggleBottomRowCollapsed());
         return btn;
     }
 
     /**
-     * 按当前 {@code logFullscreen} / {@code logClosed} 状态，刷新展开态与折叠态
-     * 两套按钮共 6 个的图标与 Tooltip，保证视觉与点击语义同步。
+     * 按当前 {@code logFullscreen} / {@code bottomRowCollapsed} 状态，刷新展开态与折叠态
+     * 各组按钮共 8 个的图标与 Tooltip，保证视觉与点击语义同步。
      *
      * <p>规则：</p>
      * <ul>
      *   <li>清空：图标恒为 GC，不随状态变化。</li>
-     *   <li>全屏：全屏态显示 ⤡（CollapseComponent），其他状态显示 ⤢（ExpandComponent）。</li>
-     *   <li>最小化：展开 / 全屏态显示 IDEA 标准 HideToolWindow（向下收起），最小化态
-     *       显示 ArrowUp（向上展开）——和 IDEA 工具窗 hide/show 同款语义。</li>
+     *   <li>全屏：全屏态显示退出全屏图标（{@link PluginIcons#EXIT_FULLSCREEN}），其他状态显示全屏图标（{@link PluginIcons#FULLSCREEN}）。</li>
+     *   <li>最小化（执行操作卡与日志卡各两份，共 4 个）：展开 / 全屏态显示 IDEA 标准
+     *       HideToolWindow（向下收起），折叠态显示还原窗口图标（{@link PluginIcons#RESTORE}，
+     *       双叠矩形）——和操作系统窗口「最小化 / 还原」同款语义，点击联动折叠 / 展开整个下排。</li>
      * </ul>
      */
     private void refreshHeaderIcons() {
-        Icon fsIcon = logFullscreen ? AllIcons.General.CollapseComponent
-                                    : AllIcons.General.ExpandComponent;
-        Icon fsHover = logFullscreen ? AllIcons.General.CollapseComponentHover
-                                     : AllIcons.General.ExpandComponentHover;
+        Icon fsIcon = logFullscreen ? PluginIcons.EXIT_FULLSCREEN
+                                    : PluginIcons.FULLSCREEN;
         String fsTip = logFullscreen ? "退出全屏" : "全屏显示日志";
         for (JButton b : new JButton[]{logHeaderFullscreenButton, logClosedFullscreenButton}) {
             if (b == null) continue;
             b.setIcon(fsIcon);
-            b.setRolloverIcon(fsHover);
             b.setToolTipText(fsTip);
         }
 
-        Icon minIcon = logClosed ? AllIcons.General.ArrowUp
-                                 : AllIcons.General.HideToolWindow;
-        String minTip = logClosed ? "展开日志窗口" : "最小化日志窗口";
-        for (JButton b : new JButton[]{logHeaderMinimizeButton, logClosedMinimizeButton}) {
+        Icon minIcon = bottomRowCollapsed ? PluginIcons.RESTORE
+                                          : AllIcons.General.HideToolWindow;
+        String minTip = bottomRowCollapsed ? "恢复执行操作与运行日志" : "收起执行操作与运行日志";
+        for (JButton b : new JButton[]{logHeaderMinimizeButton, logClosedMinimizeButton,
+                execHeaderMinimizeButton, execClosedMinimizeButton}) {
             if (b == null) continue;
             b.setIcon(minIcon);
             b.setRolloverIcon(minIcon);
@@ -1735,31 +2372,51 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     }
 
     /**
-     * 「最小化」按钮的统一动作：当前已最小化 → 展开；否则 → 最小化。
+     * 构造执行操作卡折叠态的折叠条。
      *
-     * <p>从全屏态直接点最小化按钮也走这里：{@link #closeLogWindow} 会先关闭全屏再折叠，
-     * 用户视觉上是一次点击完成「全屏 → 折叠」。</p>
+     * <p>与 {@link #buildLogClosedBar()} 同款规格：1px 顶边线 + 标题栏 + 展开按钮。
+     * 下排联动折叠时两根折叠条分别挂在左右两列的 SOUTH 槽，
+     * {@code buildTitleBar} 已锁死标题栏行高，两根折叠条顶边横线天然齐平。</p>
+     *
+     * @return 折叠条面板
+     * @author xumanyi
+     * @date 2026-07-10
      */
-    private void toggleLogMinimized() {
-        if (logClosed) {
-            restoreLogWindow();
+    private JPanel buildExecClosedBar() {
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.setBorder(JBUI.Borders.customLine(PanelChromes.splitterColor(), 1, 0, 0, 0));
+        wrap.add(PanelChromes.buildTitleBar("执行操作", null, execClosedMinimizeButton),
+                BorderLayout.NORTH);
+        return wrap;
+    }
+
+    /**
+     * 「最小化」按钮的统一动作：下排已折叠 → 联动展开；否则 → 联动折叠。
+     *
+     * <p>执行操作卡与日志卡头部、两根折叠条上的最小化按钮都走这里，
+     * 保证两块面板永远同时折叠、同时展开。从全屏态直接点最小化按钮也走这里：
+     * {@link #collapseBottomRow} 会先退出全屏再折叠，用户视觉上一次点击完成「全屏 → 折叠」。</p>
+     */
+    private void toggleBottomRowCollapsed() {
+        if (bottomRowCollapsed) {
+            expandBottomRow();
         } else {
-            closeLogWindow();
+            collapseBottomRow();
         }
     }
 
     /**
-     * 折叠日志窗口，只保留顶部折叠条。
+     * 联动折叠下排：执行操作与运行日志同时只保留顶部折叠条。
      *
-     * <p>BorderLayout 方案下，把 rightColumn 的 SOUTH 槽从 logCard 换成 logClosedBar，
-     * logClosedBar 的首选高度只够标题栏，target 区自动吃掉腾出的纵向空间——
-     * 不需要旧 splitter 方案里靠比例（0.97）压扁日志槽位的技巧。</p>
+     * <p>BorderLayout 方案下，把 leftColumn / rightColumn 的 SOUTH 槽分别换成
+     * execClosedBar / logClosedBar，两根折叠条的首选高度只够标题栏，
+     * 源工程树与目标树自动吃掉腾出的纵向空间——低分辨率屏幕上可视行数明显增加。</p>
      *
      * <p>从全屏态进入折叠态时，先把 logCard 从 deployCard 摘回、mainSplit 还回 deployCard，
-     * 再把 rightColumn 的 SOUTH 换成 logClosedBar。</p>
+     * 再执行两列 SOUTH 槽的替换。折叠状态写入 application 级记忆，IDE 重启后保持。</p>
      */
-    private void closeLogWindow() {
-        if (rightColumn == null || logClosed) {
+    private void collapseBottomRow() {
+        if (rightColumn == null || bottomRowCollapsed) {
             return;
         }
         if (logFullscreen) {
@@ -1769,24 +2426,25 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         } else {
             rightColumn.remove(logCard);
         }
+        leftColumn.remove(execCard);
+        leftColumn.add(execClosedBar, BorderLayout.SOUTH);
         rightColumn.add(logClosedBar, BorderLayout.SOUTH);
-        logClosed = true;
-        rightColumn.revalidate();
-        rightColumn.repaint();
-        deployCard.revalidate();
-        deployCard.repaint();
+        bottomRowCollapsed = true;
+        persistBottomRowCollapsed();
         refreshHeaderIcons();
+        revalidateBottomRow();
     }
 
     /**
-     * 切换日志全屏：全屏时 logCard 占满 deployCard；退出全屏一律回到 NORMAL 态。
+     * 切换日志全屏：全屏时 logCard 占满 deployCard；退出全屏一律回到双展开的 NORMAL 态。
      *
      * <p>BorderLayout 方案下：</p>
      * <ul>
-     *   <li>进入全屏：根据当前是 NORMAL / MINIMIZED 从 rightColumn 摘掉对应组件
-     *       （logCard 或 logClosedBar），mainSplit 从 deployCard 摘出，logCard 搬到 deployCard CENTER。</li>
+     *   <li>进入全屏：折叠态直达全屏时先把两列 SOUTH 槽还原成展开态（mainSplit 即将被
+     *       整体摘出，用户不可见），再把 mainSplit 从 deployCard 摘出、logCard 搬到
+     *       deployCard CENTER——保证全屏期间状态字段与隐藏的挂载结构一致。</li>
      *   <li>退出全屏：logCard 从 deployCard 摘出，mainSplit 还回 deployCard CENTER，
-     *       logCard 还回 rightColumn SOUTH，状态统一回 NORMAL。</li>
+     *       logCard 还回 rightColumn SOUTH；进入时已统一回双展开，左列无需特判。</li>
      * </ul>
      */
     private void toggleLogFullscreen() {
@@ -1794,25 +2452,59 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
             return;
         }
         if (logFullscreen) {
-            // 退出全屏 → 一律回到 NORMAL
+            // 退出全屏 → 一律回到双展开的 NORMAL 态
             deployCard.remove(logCard);
             deployCard.add(mainSplit, BorderLayout.CENTER);
             rightColumn.add(logCard, BorderLayout.SOUTH);
             logFullscreen = false;
-            logClosed = false;
         } else {
-            // 进入全屏：根据当前态摘掉 rightColumn SOUTH 里的对应组件
-            if (logClosed) {
+            // 进入全屏：折叠态直达时两列 SOUTH 先还原展开态，退出全屏即回双展开
+            if (bottomRowCollapsed) {
                 rightColumn.remove(logClosedBar);
+                leftColumn.remove(execClosedBar);
+                leftColumn.add(execCard, BorderLayout.SOUTH);
+                bottomRowCollapsed = false;
+                persistBottomRowCollapsed();
             } else {
                 rightColumn.remove(logCard);
             }
             deployCard.remove(mainSplit);
             deployCard.add(logCard, BorderLayout.CENTER);
             logFullscreen = true;
-            logClosed = false;
         }
         refreshHeaderIcons();
+        revalidateBottomRow();
+    }
+
+    /**
+     * 联动展开下排：执行操作卡与日志卡同时恢复到各自的首选高度
+     * （logCard 首选高度在 initUI 里已对齐 execCard，展开后下排顶边横线齐平）。
+     *
+     * <p>展开状态写入 application 级记忆，IDE 重启后保持。</p>
+     */
+    private void expandBottomRow() {
+        if (rightColumn == null || !bottomRowCollapsed) {
+            return;
+        }
+        leftColumn.remove(execClosedBar);
+        leftColumn.add(execCard, BorderLayout.SOUTH);
+        rightColumn.remove(logClosedBar);
+        rightColumn.add(logCard, BorderLayout.SOUTH);
+        bottomRowCollapsed = false;
+        persistBottomRowCollapsed();
+        refreshHeaderIcons();
+        revalidateBottomRow();
+    }
+
+    /**
+     * 下排状态切换后的统一重布局：两列与 deployCard 一起 revalidate + repaint。
+     *
+     * @author xumanyi
+     * @date 2026-07-10
+     */
+    private void revalidateBottomRow() {
+        leftColumn.revalidate();
+        leftColumn.repaint();
         rightColumn.revalidate();
         rightColumn.repaint();
         deployCard.revalidate();
@@ -1820,18 +2512,17 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     }
 
     /**
-     * 展开日志窗口，恢复到 logCard 自身的首选高度（在 initUI 里已对齐 execCard）。
+     * 把当前下排折叠状态写入 application 级持久化。
+     *
+     * <p>用 application 级而非项目级：折叠偏好跟人 / 机器走（低分辨率屏幕的用户
+     * 希望所有项目都保持折叠），且不污染可能随 git 共享的项目 .idea 目录。
+     * 默认值为展开（false），展开状态下直接清除 key。</p>
+     *
+     * @author xumanyi
+     * @date 2026-07-10
      */
-    private void restoreLogWindow() {
-        if (rightColumn == null || !logClosed) {
-            return;
-        }
-        rightColumn.remove(logClosedBar);
-        rightColumn.add(logCard, BorderLayout.SOUTH);
-        logClosed = false;
-        rightColumn.revalidate();
-        rightColumn.repaint();
-        refreshHeaderIcons();
+    private void persistBottomRowCollapsed() {
+        PropertiesComponent.getInstance().setValue(KEY_BOTTOM_ROW_COLLAPSED, bottomRowCollapsed, false);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1843,6 +2534,20 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         sourceSection.setModule(modulePath);
 
         if (modulePath != null) {
+            // Vue 模块式 Web 工程：产物是按模块打出的 zip，走独立装配分支
+            java.nio.file.Path projectRoot = java.nio.file.Path.of(modulePath);
+            if (com.flux.deploy.plugin.service.VueProjectResolver.isVueModuleProject(projectRoot)) {
+                sourceSection.clearSharedLibMode();
+                setupVueModule(projectRoot);
+                return;
+            }
+            // 共享库工程（sce-vcom-components 等）：单 UMD 产物，更新 login 包 lib/ 文件
+            if (com.flux.deploy.plugin.service.VueProjectResolver.isSharedLibProject(projectRoot)) {
+                setupSharedLibModule(projectRoot);
+                return;
+            }
+            sourceSection.clearVueMode();
+            sourceSection.clearSharedLibMode();
             VirtualFile moduleRoot = LocalFileSystem.getInstance().findFileByPath(modulePath);
             if (moduleRoot != null) {
                 currentArtifactFileName = MavenArtifactResolver.resolveArtifactFileName(moduleRoot);
@@ -1850,6 +2555,170 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 targetSection.autoSelectTarget(currentArtifactFileName);
             }
         }
+    }
+
+    /**
+     * 装配共享库源工程：源面板切共享库模式，目标面板清 Vue/Maven 源保持纯浏览。
+     *
+     * <p>共享库的更新目标（login 壳目录）在执行更新时自动探测，不依赖右侧勾选。</p>
+     *
+     * @param projectRoot 共享库工程根目录
+     * @author xumanyi
+     * @date 2026-08-14
+     */
+    private void setupSharedLibModule(java.nio.file.Path projectRoot) {
+        currentArtifactFileName = null;
+        String libName = com.flux.deploy.plugin.service.VueProjectResolver
+                .sharedLibName(projectRoot);
+        sourceSection.setSharedLibProject(libName);
+        targetSection.setSourceSharedLib();
+        updateRollbackButtonState();
+        logSection.appendLog("INFO  [界面] 共享库工程：" + libName
+                + "，执行更新时自动构建并更新 login 包 lib/" + libName + ".umd.js");
+    }
+
+    /**
+     * 装配 Vue 源工程：解析上下文名与模块清单，填充源面板模块列表并联动目标面板。
+     *
+     * <p>默认勾选 = git 检测到 {@code src/modules/{模块号}/} 下有变更的模块；
+     * git 不可用或无变更时不默认勾选，由用户手动挑选。</p>
+     *
+     * @param projectRoot Vue 工程根目录
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private void setupVueModule(java.nio.file.Path projectRoot) {
+        currentArtifactFileName = null;
+        String content = com.flux.deploy.plugin.service.VueProjectResolver.readContent(projectRoot);
+        List<com.flux.deploy.plugin.service.VueProjectResolver.VueModule> modules =
+                com.flux.deploy.plugin.service.VueProjectResolver.listModules(projectRoot);
+
+        Set<String> defaultChecked = detectChangedVueModules(projectRoot, modules);
+        sourceSection.setVueProject(content, modules, defaultChecked);
+        targetSection.setSourceVue(content, sourceSection.getSelectedVueModules(),
+                projectRoot.toString());
+        // 换源工程后按当前是否还有可撤销内容刷新回滚按钮
+        updateRollbackButtonState();
+
+        if (content == null) {
+            logSection.appendLog("WARN  [界面] Vue 工程 serve.yaml 缺少 content 配置，"
+                    + "无法确定更新包命名，请检查 " + projectRoot.resolve("serve.yaml"));
+        }
+    }
+
+    /**
+     * Vue 增量：扫描 {@code src/modules/} 下全部源文件填充文件树，git 变更项默认勾选。
+     *
+     * <p>条目路径相对 src/modules（如 {@code a0535/Index.vue}），git 变更条目保留状态前缀
+     * （{@code M a0535/Index.vue}），文件树按既有渲染规则以颜色标注 [A]/[M]/[D]。
+     * 勾选语义：勾选文件所在的<b>模块</b>整体参与更新（源文件 → 编译产物不是一一对应，
+     * 部署的最小闭环单元是模块；产物文件级微调在目标面板的合并视图里做）。</p>
+     *
+     * @param projectRoot Vue 工程根目录
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private void loadVueSourceFiles(java.nio.file.Path projectRoot) {
+        java.nio.file.Path srcModules = projectRoot.resolve(
+                com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR);
+        // git 变更 → 相对 src/modules 的路径 + 状态前缀
+        java.util.Map<String, String> changedByRel = new java.util.LinkedHashMap<>();
+        VirtualFile rootVf = LocalFileSystem.getInstance().findFileByPath(projectRoot.toString());
+        if (rootVf != null) {
+            List<String> changedFiles;
+            try {
+                changedFiles = GitChangeDetector.detectChangedFiles(project, rootVf);
+            } catch (Exception e) {
+                changedFiles = java.util.Collections.emptyList();
+            }
+            if (changedFiles != null) {
+                String marker = com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR + "/";
+                for (String raw : changedFiles) {
+                    if (raw == null) continue;
+                    String status = raw.length() > 2 && raw.charAt(1) == ' '
+                            ? raw.substring(0, 1) : null;
+                    String path = normalizeDeployFilePath(raw);
+                    int idx = path.indexOf(marker);
+                    if (idx < 0) continue;
+                    String rel = path.substring(idx + marker.length());
+                    if (rel.isEmpty()) continue;
+                    changedByRel.put(rel, status != null ? status + " " + rel : rel);
+                }
+            }
+        }
+        // src/modules 全量扫描
+        List<String> display = new java.util.ArrayList<>();
+        Set<String> allRels = new HashSet<>();
+        if (java.nio.file.Files.isDirectory(srcModules)) {
+            try (var stream = java.nio.file.Files.walk(srcModules)) {
+                stream.filter(java.nio.file.Files::isRegularFile)
+                        .filter(p -> !p.getFileName().toString().startsWith("."))
+                        .forEach(p -> {
+                            String rel = srcModules.relativize(p).toString().replace('\\', '/');
+                            allRels.add(rel);
+                        });
+            } catch (java.io.IOException ignored) {
+                // 扫描失败按空处理
+            }
+        }
+        for (String rel : allRels) {
+            display.add(changedByRel.getOrDefault(rel, rel));
+        }
+        // 已删除的变更文件本地不存在，仍展示（git 状态 D）
+        for (java.util.Map.Entry<String, String> e : changedByRel.entrySet()) {
+            if (!allRels.contains(e.getKey())) {
+                display.add(e.getValue());
+            }
+        }
+        display.sort((a, b) -> normalizeDeployFilePath(a)
+                .compareToIgnoreCase(normalizeDeployFilePath(b)));
+        Set<String> selectedPaths = new HashSet<>(changedByRel.keySet());
+        sourceSection.setChangedFiles(display, false, selectedPaths, !selectedPaths.isEmpty());
+        // 文件树填充后按派生模块同步一次目标面板
+        targetSection.setSourceVue(sourceSection.getVueContent(),
+                sourceSection.getSelectedVueModules(), projectRoot.toString());
+    }
+
+    /**
+     * 用 git 变更推导默认勾选的 Vue 模块：变更文件落在 {@code src/modules/{模块号}/} 下的模块。
+     *
+     * @param projectRoot Vue 工程根目录
+     * @param modules     工程的全部业务模块
+     * @return 默认勾选的模块号集合；git 不可用或无变更时为空集合
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    private Set<String> detectChangedVueModules(
+            java.nio.file.Path projectRoot,
+            List<com.flux.deploy.plugin.service.VueProjectResolver.VueModule> modules) {
+        Set<String> changed = new HashSet<>();
+        VirtualFile rootVf = LocalFileSystem.getInstance()
+                .findFileByPath(projectRoot.toString());
+        if (rootVf == null) return changed;
+        List<String> changedFiles;
+        try {
+            changedFiles = GitChangeDetector.detectChangedFiles(project, rootVf);
+        } catch (Exception e) {
+            return changed;
+        }
+        if (changedFiles == null) return changed;
+        String prefix = com.flux.deploy.plugin.service.VueProjectResolver.SRC_MODULES_DIR + "/";
+        for (String raw : changedFiles) {
+            String rel = normalizeDeployFilePath(raw);
+            int idx = rel.indexOf(prefix);
+            if (idx < 0) continue;
+            String after = rel.substring(idx + prefix.length());
+            int slash = after.indexOf('/');
+            if (slash <= 0) continue;
+            String moduleId = after.substring(0, slash);
+            for (com.flux.deploy.plugin.service.VueProjectResolver.VueModule m : modules) {
+                if (m.id.equalsIgnoreCase(moduleId)) {
+                    changed.add(m.id);
+                    break;
+                }
+            }
+        }
+        return changed;
     }
 
     private void onModuleSelected(String modulePath) {
@@ -1861,6 +2730,22 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         String modulePath = sourceSection.getCurrentModulePath();
         if (modulePath == null) return;
 
+        if (sourceSection.isVueMode()) {
+            // 模式切换不重载工程；⟳ 刷新走独立的 vueProjectRefreshCallback
+            java.nio.file.Path projectRoot = java.nio.file.Path.of(modulePath);
+            if (mode == DeployMode.FULL) {
+                appendModeHintOnce("[提示] Vue 整包更新：整个工程包（全部业务模块）覆盖更新，"
+                        + "未构建/过期的模块会在更新时自动构建");
+            } else {
+                // 增量：填充源文件树（src/modules 全量 + git 变更默认勾选），
+                // 让用户直接看到自己改了哪几个源文件；执行更新时自动映射到编译产物
+                loadVueSourceFiles(projectRoot);
+                appendModeHintOnce("[提示] Vue 增量更新：源文件树中 git 变更项已默认勾选，"
+                        + "勾选文件所在的模块会整体更新（自动构建缺失/过期产物）；"
+                        + "右侧展开模块目录可再精确到产物文件");
+            }
+            return;
+        }
         if (mode == DeployMode.FULL) {
             // 整包更新模式无文件列表需要刷新；仅输出一次提示
             appendModeHintOnce("[提示] 整包更新模式：将重新编译并替换整个远程包");
@@ -1921,6 +2806,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
     private void appendModeHintOnce(String message) {
         if (message.equals(lastModeHint)) return;
         lastModeHint = message;
+        // 部署执行期间不插模式提示：运行日志正被部署进度占用，
+        // 用户此时切换模式下拉，提示行会打断备份/上传的连续输出
+        if (deployButtonState != DeployButtonState.IDLE) return;
         logSection.appendLog(message);
     }
 
@@ -2087,7 +2975,9 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
         if (meta == null) return null;
         try {
             return DeployRunLogger.open(meta);
-        } catch (IOException ioe) {
+        } catch (IOException | RuntimeException e) {
+            // RuntimeException 兜底：包名含非法字符时 validatePackageName 抛
+            // IllegalArgumentException，运行日志缺失不应中断部署入口
             return null;
         }
     }
@@ -2193,15 +3083,24 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
      */
     public void openEmailDialog() {
         if (project == null) {
-            com.intellij.openapi.ui.Messages.showErrorDialog((java.awt.Component) null,
+            com.flux.deploy.plugin.util.FluxDialogs.error((java.awt.Component) null,
                     "未关联到具体项目，无法打开邮件模板编辑器。", "无法打开邮件模板编辑器");
             return;
         }
-        if (!JBCefApp.isSupported()) {
-            com.intellij.openapi.ui.Messages.showErrorDialog(project,
+        if (!com.flux.deploy.plugin.util.JcefSupport.isAvailable()) {
+            com.flux.deploy.plugin.util.FluxDialogs.error(project,
                     "当前 IDE 未启用内置浏览器内核（JCEF），无法打开内嵌邮件编辑器。\n"
                             + "请在 Registry 中开启 ide.browser.jcef.enabled 后重启 IDE 再试。",
                     "无法打开邮件模板编辑器");
+            return;
+        }
+        // 防重入：已有邮件弹窗打开时聚焦置顶并返回，避免非模态弹窗被快速连点叠出多个。
+        if (activeEmailDialog != null) {
+            java.awt.Window window = activeEmailDialog.getWindow();
+            if (window != null) {
+                window.toFront();
+                window.requestFocus();
+            }
             return;
         }
         // 每次打开新建非模态弹窗：store 走 draft manager，运行时数据供给者绑定当前 panel +
@@ -2210,6 +3109,14 @@ public class DeployToolWindowPanel extends JBPanel<DeployToolWindowPanel>
                 project,
                 emailDraftManager.getStore(),
                 () -> new EmailRuntimeValuesBuilder(this, deployHistoryCache).build());
+        activeEmailDialog = dialog;
+        // 弹窗关闭（Disposable 释放）时清空活跃引用，下次点击可重新打开
+        com.intellij.openapi.util.Disposer.register(dialog.getDisposable(),
+                () -> {
+                    if (activeEmailDialog == dialog) {
+                        activeEmailDialog = null;
+                    }
+                });
         dialog.show();
     }
 

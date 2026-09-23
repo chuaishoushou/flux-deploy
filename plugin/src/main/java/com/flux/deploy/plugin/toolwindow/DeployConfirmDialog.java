@@ -73,7 +73,9 @@ public class DeployConfirmDialog extends DialogWrapper {
         int baseHeight = mode == DeployMode.FULL ? 140 : 400;
         if (multiPath) baseHeight += 80;
         JPanel panel = new JPanel(new BorderLayout(0, 8));
-        panel.setPreferredSize(new Dimension(550, baseHeight));
+        panel.setBorder(com.flux.deploy.plugin.util.FluxDialogs.contentBorder());
+        panel.setPreferredSize(new Dimension(
+                com.flux.deploy.plugin.util.FluxDialogs.WIDTH_M, baseHeight));
 
         // 顶部信息
         JPanel infoPanel = new JPanel(new GridBagLayout());
@@ -177,9 +179,9 @@ public class DeployConfirmDialog extends DialogWrapper {
             panel.add(new JBLabel("将替换整个远程包"), BorderLayout.CENTER);
         }
 
-        // 底部警告
+        // 底部警告（统一警示橙，亮/暗主题自适配）
         JBLabel warning = new JBLabel("⚠ 此操作将修改远程 FTP 包，请确认无误后执行");
-        warning.setForeground(new Color(204, 120, 0));
+        warning.setForeground(com.flux.deploy.plugin.util.FluxDialogs.warnForeground());
         panel.add(warning, BorderLayout.SOUTH);
 
         return panel;
@@ -213,8 +215,9 @@ public class DeployConfirmDialog extends DialogWrapper {
         int visibleRows = Math.min(5, Math.max(2, lineCount));
         int fontH = ta.getFontMetrics(ta.getFont()).getHeight();
         JBScrollPane sp = new JBScrollPane(ta);
-        // 固定 preferredSize 防止内部超长内容把 GridBag 列撑宽：宽度对齐 panel 550 减左侧 label 区域
-        sp.setPreferredSize(new Dimension(420, visibleRows * fontH + 12));
+        // 固定 preferredSize 防止内部超长内容把 GridBag 列撑宽：宽度对齐统一弹窗宽减左侧 label 区域
+        sp.setPreferredSize(new Dimension(
+                com.flux.deploy.plugin.util.FluxDialogs.WIDTH_M - 130, visibleRows * fontH + 12));
         sp.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         sp.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
         return sp;

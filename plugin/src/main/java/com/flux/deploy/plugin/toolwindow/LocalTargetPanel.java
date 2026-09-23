@@ -12,6 +12,7 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.util.IconUtil;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.JBUI;
 
 import javax.swing.*;
@@ -102,7 +103,7 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
         // ── 源包区组件 ──
         this.selectedFileNameLabel = new JBLabel();
         this.selectedParentPathLabel = new JBLabel();
-        this.clearSelectionButton = new JButton(AllIcons.Actions.Close);
+        this.clearSelectionButton = new JButton(PluginIcons.CLOSE);
         this.clearSelectionButton.setBorderPainted(false);
         this.clearSelectionButton.setContentAreaFilled(false);
         this.clearSelectionButton.setFocusable(false);
@@ -110,7 +111,6 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
         this.clearSelectionButton.setToolTipText("清除已选源包");
         int closeSize = 22;
         this.clearSelectionButton.setPreferredSize(new Dimension(closeSize, closeSize));
-        this.clearSelectionButton.setRolloverIcon(AllIcons.Actions.CloseHovered);
 
         this.emptyDropZone = buildEmptyDropZone();
         this.selectedCard = buildSelectedCard();
@@ -185,7 +185,7 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
         JBLabel iconLabel = new JBLabel(bigIcon);
 
         JBLabel line1 = new JBLabel("拖入 jar / war 文件");
-        line1.setFont(line1.getFont().deriveFont(Font.BOLD, 13f));
+        line1.setFont(JBFont.label().asBold());
 
         JBLabel line2 = new JBLabel("或点击选择");
         line2.setForeground(mutedForeground());
@@ -234,9 +234,9 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
 
         JBLabel fileIcon = new JBLabel(AllIcons.FileTypes.Archive);
 
-        selectedFileNameLabel.setFont(selectedFileNameLabel.getFont().deriveFont(Font.BOLD, 13f));
+        selectedFileNameLabel.setFont(JBFont.label().asBold());
         selectedParentPathLabel.setForeground(mutedForeground());
-        selectedParentPathLabel.setFont(selectedParentPathLabel.getFont().deriveFont(11f));
+        selectedParentPathLabel.setFont(JBFont.label().lessOn(2f));
 
         GridBagConstraints gbc = new GridBagConstraints();
 
@@ -410,8 +410,8 @@ public class LocalTargetPanel extends JBPanel<LocalTargetPanel> {
                         dtde.dropComplete(true);
                     } else {
                         dtde.dropComplete(false);
-                        JOptionPane.showMessageDialog(LocalTargetPanel.this,
-                                "请拖入 .jar 或 .war 文件", "提示", JOptionPane.WARNING_MESSAGE);
+                        com.flux.deploy.plugin.util.FluxDialogs.warn(LocalTargetPanel.this,
+                                "请拖入 .jar 或 .war 文件", "无效文件");
                     }
                 } catch (Exception ex) {
                     dtde.dropComplete(false);

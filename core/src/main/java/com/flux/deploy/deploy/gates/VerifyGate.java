@@ -54,7 +54,9 @@ public class VerifyGate implements Gate {
         // 2. 下载远程包到临时文件
         Path tempFile = Files.createTempFile("verify-", "-" + target.getPackageName());
         try {
-            ops.download(target.getRemotePath(), tempFile);
+            ops.download(target.getRemotePath(), tempFile,
+                    "[校验] 回读 " + target.getPackageName(),
+                    msg -> System.out.println("  " + msg));
 
             // 3. 计算远程包 SHA256
             String remoteHash = HashUtil.sha256(tempFile);
@@ -67,7 +69,7 @@ public class VerifyGate implements Gate {
             }
 
             target.setStatus(TargetPackage.Status.VERIFIED);
-            System.out.println("  [校验] SHA256 一致 " + localHash.substring(0, 16) + "...");
+            System.out.println("[校验] SHA256 一致 " + localHash.substring(0, 16) + "...");
 
         } finally {
             Files.deleteIfExists(tempFile);

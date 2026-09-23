@@ -5,6 +5,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBTextField;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.NamedColorUtil;
 
 import javax.swing.*;
@@ -120,17 +121,23 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
         g.anchor = GridBagConstraints.WEST;
         g.insets = new Insets(2, 0, 2, 0);
 
-        // 行 0：勾选项，跨两列；备份选项后附小号灰色斜体使用提示
+        // 行 0：勾选项，跨两列；备份选项后附小号灰色斜体使用提示。
+        // 勾选组与提示分槽放置：WEST 放两个勾选框（刚性占位），提示放 CENTER——
+        // 窄面板（低分辨率屏幕）下 CENTER 可被压缩，JLabel 空间不足时自动画省略号，
+        // 不再像单行 FlowLayout 那样把提示整个挤出可视区；完整文案仍可通过 tooltip 查看。
         g.gridy = 0;
         g.gridx = 0; g.gridwidth = 2; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1.0;
-        JPanel checkRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        checkRow.add(updateNoteCheckBox);
-        checkRow.add(backupCheckBox);
+        JPanel checkRow = new JPanel(new BorderLayout(6, 0));
+        JPanel checkGroup = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        checkGroup.add(updateNoteCheckBox);
+        checkGroup.add(backupCheckBox);
+        checkRow.add(checkGroup, BorderLayout.WEST);
         JBLabel backupHint = new JBLabel("· 重复备份会覆盖原包，多次更新请取消");
-        backupHint.setFont(backupHint.getFont().deriveFont(Font.ITALIC, 11f));
+        // 相对字号（默认 Label 字体 -2 斜体）而非写死 11pt，跟随 IDE 全局字号设置
+        backupHint.setFont(JBFont.label().lessOn(2f).asItalic());
         backupHint.setForeground(NamedColorUtil.getInactiveTextColor());
         backupHint.setToolTipText("同一天重复备份会覆盖前一次");
-        checkRow.add(backupHint);
+        checkRow.add(backupHint, BorderLayout.CENTER);
         container.add(checkRow, g);
         g.weightx = 0; g.fill = GridBagConstraints.NONE;
 
@@ -292,7 +299,9 @@ public class InfoSectionPanel extends JBPanel<InfoSectionPanel> {
      * 重置表单
      */
     public void reset() {
-        updateNoteCheckBox.setSelected(false);
+        // 恢复默认勾选态（与构造时 new JCheckBox("更新版本记录", true) 一致），
+        // 而非清成未勾选——重置后默认仍走"更新版本记录"流程。
+        updateNoteCheckBox.setSelected(true);
         taskIdField.setText("");
         customerIdField.setText("");
         for (java.awt.event.ActionListener l : updateNoteCheckBox.getActionListeners()) {

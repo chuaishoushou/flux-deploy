@@ -276,6 +276,20 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--primary);
 }
 
+/* 关闭：顶栏最右的纯图标按钮（方形，hover 变红）。和系统标题栏关闭并存，跨平台一致。 */
+.tb-btn.tb-close {
+  width: 30px;
+  padding: 0;
+  margin-left: 4px;
+  justify-content: center;
+  color: var(--fg-muted);
+}
+.tb-btn.tb-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.tb-btn.tb-close .tb-ico { flex: 0 0 16px; }
+
 .tb-btn.done {
   background: var(--success) !important;
   color: #fff !important;
@@ -393,22 +407,12 @@ button { font-family: inherit; cursor: pointer; }
 .ql-editor li { margin: 0; }
 
 /* ──────────────────────────────────────────
-   变量 chip：完全无装饰
+   变量高亮：普通可编辑文本，仅着橙色作视觉区分（非斜体、正常字体）
+   color 用 CSS class 承载，复制管线会脱掉 span，避免橙色被内联进最终邮件
    ────────────────────────────────────────── */
-.ph {
-  display: inline-block;
-  vertical-align: top;
-  max-width: 100%;
-  color: inherit;
-  background: transparent;
-  border: none;
-  -webkit-user-select: text;
-  user-select: text;
-  cursor: text;
-}
-.ph.ph-empty {
+.fluxvar {
   color: #c2762e;
-  font-style: italic;
+  font-style: normal;
 }
 
 /* ──────────────────────────────────────────
@@ -435,7 +439,7 @@ button { font-family: inherit; cursor: pointer; }
    邮件变量 picker
    ────────────────────────────────────────── */
 .ql-snow .ql-picker.ql-flux-var { width: 100px; }
-.ql-snow .ql-picker.ql-flux-var .ql-picker-options { min-width: 380px; padding: 6px; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-options { min-width: 150px; padding: 6px; }
 .ql-snow .ql-picker.ql-flux-var .ql-picker-label {
   color: var(--primary);
   font-weight: 500;
@@ -452,15 +456,21 @@ button { font-family: inherit; cursor: pointer; }
 .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="客服"]::before
     { content: '${客服}'; }
 .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新模式"]::before
-    { content: '${更新模式}\00a0\00a0\00a0\00a0 整包更新 / 增量更新'; }
+    { content: '${更新模式}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="FTP版本来源"]::before
+    { content: '${FTP版本来源}'; }
 .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包"]::before
-    { content: '${更新包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
-.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包路径"]::before
-    { content: '${更新包路径}\00a0\00a0\00a0\00a0 /开发/项目/.../a.jar'; }
+    { content: '${更新包}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新jar包"]::before
+    { content: '${更新jar包}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新war包"]::before
+    { content: '${更新war包}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="更新包地址"]::before
+    { content: '${更新包地址}'; }
 .ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包"]::before
-    { content: '${备份包}\00a0\00a0\00a0\00a0 a.jar、b.jar'; }
-.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包路径"]::before
-    { content: '${备份包路径}\00a0\00a0\00a0\00a0 /开发/项目/backup/.../a.jar'; }
+    { content: '${备份包}'; }
+.ql-snow .ql-picker.ql-flux-var .ql-picker-item[data-value="备份包地址"]::before
+    { content: '${备份包地址}'; }
 
 /* 字号 picker：用中文字号制（小五 / 五号 / 小四 ...）显示，对应 WeCom 的标签习惯。
    实际 data-value 是 pt 值，CSS 输出 inline font-size: <pt>，跟 WeCom 一一对应。 */
@@ -545,6 +555,85 @@ button { font-family: inherit; cursor: pointer; }
 .toast.error { background: var(--danger); }
 .toast.warn { background: var(--warning); color: var(--fg); }
 .toast-ico { flex: 0 0 16px; }
+
+/* ──────────────────────────────────────────
+   页内弹窗：自定义 confirm / prompt
+   （替代 JCEF 原生框——原生框标题暴露 file:///jbcefbrowser/… 且按钮英文）
+   ────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(24, 24, 27, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  animation: fadeIn 0.15s var(--ease-out);
+}
+.modal-card {
+  width: min(400px, calc(100vw - 48px));
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: 20px 20px 16px;
+  animation: modalIn 0.22s var(--ease-bounce);
+}
+.modal-message {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg);
+  white-space: pre-line;
+}
+.modal-input {
+  width: 100%;
+  height: 34px;
+  margin-top: 14px;
+  padding: 0 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.modal-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: var(--shadow-focus);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.modal-btn {
+  height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.modal-cancel { background: var(--bg-hover); color: var(--fg-soft); }
+.modal-cancel:hover { background: var(--bg-active); }
+.modal-ok { background: var(--primary); color: #fff; }
+.modal-ok:hover { background: var(--primary-hover); }
+.modal-ok.danger { background: var(--danger); }
+.modal-ok.danger:hover { background: #dc2626; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
 
 /* ──────────────────────────────────────────
    动画

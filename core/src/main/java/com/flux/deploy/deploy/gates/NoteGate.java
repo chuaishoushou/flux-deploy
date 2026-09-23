@@ -88,12 +88,12 @@ public class NoteGate implements Gate {
             String fname = entry.getName();
             if (!NoteFileNames.isNoteCandidate(packageName, fname)) continue;
             String fpath = remoteDir + fname;
-            String content = downloadString(fpath);
+            String content = downloadString(fpath, fname);
             candidates.add(new RemoteNote(fname, fpath, content));
         }
 
         // 2) 选目标文件：优先 canonical（精确匹配），否则最大字节者；都没有就用 canonical 新建。
-        RemoteNote primary = pickPrimary(candidates, canonicalName);
+        RemoteNote primary = pickPrimary(name(), candidates, canonicalName);
         String writeName;
         String writePath;
         String baseContent;
@@ -141,10 +141,23 @@ public class NoteGate implements Gate {
             sb.append(uploadRecord).append("\n");
             String finalContent = sb.toString();
 
-            // 4) 上传到 writePath（原文件就地覆盖，新建场景就是新 canonical 路径）
+            // 4) 漏洞 H3 修复：upload 之前先快照远端原始字节，登记 writePath 到 target，
+            //    让 Rollback 在 NOTE_UPDATED 状态能精确撤销 NoteGate 的写入：
+            //    - primary != null（覆盖已存在）：snapshot = 原始字节，回滚时 STOR 原字节
+            //    - primary == null（新建 canonical）：snapshot = null，回滚时 delete writePath
+            //    这一步独立于 baseContent 字符串，避免 GB18030↔UTF-8 转码丢失原编码字节。
+            byte[] noteSnapshot = null;
+            if (primary != null) {
+                noteSnapshot = downloadBytes(primary.path);
+            }
+            target.setNoteSnapshotBytes(noteSnapshot);
+            target.setNoteRemotePath(writePath);
+
+            // 5) 发布到 writePath（原子发布：整份写回一旦半传就会截断历史记录，
+            //    而版本记录没有第二份副本，必须传完校验通过才替换）
             Files.writeString(tempNote, finalContent, StandardCharsets.UTF_8);
             long expectedBytes = Files.size(tempNote);
-            ops.upload(tempNote, writePath);
+            ops.uploadAtomic(tempNote, writePath);
             target.setStatus(TargetPackage.Status.NOTE_UPDATED);
             System.out.println("  [说明] " + writeName + " 已追加 2 条记录 (" + expectedBytes + " B)");
 
@@ -153,11 +166,43 @@ public class NoteGate implements Gate {
         }
     }
 
-    private String downloadString(String remotePath) throws IOException {
+    /**
+     * 下载远端 note 文件并宽容解码为字符串。文件非 UTF-8 时自动回退 GB18030，绝不因编码非法而中断。
+     *
+     * @param remotePath  远端文件绝对路径
+     * @param displayName 用于日志的文件名
+     * @return 解码后的文本内容（写回时统一转 UTF-8）
+     * @throws IOException 下载或读取失败
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private String downloadString(String remotePath, String displayName) throws IOException {
         Path tmp = Files.createTempFile("note-dl-", ".txt");
         try {
             ops.download(remotePath, tmp);
-            return Files.readString(tmp, StandardCharsets.UTF_8);
+            return NoteCharsetReader.readLenient(tmp, displayName, msg -> System.out.println("  " + msg));
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
+    }
+
+    /**
+     * 下载远端 note 文件的原始字节（不做任何解码 / 编码转换）。
+     *
+     * <p>专用于 {@link com.flux.deploy.deploy.Rollback} 的字节级回滚快照：覆盖 GB18030 等
+     * 原编码的 note 文件后，必须按原始字节写回，不能经过 UTF-8 string 转换链路。</p>
+     *
+     * @param remotePath 远端绝对路径
+     * @return 文件原始字节
+     * @throws IOException 下载失败
+     * @author xumanyi
+     * @date 2026-07-01
+     */
+    private byte[] downloadBytes(String remotePath) throws IOException {
+        Path tmp = Files.createTempFile("note-snap-", ".bin");
+        try {
+            ops.download(remotePath, tmp);
+            return Files.readAllBytes(tmp);
         } finally {
             Files.deleteIfExists(tmp);
         }
@@ -167,14 +212,21 @@ public class NoteGate implements Gate {
      * 从匹配的候选文件里挑选目标：0 个返回 null（调用者按 canonical 新建）；1 个直接返回；
      * ≥2 个属于冲突状态——本应由 plugin 层预检阶段拦截并要求用户手动清理，落到此处属于异常路径，直接抛错避免误写。
      *
+     * <p>抛 {@link Gate.GateException} 而不是 unchecked 异常，让 Stage2 的
+     * {@code catch (GateException)} 分支能正确捕获并触发回滚（漏洞 H2 修复）：
+     * 历史上抛 {@code IllegalStateException} 会绕过 DeployPipeline.executeStage2 的全部 catch，
+     * 一路冒到 {@code execute()} 之外，业务包不被回滚，锁包/新包留在远端。</p>
+     *
+     * @param gateName  门禁名（用于异常信息）
      * @param candidates 命中谓词的所有候选
      * @param canonicalName canonical 文件名（仅用于异常信息）
      * @return 选中的目标，或 null
-     * @throws IllegalStateException 候选 ≥2 时（应在预检拦截）
+     * @throws Gate.GateException 候选 ≥2 时（应在预检拦截）
      * @author xumanyi
      * @date 2026-05-11
      */
-    private static RemoteNote pickPrimary(List<RemoteNote> candidates, String canonicalName) {
+    private static RemoteNote pickPrimary(String gateName, List<RemoteNote> candidates, String canonicalName)
+            throws Gate.GateException {
         if (candidates.isEmpty()) return null;
         if (candidates.size() == 1) return candidates.get(0);
         StringBuilder names = new StringBuilder();
@@ -182,7 +234,7 @@ public class NoteGate implements Gate {
             if (names.length() > 0) names.append(", ");
             names.append(rn.name);
         }
-        throw new IllegalStateException(
+        throw new Gate.GateException(gateName,
                 "note 候选 ≥2（预检阶段应已拦截，请手动清理后重试），canonical=" + canonicalName + "，候选=[" + names + "]");
     }
 

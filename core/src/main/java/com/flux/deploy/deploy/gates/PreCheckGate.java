@@ -54,8 +54,19 @@ public class PreCheckGate implements Gate {
             throw new GateException(name(), "本地暂存包为空文件: " + target.getLocalStagingFile());
         }
 
-        // 2. 验证远程目标包存在
+        // 2. 验证远程目标包存在。
+        //    新建目标（Vue 模块 zip 首次投放）远端本就不存在同名文件：
+        //    反向校验——若远端已存在同名文件说明"新建"判断已过期（他人抢先上传），中止让用户重新加载目标树。
         long remoteSize = ops.getFileSize(target.getRemotePath());
+        if (target.isCreateNew()) {
+            if (remoteSize >= 0) {
+                throw new GateException(name(), "新建目标在远端已存在同名文件（可能他人已上传）: "
+                        + target.getRemotePath() + "，请刷新目标列表后重试");
+            }
+            System.out.println("  [预检] " + target.getPackageName()
+                    + " - 本地: " + formatSize(localSize) + ", 远程: 新建");
+            return;
+        }
         if (remoteSize < 0) {
             throw new GateException(name(), "远程目标包不存在: " + target.getRemotePath());
         }

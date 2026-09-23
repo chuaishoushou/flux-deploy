@@ -397,4 +397,128 @@ public class PluginDeployConfig {
     public void setCustomBackupRoot(String customBackupRoot) {
         this.customBackupRoot = customBackupRoot;
     }
+
+    /**
+     * CSV 增量合并计划（可为 null）
+     *
+     * <p>部署启动时由插件层收集（git 未提交变更的 .csv 基线内容 + tablefieldlist
+     * 业务主键字典）。非空时增量部署对 .csv 条目做行级合并，防止整份覆盖
+     * 删除目标包中其他同事尚未提交 git 的行数据。</p>
+     */
+    private com.flux.deploy.csv.CsvMergePlan csvMergePlan;
+
+    /** 源工程类型（默认 MAVEN；VUE 时产物为按模块打出的 zip） */
+    private SourceProjectType sourceProjectType = SourceProjectType.MAVEN;
+
+    /** Vue 工程上下文名（serve.yaml 的 content 值，如 tm01webVue；仅 VUE 类型使用） */
+    private String vueContent;
+
+    /** 选中的 Vue 业务模块号列表（如 [t0103, t0107]；仅 VUE 类型使用） */
+    private List<String> vueModules;
+
+    /**
+     * Vue 目录直更的文件排除清单（模块目录 relativePath → 被用户取消勾选的产物相对路径列表）。
+     *
+     * <p>选择语义是排除式：默认整包（全部产物），用户在目标树的模块文件视图里做减法。
+     * 用排除而非包含记录，是为了让"自动构建后新出现的产物文件"天然纳入上传
+     * （新文件不可能出现在旧的排除清单里），避免 manifest 引用的新文件缺失。
+     * 键缺失或值为空 = 该模块整包上传。</p>
+     */
+    private java.util.Map<String, List<String>> vueExcludedFiles;
+
+    /**
+     * 获取 Vue 目录直更的文件排除清单
+     *
+     * @return 排除清单；未设置为 null
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public java.util.Map<String, List<String>> getVueExcludedFiles() { return vueExcludedFiles; }
+
+    /**
+     * 设置 Vue 目录直更的文件排除清单
+     *
+     * @param vueExcludedFiles 排除清单（模块目录 relativePath → 排除的产物相对路径）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueExcludedFiles(java.util.Map<String, List<String>> vueExcludedFiles) {
+        this.vueExcludedFiles = vueExcludedFiles;
+    }
+
+    /**
+     * 获取源工程类型
+     *
+     * @return 源工程类型（永不为 null）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public SourceProjectType getSourceProjectType() { return sourceProjectType; }
+
+    /**
+     * 设置源工程类型
+     *
+     * @param sourceProjectType 源工程类型；null 按 MAVEN
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setSourceProjectType(SourceProjectType sourceProjectType) {
+        this.sourceProjectType = sourceProjectType == null ? SourceProjectType.MAVEN : sourceProjectType;
+    }
+
+    /**
+     * 获取 Vue 工程上下文名
+     *
+     * @return content 值；非 VUE 工程为 null
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public String getVueContent() { return vueContent; }
+
+    /**
+     * 设置 Vue 工程上下文名
+     *
+     * @param vueContent serve.yaml 的 content 值
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueContent(String vueContent) { this.vueContent = vueContent; }
+
+    /**
+     * 获取选中的 Vue 模块号列表
+     *
+     * @return 模块号列表；非 VUE 工程为 null
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public List<String> getVueModules() { return vueModules; }
+
+    /**
+     * 设置选中的 Vue 模块号列表
+     *
+     * @param vueModules 模块号列表
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public void setVueModules(List<String> vueModules) { this.vueModules = vueModules; }
+
+    /**
+     * 获取 CSV 增量合并计划
+     *
+     * @return 合并计划；未收集或无 CSV 变更时为 null
+     * @author xumanyi
+     * @date 2026-07-10
+     */
+    public com.flux.deploy.csv.CsvMergePlan getCsvMergePlan() { return csvMergePlan; }
+
+    /**
+     * 设置 CSV 增量合并计划
+     *
+     * @param csvMergePlan 合并计划；null 表示 CSV 保持整份覆盖
+     * @author xumanyi
+     * @date 2026-07-10
+     */
+    public void setCsvMergePlan(com.flux.deploy.csv.CsvMergePlan csvMergePlan) {
+        this.csvMergePlan = csvMergePlan;
+    }
 }

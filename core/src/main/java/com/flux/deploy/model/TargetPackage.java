@@ -50,6 +50,42 @@ public class TargetPackage {
     private String remoteSha256;
 
     /**
+     * NoteGate 写入前的远端 note 文件字节快照（漏洞 H3 修复）。
+     *
+     * <p>{@link com.flux.deploy.deploy.gates.NoteGate#execute} 在 upload 写入新内容之前会把
+     * 当前远端 note 文件原始字节下载并放入此字段；回滚阶段
+     * {@link com.flux.deploy.deploy.Rollback#rollbackTarget} 在 NOTE_UPDATED 状态额外把
+     * 快照上传覆盖 {@link #noteRemotePath}，撤销 NoteGate 的写入，避免业务包回滚到旧版本而
+     * note 文件残留新版记录的跨文件不一致。</p>
+     *
+     * <p>取值含义：</p>
+     * <ul>
+     *   <li><b>null</b>：NoteGate 尚未跑，或本次为新建 canonical 文件（无旧字节可还原）。
+     *       后者由 {@link #noteRemotePath} 非空但快照为 null 区分——回滚时改为 delete remote 文件。</li>
+     *   <li><b>非空字节数组</b>：远端 note 文件被覆盖前的原始字节，回滚时用裸 STOR 写回。</li>
+     * </ul>
+     */
+    private byte[] noteSnapshotBytes;
+
+    /**
+     * NoteGate 写入目标路径（漏洞 H3 修复）。
+     *
+     * <p>NoteGate 在选定 writePath（覆盖已存在的 primary 或新建 canonical）后立刻写入此字段；
+     * 回滚阶段读取此字段判断是否需要恢复 note。</p>
+     *
+     * <p>null 表示 NoteGate 还没跑，无需 note 回滚。</p>
+     */
+    private String noteRemotePath;
+
+    /**
+     * 是否为「新建目标」：远端原本不存在同名文件（Vue 模块 zip 首次投放场景）。
+     *
+     * <p>true 时预检跳过远端存在性校验；备份/锁天然缺位；回滚语义 = 删除已上传的新文件
+     * （见 {@link com.flux.deploy.deploy.Rollback#rollbackTarget}）。</p>
+     */
+    private boolean createNew;
+
+    /**
      * 目标包生命周期状态枚举
      *
      * <p>状态按部署流程顺序排列，ordinal 值用于判断已到达的阶段。</p>
@@ -110,4 +146,13 @@ public class TargetPackage {
 
     public String getRemoteSha256() { return remoteSha256; }
     public void setRemoteSha256(String remoteSha256) { this.remoteSha256 = remoteSha256; }
+
+    public byte[] getNoteSnapshotBytes() { return noteSnapshotBytes; }
+    public void setNoteSnapshotBytes(byte[] noteSnapshotBytes) { this.noteSnapshotBytes = noteSnapshotBytes; }
+
+    public String getNoteRemotePath() { return noteRemotePath; }
+    public void setNoteRemotePath(String noteRemotePath) { this.noteRemotePath = noteRemotePath; }
+
+    public boolean isCreateNew() { return createNew; }
+    public void setCreateNew(boolean createNew) { this.createNew = createNew; }
 }

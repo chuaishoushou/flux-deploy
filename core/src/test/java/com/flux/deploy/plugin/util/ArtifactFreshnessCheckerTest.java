@@ -51,6 +51,23 @@ class ArtifactFreshnessCheckerTest {
     }
 
     @Test
+    void incremental_classSameMtimeAsJava_isStale() throws IOException {
+        Path java = writeFile(sourcesDir.resolve("com/foo/Bar.java"), "class Bar {}");
+        Path clazz = writeFile(classesDir.resolve("com/foo/Bar.class"), "binary");
+        Instant same = Instant.parse("2026-05-19T10:00:00Z");
+        setMtime(java, same);
+        setMtime(clazz, same);
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.check(
+                DeployMode.INCREMENTAL, moduleRoot.toString(), null,
+                List.of("src/main/java/com/foo/Bar.java"));
+
+        // 编译产物时间 == 源码时间：无法证明产物已含最新源码，要求严格晚于 → 判过期
+        assertThat(r.isFresh()).isFalse();
+        assertThat(r.staleSources).containsExactly("src/main/java/com/foo/Bar.java");
+    }
+
+    @Test
     void incremental_classNewerThanJava_isFresh() throws IOException {
         Path java = writeFile(sourcesDir.resolve("com/foo/Bar.java"), "class Bar {}");
         Path clazz = writeFile(classesDir.resolve("com/foo/Bar.class"), "binary");
@@ -167,6 +184,22 @@ class ArtifactFreshnessCheckerTest {
     }
 
     @Test
+    void full_javaSameMtimeAsJar_isStale() throws IOException {
+        Path jar = writeFile(moduleRoot.resolve("target/app.jar"), "binary");
+        Path javaA = writeFile(sourcesDir.resolve("com/foo/A.java"), "");
+        Instant same = Instant.parse("2026-05-19T10:00:00Z");
+        setMtime(jar, same);
+        setMtime(javaA, same);
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.check(
+                DeployMode.FULL, moduleRoot.toString(), "app.jar", null);
+
+        // 源码时间 == jar 时间：要求严格晚于 → 判过期
+        assertThat(r.isFresh()).isFalse();
+        assertThat(r.staleSources).containsExactly("src/main/java/com/foo/A.java");
+    }
+
+    @Test
     void full_jarMissing_isFresh() throws IOException {
         writeFile(sourcesDir.resolve("com/foo/A.java"), "");
         // 不写 jar，由 PresenceValidator 兜底
@@ -202,6 +235,63 @@ class ArtifactFreshnessCheckerTest {
 
         ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.check(
                 DeployMode.FULL, moduleRoot.toString(), "app.jar", null);
+
+        assertThat(r.isFresh()).isTrue();
+    }
+
+    // ==================== Vue 模块产物时间校验 ====================
+
+    @Test
+    void vue_srcNewerThanDist_isStale() throws IOException {
+        Path dist = writeFile(moduleRoot.resolve("dist/umd/t0107/manifest.json"), "{}");
+        setMtime(dist, Instant.parse("2026-08-13T10:00:00Z"));
+        Path src = writeFile(moduleRoot.resolve("src/modules/t0107/Index.vue"), "<template/>");
+        setMtime(src, Instant.parse("2026-08-13T11:00:00Z"));
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.checkVueModules(
+                moduleRoot.toString(), List.of("t0107"));
+
+        assertThat(r.isFresh()).isFalse();
+        assertThat(r.staleSources).containsExactly("src/modules/t0107");
+    }
+
+    @Test
+    void vue_distNewerThanSrc_isFresh() throws IOException {
+        Path src = writeFile(moduleRoot.resolve("src/modules/t0107/Index.vue"), "<template/>");
+        setMtime(src, Instant.parse("2026-08-13T10:00:00Z"));
+        Path dist = writeFile(moduleRoot.resolve("dist/umd/t0107/manifest.json"), "{}");
+        setMtime(dist, Instant.parse("2026-08-13T11:00:00Z"));
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.checkVueModules(
+                moduleRoot.toString(), List.of("t0107"));
+
+        assertThat(r.isFresh()).isTrue();
+    }
+
+    @Test
+    void vue_missingDist_isFresh_presenceValidatorHandlesIt() throws IOException {
+        writeFile(moduleRoot.resolve("src/modules/t0107/Index.vue"), "<template/>");
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.checkVueModules(
+                moduleRoot.toString(), List.of("t0107"));
+
+        assertThat(r.isFresh()).isTrue();
+    }
+
+    @Test
+    void vue_missingSrc_isFresh() throws IOException {
+        writeFile(moduleRoot.resolve("dist/umd/t0107/manifest.json"), "{}");
+
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.checkVueModules(
+                moduleRoot.toString(), List.of("t0107"));
+
+        assertThat(r.isFresh()).isTrue();
+    }
+
+    @Test
+    void vue_emptyModuleList_isFresh() {
+        ArtifactFreshnessChecker.Result r = ArtifactFreshnessChecker.checkVueModules(
+                moduleRoot.toString(), List.of());
 
         assertThat(r.isFresh()).isTrue();
     }

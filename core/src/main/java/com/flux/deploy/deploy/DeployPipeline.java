@@ -334,15 +334,28 @@ public class DeployPipeline {
     /**
      * 尝试对当前目标执行回滚，结果写入 result.rollback。
      * 回滚抛异常时将目标置为 FAILED_NEEDS_MANUAL。
+     *
+     * <p>漏洞 H6 修复：原实现把"无需回滚"（acted=false，例如 PENDING / BACKED_UP 取消路径，
+     * 或 skipLock + lockName==null 的 UPLOADED 状态）也标 success=true，导致 UI 上显示
+     * "已成功回滚"但远端实际是半成品。修正为仅在真正执行了恢复动作（acted=true）时写
+     * success=true；acted=false 时把 attempted 也回退为 false，避免误导用户。</p>
      */
     private void attemptRollback(Rollback rollback, TargetPackage current, DeployResult result) {
         DeployResult.RollbackResult rr = new DeployResult.RollbackResult();
-        rr.setAttempted(true);
         try {
             boolean acted = rollback.rollbackTarget(current);
-            rr.setSuccess(true);
-            if (acted) rr.getRestoredPackages().add(current.getPackageName());
+            if (acted) {
+                rr.setAttempted(true);
+                rr.setSuccess(true);
+                rr.getRestoredPackages().add(current.getPackageName());
+            } else {
+                // 无需回滚（远端未发生需撤销的写入）；不报告 attempted，避免在 UI 上出现
+                // "已成功回滚"的错觉
+                rr.setAttempted(false);
+                rr.setSuccess(false);
+            }
         } catch (Exception ex) {
+            rr.setAttempted(true);
             rr.setSuccess(false);
             current.setStatus(TargetPackage.Status.FAILED_NEEDS_MANUAL);
             result.addError("rollback", current.getPackageName(),
@@ -437,12 +450,11 @@ public class DeployPipeline {
 
                 long localSize = java.nio.file.Files.size(target.getLocalStagingFile());
 
-                System.out.println("目标: " + target.getPackageName());
-                System.out.println("  远程路径: " + target.getRemotePath());
-                System.out.println("  远程包: " + (exists ? "存在 (" + remoteSize + " 字节)" : "不存在"));
-                System.out.println("  本地暂存包: " + target.getLocalStagingFile() + " (" + localSize + " 字节)");
-                System.out.println("  残留锁: " + (locks.isEmpty() ? "无" : locks));
-                System.out.println();
+                System.out.println("[预检] 目标包：" + target.getPackageName());
+                System.out.println("[预检] 远程路径：" + target.getRemotePath());
+                System.out.println("[预检] 远程包：" + (exists ? "存在（" + remoteSize + " 字节）" : "不存在"));
+                System.out.println("[预检] 本地更新包：" + target.getLocalStagingFile() + "（" + localSize + " 字节）");
+                System.out.println("[预检] 残留锁：" + (locks.isEmpty() ? "无" : locks));
 
                 DeployResult.TargetResult tr = new DeployResult.TargetResult();
                 tr.setPackageName(target.getPackageName());
@@ -471,6 +483,7 @@ public class DeployPipeline {
         List<String> targetNames = config.getTargetNames();
         List<String> relativePaths = config.getTargetRelativePaths();
 
+        List<Boolean> createNewFlags = config.getCreateNewFlags();
         for (int i = 0; i < localFiles.size(); i++) {
             String name = targetNames.get(i);
             if (name == null) {
@@ -479,6 +492,10 @@ public class DeployPipeline {
             TargetPackage tp = new TargetPackage();
             tp.setLocalStagingFile(localFiles.get(i));
             tp.setPackageName(name);
+            if (createNewFlags != null && i < createNewFlags.size()
+                    && Boolean.TRUE.equals(createNewFlags.get(i))) {
+                tp.setCreateNew(true);
+            }
 
             String remoteDir = config.getRemoteDir();
             if (relativePaths != null && i < relativePaths.size() && relativePaths.get(i) != null) {
@@ -526,6 +543,8 @@ public class DeployPipeline {
                         target.getPackageName(),
                         changedFiles,
                         System.out::println);
+                // CSV 行级增量合并计划（插件层注入；null 时 CSV 保持整份覆盖）
+                builder.setCsvMergePlan(config.getCsvMergePlan());
                 // "1 下 + 2 上"优化：用 buildKeepingOriginal 保留下载到本地的原包字节，
                 // 后续 BackupGate 直接复用，避免对同一字节再做一次远端下载。
                 StagingPackageBuilder.BuildResult res = builder.buildKeepingOriginal(

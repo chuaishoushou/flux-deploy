@@ -6,7 +6,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
-import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.JBFont;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
@@ -42,11 +42,13 @@ public class LocalPreCheckDialog extends DialogWrapper {
     @Override
     protected JComponent createCenterPanel() {
         JPanel panel = new JPanel(new BorderLayout(0, 6));
-        panel.setBorder(JBUI.Borders.empty(6, 8));
-        panel.setPreferredSize(new Dimension(640, 420));
+        panel.setBorder(com.flux.deploy.plugin.util.FluxDialogs.contentBorder());
+        panel.setPreferredSize(new Dimension(
+                com.flux.deploy.plugin.util.FluxDialogs.WIDTH_L, 420));
 
-        // 顶部信息
+        // 顶部信息：首行加粗结论 + 信息行（统一弹窗说明区风格）
         JPanel info = new JPanel(new GridLayout(0, 1, 0, 2));
+        info.add(new JBLabel("<html><b>请确认以下本地打包内容</b></html>"));
         info.add(new JBLabel("模式：本地模式（不登录 FTP，无备份、无回滚）"));
         info.add(new JBLabel("包：" + pkgName));
         info.add(new JBLabel("输出目录：" + outputDir));
@@ -81,7 +83,7 @@ public class LocalPreCheckDialog extends DialogWrapper {
         }
 
         JList<String> list = new JList<>(listModel);
-        list.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        list.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBFont.label().lessOn(1f).getSize()));
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         panel.add(new JBScrollPane(list), BorderLayout.CENTER);
 

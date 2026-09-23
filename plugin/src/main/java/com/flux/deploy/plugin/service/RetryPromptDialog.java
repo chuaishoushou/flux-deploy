@@ -66,10 +66,10 @@ public final class RetryPromptDialog implements RetryUserPrompter {
                     msg.append("\n\n").append(suggestion);
                 }
                 msg.append("\n\n点 [重试] 重新进入一轮自动重试，或点 [结束] 中止当前目标。");
-                choice[0] = Messages.showDialog(
+                choice[0] = com.flux.deploy.plugin.util.FluxDialogs.choose(
                         project,
-                        msg.toString(),
                         "部署中断 — " + describeKind(errorKind),
+                        msg.toString(),
                         new String[]{"重试", "结束"},
                         0,
                         Messages.getQuestionIcon());

@@ -13,11 +13,16 @@ import java.io.FileInputStream;
 import java.util.*;
 
 /**
- * Maven 模块枚举器：扫描项目下所有含 pom.xml 的目录，构建树形数据
+ * 源工程枚举器：扫描项目下所有可部署工程目录，构建树形数据
  *
- * <p>递归扫描 IDEA 项目根目录下的子目录，识别 Maven 模块并组织为
- * groupDir → subDir → module 的层级结构。叶子节点为实际模块，
- * 存储绝对路径和 artifactId。</p>
+ * <p>递归扫描 IDEA 项目根目录下的子目录，识别两类可部署工程并组织为
+ * groupDir → subDir → module 的层级结构，叶子节点存储绝对路径：</p>
+ * <ul>
+ *   <li>Maven 模块：目录含 pom.xml，显示名为 artifactId</li>
+ *   <li>Vue 前端模块工程：目录含 serve.yaml 且 package.json 声明 zip:module 脚本
+ *       （识别逻辑见 {@link com.flux.deploy.plugin.service.VueProjectResolver}），
+ *       显示名为 {@code 目录名 (content)}，如 {@code sce-vtms-m01-web (tm01webVue)}</li>
+ * </ul>
  *
  * <p>自动过滤工具工程（flux-deploy-cli、flux-deploy-plugin）和
  * 非部署相关目录（.git、.idea、node_modules 等）。</p>
@@ -175,6 +180,19 @@ public class ModuleEnumerator {
                 String artifactId = parseArtifactId(pomFile);
                 String displayName = artifactId != null ? artifactId : name;
                 result.add(new ModuleTreeNode(displayName, child.getAbsolutePath()));
+            } else if (com.flux.deploy.plugin.service.VueProjectResolver
+                    .isVueModuleProject(child.toPath())) {
+                // 叶子节点：Vue 前端模块工程。显示名带 content（如 tm01webVue），
+                // 让用户按线上上下文名也能搜到；不再向下递归（内部无嵌套工程）
+                String content = com.flux.deploy.plugin.service.VueProjectResolver
+                        .readContent(child.toPath());
+                String displayName = content != null ? name + " (" + content + ")" : name;
+                result.add(new ModuleTreeNode(displayName, child.getAbsolutePath()));
+            } else if (com.flux.deploy.plugin.service.VueProjectResolver
+                    .isSharedLibProject(child.toPath())) {
+                // 叶子节点：sce-vcom 共享库工程（组件库 / stores / utils 等），
+                // 更新形态是替换 login 包 lib/ 下的 UMD 文件
+                result.add(new ModuleTreeNode(name + " (共享库)", child.getAbsolutePath()));
             } else {
                 // 非模块目录：递归扫描子目录
                 List<ModuleTreeNode> subNodes = scanModuleTree(child, depth + 1);

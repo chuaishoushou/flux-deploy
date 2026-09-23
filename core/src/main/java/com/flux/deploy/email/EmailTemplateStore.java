@@ -11,7 +11,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -20,12 +19,18 @@ import java.util.stream.Stream;
  * <p>默认目录：{@code ~/.flux-deploy/email_templates/}，每个模板对应一个
  * {@code <name>.html} 文件，文件名（不含 {@code .html} 后缀）即模板名。</p>
  *
- * <p><b>「default」模板的特殊语义</b>：</p>
+ * <p><b>「default」模板的定位</b>：它只是「用户开箱时的第一个模板」，并非一份固定不变的
+ * 出厂模板，跟用户新建的模板走同一套增删改逻辑——</p>
  * <ul>
- *   <li>首次访问目录时若不存在 → 静默创建目录并写入内置默认模板（{@link #BUILTIN_DEFAULT_TEMPLATE}）</li>
- *   <li>允许用户通过 {@link #save} 覆盖其内容</li>
- *   <li>禁止通过 {@link #delete} 删除 —— 始终保留至少一个兜底模板</li>
+ *   <li>首次访问目录时若不存在 → 静默创建目录并以内置内容（{@link #BUILTIN_DEFAULT_TEMPLATE}）种子写入</li>
+ *   <li>允许用户通过 {@link #save} 自由编辑覆盖其内容（之后插件不再回头改它）</li>
+ *   <li>唯一的特殊点：禁止通过 {@link #delete} 删除 —— 保证列表里始终至少有它一个</li>
  * </ul>
+ *
+ * <p><b>内置模板（{@link #BUILTIN_DEFAULT_TEMPLATE}）只作为隐藏的"内容源"</b>，不作为列表项出现，
+ * 永远等于当前插件版本里的最新内容。它仅在两个时机被取用：新建模板时作初始内容、
+ * 「恢复默认」时把当前选中模板重置回这份。因此插件升级后，用户任何一次新建 / 恢复默认
+ * 都会自动拿到最新模板，而已存模板不会被插件擅自覆盖。</p>
  *
  * <p>所有方法把 I/O 失败包装为 {@link IOException}，由上层决定如何提示用户。</p>
  *
@@ -43,9 +48,9 @@ public final class EmailTemplateStore {
     /**
      * 内置默认模板源串（HTML 片段）
      *
-     * <p>8 个绑定变量 {@code ${项目}} / {@code ${任务}} / {@code ${客服}} /
-     * {@code ${更新模式}} / {@code ${更新包}} / {@code ${更新包路径}} / {@code ${备份包}} /
-     * {@code ${备份包路径}} 由主面板 + 部署历史缓存自动填（点「导入」触发）；
+     * <p>绑定变量 {@code ${项目}} / {@code ${任务}} / {@code ${客服}} / {@code ${更新模式}} /
+     * {@code ${FTP版本来源}} / {@code ${更新jar包}} / {@code ${更新war包}} / {@code ${备份包地址}}
+     * 由主面板 + 部署历史缓存自动填（点「导入」触发）；
      * 空值时显示斜体占位符 {@code ${字段名}}。</p>
      *
      * <p>首行 {@code 顾问，} 是收件人占位，每次发邮件由用户自己改。后续行每行前面用 1 个
@@ -58,67 +63,38 @@ public final class EmailTemplateStore {
      */
     /** 内置默认模板的完整 HTML（含正文 + 签名档）。
      *  内容来源：用户在邮件编辑器里编排好、点「保存」落盘的 default.html，原样固化进来。
-     *  正文 8 个变量 ${项目}/${任务}/${客服}/${更新模式}/${更新包}/${更新包路径}/${备份包路径} 等由
+     *  正文变量 ${项目}/${任务}/${客服}/${更新模式}/${FTP版本来源}/${更新jar包}/${更新war包}/${备份包地址} 等由
      *  「导入数据」按钮填充；签名档为公司固定信息。这样新装用户 / 点「恢复默认」都拿到这份。 */
 
     public static final String BUILTIN_DEFAULT_TEMPLATE =
-            "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\">顾问，</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 你好！</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 【${项目}】项目已更新到FTP，麻烦更新下</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新内容:</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 客服：${客服}</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 任务：${任务}</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 资源来源：</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> FTP版本来源：${更新包路径}</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 备份包：${备份包路径}</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新方式：${更新模式}</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 是否重启：</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 浏览器缓存刷新：</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 影响范围：</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> SQL:无</span></p>"
-                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 12pt; font-family: &quot;PingFang SC&quot;;\"> 更新包：${更新包}</span></p>"
+            "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\">顾问，</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 你好！</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 【${项目}】部署包已上传，请帮忙更新到测试环境，谢谢！</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 更新内容:</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 客服：${客服}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 任务：${任务}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 资源来源：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> FTP版本来源：${FTP版本来源}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 备份位置：${备份包地址}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 更新方式：${更新模式}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 是否重启：需要</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 浏览器缓存刷新：否</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> 影响范围：</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-family: &quot;PingFang SC&quot;; font-size: 10.5pt;\"> 更新jar包：${更新jar包}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-family: &quot;PingFang SC&quot;; font-size: 10.5pt;\"> 更新war包：${更新war包}</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-size: 10.5pt; font-family: &quot;PingFang SC&quot;;\"> SQL:</span></p>"
+                    + "<p style=\"line-height: 1;\"><span style=\"font-family: &quot;PingFang SC&quot;; font-size: 10.5pt;\"> 其他：</span></p>"
                     + "<p style=\"line-height: 1;\"><br></p>"
                     + "<p style=\"line-height: 1;\"><br></p>"
-                    + "<p style=\"text-align: justify;\"><strong style=\"background-color: rgb(255, 255, 255); font-family: &quot;PingFang SC&quot;; color: rgb(192, 192, 192);\">KaiFa 开发人员</strong></p>"
-                    + "<p style=\"text-align: justify;\"><strong style=\"background-color: rgb(255, 255, 255); font-size: 9pt; font-family: Verdana; color: rgb(192, 192, 192);\">Technical Consultant</strong></p>"
-                    + "<p><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>F</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>ull-value </em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>L</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>ogistics, </em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>U</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>nited e</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(255, 0, 0);\"><em>X</em></strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Verdana; color: rgb(0, 128, 192);\"><em>pertise</em></strong></p>"
-                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(31, 73, 125);\">专注.专业.专心</span></p>"
-                    + "<p><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(51, 102, 255);\"><em>---------------------------------------------</em></strong></p>"
-                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">上海富勒信息科技有限公司（FLUX）</span></p>"
-                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">客服</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">400 878 9606 </span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\"> </strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">手机</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">: </strong></p>"
-                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">微信</span><strong style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 128);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; background-color: rgb(255, 255, 255); color: rgb(0, 0, 64);\">FLUX-2013</span></p>"
-                    + "<p style=\"line-height: 1;\"><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128);\">网址:</strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(31, 73, 125);\"> </strong><strong style=\"background-color: rgb(255, 255, 255); font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 255);\">http://www.flux.com.cn</strong></p>";
-
-    /**
-     * v1 时代的"老占位符"集合 —— 检测到 {@code default.html} 内容包含这里任一项
-     * 即视为老版本模板，自动升级为 {@link #BUILTIN_DEFAULT_TEMPLATE}。
-     *
-     * <p>用 fuzzy match（任意包含）而非精确字面值比对，能覆盖以下情况：</p>
-     * <ul>
-     *   <li>用户在历史版本里点过「保存到模板」，导致老模板文件被反向占位符化等
-     *       操作微调过，跟我们记的原始 BUILTIN 字面值不再完全一致</li>
-     *   <li>不同历史 BUILTIN 版本之间细微差异（HTML 标签顺序 / 换行符等）</li>
-     * </ul>
-     *
-     * <p>升级前会把老内容备份到 {@code default.legacy.bak}（不进入下拉），
-     * 万一误升级用户可以手动恢复。</p>
-     */
-    public static final Set<String> LEGACY_PLACEHOLDER_TOKENS = Set.of(
-            "${收件人}",
-            "${项目名}",
-            "${标题}",
-            "${资源来源}",
-            "${FTP版本来源}",
-            "${更新方式}",
-            "${是否重启}",
-            "${浏览器缓存刷新}",
-            "${影响范围}",
-            "${SQL}",
-            "${开发}"
-    );
-
-    /** 备份老模板文件的文件名（不带 .html 后缀，不会被 {@link #listNames()} 列出） */
-    private static final String LEGACY_BACKUP_FILENAME = "default.legacy.bak";
+                    + "<p style=\"text-align: justify;\"><strong style=\"color: rgb(192, 192, 192); font-family: &quot;PingFang SC&quot;; background-color: rgb(255, 255, 255);\">KaiFa 开发人员</strong></p>"
+                    + "<p style=\"text-align: justify;\"><strong style=\"color: rgb(192, 192, 192); font-family: Verdana; font-size: 9pt; background-color: rgb(255, 255, 255);\">Technical Consultant</strong></p>"
+                    + "<p><strong style=\"color: rgb(255, 0, 0); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>F</em></strong><strong style=\"color: rgb(0, 128, 192); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>ull-value </em></strong><strong style=\"color: rgb(255, 0, 0); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>L</em></strong><strong style=\"color: rgb(0, 128, 192); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>ogistics, </em></strong><strong style=\"color: rgb(255, 0, 0); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>U</em></strong><strong style=\"color: rgb(0, 128, 192); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>nited e</em></strong><strong style=\"color: rgb(255, 0, 0); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>X</em></strong><strong style=\"color: rgb(0, 128, 192); font-family: Verdana; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>pertise</em></strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(31, 73, 125); background-color: rgb(255, 255, 255);\">专注.专业.专心</span></p>"
+                    + "<p><strong style=\"color: rgb(51, 102, 255); font-family: Arial; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"><em>---------------------------------------------</em></strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">上海富勒信息科技有限公司（FLUX）</span></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">客服</span><strong style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 64); background-color: rgb(255, 255, 255);\">400 878 9606 </span><strong style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 64); background-color: rgb(255, 255, 255);\"> </strong><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">手机</span><strong style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 64); background-color: rgb(255, 255, 255);\">: </strong></p>"
+                    + "<p><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">微信</span><strong style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\">:</strong><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 128); background-color: rgb(255, 255, 255);\"> </span><span style=\"font-size: 10.5pt; font-family: Arial; color: rgb(0, 0, 64); background-color: rgb(255, 255, 255);\">FLUX-2013</span></p>"
+                    + "<p style=\"line-height: 1;\"><strong style=\"color: rgb(0, 0, 128); font-family: Arial; font-size: 10.5pt; background-color: rgb(255, 255, 255);\">网址:</strong><strong style=\"color: rgb(31, 73, 125); font-family: Arial; font-size: 10.5pt; background-color: rgb(255, 255, 255);\"> </strong><strong style=\"color: rgb(0, 0, 255); font-family: Arial; font-size: 10.5pt; background-color: rgb(255, 255, 255);\">http://www.flux.com.cn</strong></p>";
 
     private final Path rootDir;
 
@@ -144,10 +120,11 @@ public final class EmailTemplateStore {
     }
 
     /**
-     * 首次设置：根目录不存在则创建，default 模板不存在则写入内置默认内容
+     * 首次设置：根目录不存在则创建，{@code default} 模板不存在则以内置内容种子写入
      *
-     * <p>幂等：已存在则不动。每次访问 {@link #listNames()} / {@link #load(String)} 时
-     * 内部都会先调一次本方法，无须外部显式触发。</p>
+     * <p>幂等：{@code default} 已存在则<b>原样保留、绝不覆盖</b>（它现在是用户可自由编辑的
+     * 普通模板，插件不该回头改它）。每次访问 {@link #listNames()} / {@link #loadOrDefault}
+     * 时内部都会先调一次本方法，无须外部显式触发。</p>
      *
      * @throws IOException 创建目录或写文件失败
      * @author xumanyi
@@ -161,32 +138,11 @@ public final class EmailTemplateStore {
         // ${客服编号} → ${客服}）就地替换。保留其他内容不动，老用户自定义模板也能直接用新字段。
         migrateRenamedPlaceholders();
 
+        // default 只在"还不存在"时用内置内容种子创建（用户开箱时的第一个模板）；
+        // 已存在就不动——用户对它的任何编辑都视作普通模板内容，插件不再升级 / 覆盖。
         Path defaultPath = pathOf(DEFAULT_TEMPLATE_NAME);
         if (!Files.exists(defaultPath)) {
             Files.writeString(defaultPath, BUILTIN_DEFAULT_TEMPLATE, StandardCharsets.UTF_8);
-            return;
-        }
-        // 自动升级 / 修复：
-        //   1. 文件为空或全空白 → 历史误操作清空过，直接恢复内置默认
-        //   2. 含 v1 时代老占位符 → 模板已过期，备份到 default.legacy.bak 后覆盖
-        try {
-            String existing = Files.readString(defaultPath, StandardCharsets.UTF_8);
-            if (existing.trim().isEmpty()) {
-                Files.writeString(defaultPath, BUILTIN_DEFAULT_TEMPLATE,
-                        StandardCharsets.UTF_8);
-                return;
-            }
-            if (existing.equals(BUILTIN_DEFAULT_TEMPLATE)) {
-                return;
-            }
-            if (containsAnyLegacyPlaceholder(existing)) {
-                Files.writeString(rootDir.resolve(LEGACY_BACKUP_FILENAME),
-                        existing, StandardCharsets.UTF_8);
-                Files.writeString(defaultPath, BUILTIN_DEFAULT_TEMPLATE,
-                        StandardCharsets.UTF_8);
-            }
-        } catch (IOException ignored) {
-            // 读失败不影响后续 load——load 会回落到 BUILTIN_DEFAULT_TEMPLATE
         }
     }
 
@@ -230,29 +186,6 @@ public final class EmailTemplateStore {
         } catch (IOException ignored) {
             // 单文件迁移失败：跳过，保留原文件
         }
-    }
-
-    /**
-     * 检测内容是否包含 v1 时代的任一老占位符
-     *
-     * <p>用于 {@link #ensureInitialized()} 的 fuzzy 自动升级；也由
-     * {@code EmailDraftManager} 在打开邮件时检测内存 draft 是否陈旧。</p>
-     *
-     * @param content 模板源串或 draft HTML
-     * @return 含 {@link #LEGACY_PLACEHOLDER_TOKENS} 中任一占位符返回 true
-     * @author xumanyi
-     * @date 2026-05-17
-     */
-    public static boolean containsAnyLegacyPlaceholder(String content) {
-        if (content == null || content.isEmpty()) {
-            return false;
-        }
-        for (String token : LEGACY_PLACEHOLDER_TOKENS) {
-            if (content.contains(token)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -322,16 +255,11 @@ public final class EmailTemplateStore {
     }
 
     /**
-     * 「恢复默认」按钮的核心逻辑 —— default 与其他模板语义不同
+     * 「恢复默认」按钮的核心逻辑 —— 把指定模板内容重置为插件内置的默认内容
      *
-     * <p>设计意图：把 "default" 模板当作"用户自己的默认模板"（可定制），
-     * 其他自定义模板视为"从默认模板派生"。所以：</p>
-     * <ul>
-     *   <li>name = "default" → 用插件内置的 {@link #BUILTIN_DEFAULT_TEMPLATE} 覆盖
-     *       （回到出厂状态）</li>
-     *   <li>name = 其他 → 用<b>当前 default 模板的内容</b>覆盖（即用户定制过的"默认"，
-     *       而不是出厂状态）。让自定义模板"重置"成跟默认一致的起点。</li>
-     * </ul>
+     * <p>新定位下不再区分 default 与其他模板：任意模板（含 default）都统一恢复为当前
+     * 插件版本的 {@link #BUILTIN_DEFAULT_TEMPLATE}。这样升级插件后点一次「恢复默认」，
+     * 任何模板都能拿到最新的出厂内容。</p>
      *
      * @param name 待恢复的模板名
      * @throws IOException I/O 失败
@@ -342,14 +270,7 @@ public final class EmailTemplateStore {
     public void restoreToBuiltinDefault(String name) throws IOException {
         validateName(name);
         ensureInitialized();
-        String content;
-        if (DEFAULT_TEMPLATE_NAME.equals(name)) {
-            content = BUILTIN_DEFAULT_TEMPLATE;
-        } else {
-            // 其他模板恢复成当前 default 的内容（默认模板用户可能已经定制过）
-            content = loadOrDefault(DEFAULT_TEMPLATE_NAME);
-        }
-        Files.writeString(pathOf(name), content, StandardCharsets.UTF_8);
+        Files.writeString(pathOf(name), BUILTIN_DEFAULT_TEMPLATE, StandardCharsets.UTF_8);
     }
 
     /**

@@ -100,7 +100,7 @@ public class BackupLocationDialog extends DialogWrapper {
         this.currentCustomRoot = currentCustomRoot;
 
         setTitle("选择备份位置");
-        setOKButtonText("确认");
+        setOKButtonText("确定");
         setCancelButtonText("取消");
         init();
     }
@@ -116,8 +116,9 @@ public class BackupLocationDialog extends DialogWrapper {
     @Override
     protected JComponent createCenterPanel() {
         JPanel root = new JPanel(new BorderLayout(0, 8));
-        root.setBorder(JBUI.Borders.empty(10, 14));
-        root.setPreferredSize(new Dimension(520, 420));
+        root.setBorder(com.flux.deploy.plugin.util.FluxDialogs.contentBorder());
+        root.setPreferredSize(new Dimension(
+                com.flux.deploy.plugin.util.FluxDialogs.WIDTH_M, 420));
 
         JBLabel hint = new JBLabel("选定目录将作为备份根（备份按 yyyyMMdd_{开发}/ 子目录写入）");
         hint.setForeground(UIManager.getColor("Label.disabledForeground"));
@@ -433,7 +434,7 @@ public class BackupLocationDialog extends DialogWrapper {
     protected void doOKAction() {
         String selected = getSelectedFtpPath();
         if (selected == null) {
-            Messages.showWarningDialog(this.getContentPanel(),
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this.getContentPanel(),
                     "请先在树中选择一个目录作为备份根。", "未选择目录");
             return;
         }
@@ -461,7 +462,7 @@ public class BackupLocationDialog extends DialogWrapper {
     private void onNewFolder() {
         String parent = getSelectedFtpPath();
         if (parent == null) {
-            Messages.showWarningDialog(this.getContentPanel(),
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this.getContentPanel(),
                     "请先选中一个父目录。", "未选择父目录");
             return;
         }
@@ -472,15 +473,15 @@ public class BackupLocationDialog extends DialogWrapper {
         if (name == null) return;
         name = name.trim();
         if (name.isEmpty()) {
-            Messages.showWarningDialog(this.getContentPanel(), "文件夹名不能为空", "无效名字");
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this.getContentPanel(), "文件夹名不能为空", "无效名称");
             return;
         }
         if (name.contains("/")) {
-            Messages.showWarningDialog(this.getContentPanel(), "文件夹名不能含 /", "无效名字");
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this.getContentPanel(), "文件夹名不能含 /", "无效名称");
             return;
         }
         if (name.length() > 100) {
-            Messages.showWarningDialog(this.getContentPanel(), "文件夹名过长（>100 字符）", "无效名字");
+            com.flux.deploy.plugin.util.FluxDialogs.warn(this.getContentPanel(), "文件夹名过长（>100 字符）", "无效名称");
             return;
         }
         final String newDirAbs = parent + name + "/";
@@ -496,7 +497,7 @@ public class BackupLocationDialog extends DialogWrapper {
                     session.close();
                 }
             } catch (Exception e) {
-                SwingUtilities.invokeLater(() -> Messages.showErrorDialog(this.getContentPanel(),
+                SwingUtilities.invokeLater(() -> com.flux.deploy.plugin.util.FluxDialogs.error(this.getContentPanel(),
                         "创建目录失败：" + e.getMessage(), "FTP 错误"));
                 return;
             }

@@ -2,6 +2,7 @@ package com.flux.deploy.plugin.toolwindow;
 
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.NamedColorUtil;
 
@@ -20,14 +21,14 @@ import java.awt.*;
  */
 final class PanelChromes {
 
-    /** 卡片外框圆角半径（与设计基线一致：稍柔但不夸张） */
+    /** 卡片外框圆角半径（与设计基线一致：稍柔但不夸张；逻辑像素，绘制处经 JBUI 缩放） */
     static final int CARD_RADIUS = 10;
 
-    /** 标题栏左侧主色短条尺寸（与 14pt 粗体标题字号成比例） */
+    /** 标题栏左侧主色短条尺寸（与粗体标题字号成比例；逻辑像素，使用处经 JBUI 缩放） */
     private static final int ACCENT_STRIP_WIDTH = 4;
     private static final int ACCENT_STRIP_HEIGHT = 16;
 
-    /** 标题栏图标按钮统一边长（紧凑型，IDEA 工具窗常见 18-20px 区间） */
+    /** 标题栏图标按钮统一边长（紧凑型，IDEA 工具窗常见 18-20px 区间；逻辑像素，使用处经 JBUI 缩放） */
     private static final int HEADER_ICON_BUTTON_SIZE = 20;
 
     private PanelChromes() {}
@@ -71,7 +72,7 @@ final class PanelChromes {
         button.setFocusPainted(false);
         button.setFocusable(false);
         button.setMargin(JBUI.emptyInsets());
-        Dimension size = new Dimension(HEADER_ICON_BUTTON_SIZE, HEADER_ICON_BUTTON_SIZE);
+        Dimension size = JBUI.size(HEADER_ICON_BUTTON_SIZE);
         // 三档尺寸都锁死：BoxLayout / GridBag 等容器才不会把按钮拉宽拉高
         button.setPreferredSize(size);
         button.setMinimumSize(size);
@@ -138,7 +139,7 @@ final class PanelChromes {
         // 标题栏底分隔线 Y 都与"带图标卡片"完全一致（避免左右两列横线错位）。
         // 必须用 RigidArea：X_AXIS BoxLayout 下 verticalStrut 的 max width 是 32767，
         // 会被横向拉伸，把后面的标题连同 glue 一起挤到居中。
-        left.add(Box.createRigidArea(new Dimension(0, HEADER_ICON_BUTTON_SIZE)));
+        left.add(Box.createRigidArea(JBUI.size(0, HEADER_ICON_BUTTON_SIZE)));
 
         JComponent accent = accentStrip();
         accent.setAlignmentY(Component.CENTER_ALIGNMENT);
@@ -146,7 +147,9 @@ final class PanelChromes {
         left.add(Box.createHorizontalStrut(8));
 
         JBLabel titleLabel = new JBLabel(title);
-        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 14f));
+        // 相对字号（默认 Label 字体 +1 加粗）而非写死 14pt：用户在 IDE 外观设置里
+        // 调整全局字号时（低分辨率屏幕常用手段），标题跟随缩放
+        titleLabel.setFont(JBFont.label().biggerOn(1f).asBold());
         titleLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
         left.add(titleLabel);
 
@@ -217,7 +220,8 @@ final class PanelChromes {
             try {
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 g2.setColor(separatorColor());
-                g2.drawRoundRect(x, y, w - 1, h - 1, radius, radius);
+                int r = JBUI.scale(radius);
+                g2.drawRoundRect(x, y, w - 1, h - 1, r, r);
             } finally {
                 g2.dispose();
             }
@@ -233,7 +237,7 @@ final class PanelChromes {
     private static final class AccentStrip extends JComponent {
         AccentStrip() {
             setOpaque(false);
-            Dimension size = new Dimension(ACCENT_STRIP_WIDTH, ACCENT_STRIP_HEIGHT);
+            Dimension size = JBUI.size(ACCENT_STRIP_WIDTH, ACCENT_STRIP_HEIGHT);
             setPreferredSize(size);
             setMinimumSize(size);
             setMaximumSize(size);
@@ -247,7 +251,8 @@ final class PanelChromes {
                 g2.setColor(accentColor());
                 int w = getWidth();
                 int h = getHeight();
-                g2.fillRoundRect(0, 0, w, h, ACCENT_STRIP_WIDTH, ACCENT_STRIP_WIDTH);
+                int r = JBUI.scale(ACCENT_STRIP_WIDTH);
+                g2.fillRoundRect(0, 0, w, h, r, r);
             } finally {
                 g2.dispose();
             }

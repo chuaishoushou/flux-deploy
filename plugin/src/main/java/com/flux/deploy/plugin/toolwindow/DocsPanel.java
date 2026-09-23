@@ -1,9 +1,10 @@
 package com.flux.deploy.plugin.toolwindow;
 
+import com.flux.deploy.plugin.util.JcefSupport;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
-import com.intellij.ui.jcef.JBCefApp;
 import com.intellij.ui.jcef.JBCefBrowser;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.JBUI;
 
 import javax.swing.*;
@@ -42,8 +43,13 @@ public class DocsPanel extends JBPanel<DocsPanel> {
      * 调用此方法，让浏览器在 EDT 空闲时初始化，不阻塞面板首次显示。</p>
      */
     public void prewarm() {
-        if (JBCefApp.isSupported() && browser == null) {
-            browser = new JBCefBrowser();
+        if (browser == null && JcefSupport.isAvailable()) {
+            try {
+                browser = new JBCefBrowser();
+            } catch (Throwable t) {
+                // 内核实例化失败（native 缺失等）：静默留 null，首次 load() 时回退 Swing 渲染
+                browser = null;
+            }
         }
     }
 
@@ -63,7 +69,7 @@ public class DocsPanel extends JBPanel<DocsPanel> {
         header.add(backBtn, BorderLayout.WEST);
 
         titleLabel = new JBLabel("");
-        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 13f));
+        titleLabel.setFont(JBFont.label().asBold());
         titleLabel.setHorizontalAlignment(SwingConstants.CENTER);
         header.add(titleLabel, BorderLayout.CENTER);
 
@@ -84,23 +90,35 @@ public class DocsPanel extends JBPanel<DocsPanel> {
         titleLabel.setText(title);
         String html = loadHtml(resourcePath);
 
-        if (JBCefApp.isSupported()) {
-            loadWithJcef(html);
-        } else {
+        // JCEF 可用且成功渲染才走内核；不可用或渲染中途抛错，一律回退 Swing，保证文档总能显示
+        if (!JcefSupport.isAvailable() || !tryLoadWithJcef(html)) {
             loadWithSwing(html);
         }
     }
 
-    private void loadWithJcef(String html) {
-        contentHost.removeAll();
-        if (browser == null) {
-            browser = new JBCefBrowser();
+    /**
+     * 尝试用 JCEF 内核渲染文档；任何链接期错误 / 运行时异常都视为失败，由调用方回退 Swing。
+     *
+     * @param html 完整 HTML 文本
+     * @return 渲染成功返回 {@code true}；内核不可用或渲染抛错返回 {@code false}
+     * @author xumanyi
+     * @date 2026-07-24
+     */
+    private boolean tryLoadWithJcef(String html) {
+        try {
+            contentHost.removeAll();
+            if (browser == null) {
+                browser = new JBCefBrowser();
+            }
+            // data: URL 有长度/编码限制；使用 loadHTML 更稳
+            browser.loadHTML(html);
+            contentHost.add(browser.getComponent(), BorderLayout.CENTER);
+            contentHost.revalidate();
+            contentHost.repaint();
+            return true;
+        } catch (Throwable t) {
+            return false;
         }
-        // data: URL 有长度/编码限制；使用 loadHTML 更稳
-        browser.loadHTML(html);
-        contentHost.add(browser.getComponent(), BorderLayout.CENTER);
-        contentHost.revalidate();
-        contentHost.repaint();
     }
 
     private void loadWithSwing(String html) {

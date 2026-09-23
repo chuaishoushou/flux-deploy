@@ -83,6 +83,16 @@ public class StagingPackageBuilder {
     private final Consumer<String> logCallback;
 
     /**
+     * CSV 增量合并计划（可选注入）
+     *
+     * <p>非空时，patchJar 对 .csv 条目优先做行级增量合并（只把本次未提交改动的行
+     * 施加到目标包 CSV，保留目标包中其他同事尚未提交 git 的行）；
+     * 为空或合并不可行时保持原有整份覆盖行为。由 FTP 增量部署路径注入，
+     * CLI / 本地目标模式不注入即自动保持旧行为。</p>
+     */
+    private com.flux.deploy.csv.CsvMergePlan csvMergePlan;
+
+    /**
      * 构造暂存包构建器
      *
      * <p>资源解析策略：</p>
@@ -111,6 +121,17 @@ public class StagingPackageBuilder {
         this.artifactFileName = artifactFileName;
         this.changedSourceFiles = changedSourceFiles;
         this.logCallback = logCallback;
+    }
+
+    /**
+     * 注入 CSV 增量合并计划（详见 {@link #csvMergePlan} 字段说明）
+     *
+     * @param csvMergePlan 合并计划，可为 null（null=全部 CSV 保持整份覆盖）
+     * @author xumanyi
+     * @date 2026-07-10
+     */
+    public void setCsvMergePlan(com.flux.deploy.csv.CsvMergePlan csvMergePlan) {
+        this.csvMergePlan = csvMergePlan;
     }
 
     /**
@@ -168,10 +189,10 @@ public class StagingPackageBuilder {
             return null;
         }
 
-        logCallback.accept("[暂存包] 变更清单：" + classEntries.size()
-                + " 条替换/新增、" + deleteEntries.size() + " 条删除");
+        logCallback.accept("[暂存包] 变更清单：替换或新增 " + classEntries.size()
+                + " 个、删除 " + deleteEntries.size() + " 个");
         for (String entry : classEntries.keySet()) {
-            logCallback.accept("  → " + entry);
+            logCallback.accept("[暂存包] 变更文件 " + entry);
         }
 
         Path downloadedPackage = targetDir.resolve("__remote_" + artifactFileName);
@@ -180,10 +201,10 @@ public class StagingPackageBuilder {
 
         Path stagingPackage = targetDir.resolve("__staging_" + artifactFileName);
         PatchManifest manifest = patchJar(downloadedPackage, stagingPackage, classEntries);
-        logCallback.accept("[暂存包] 应用补丁完成（替换 " + manifest.getReplaced().size()
-                + "、新增 " + manifest.getAdded().size()
-                + "、删除 " + manifest.getDeleted().size()
-                + "），包体 " + Files.size(stagingPackage) / 1024 + " KB");
+        logCallback.accept("[暂存包] 应用补丁完成，替换 " + manifest.getReplaced().size()
+                + " 个、新增 " + manifest.getAdded().size()
+                + " 个、删除 " + manifest.getDeleted().size()
+                + " 个，包体 " + Files.size(stagingPackage) / 1024 + " KB");
 
         // 不删除 downloadedPackage：所有权移交给调用方，用于后续 BackupGate 复用
         return new BuildResult(stagingPackage, downloadedPackage);
@@ -249,13 +270,13 @@ public class StagingPackageBuilder {
             return 0;
         }
 
-        logCallback.accept("[本地补丁] 变更清单：" + classEntries.size()
-                + " 条替换/新增、" + deleteEntries.size() + " 条删除");
+        logCallback.accept("[本地补丁] 变更清单：替换或新增 " + classEntries.size()
+                + " 个、删除 " + deleteEntries.size() + " 个");
 
         Files.createDirectories(outputPath.getParent());
         PatchManifest manifest = patchJar(localPackage, outputPath, classEntries);
-        logCallback.accept("[本地补丁] 应用补丁完成（共 " + manifest.total() + " 个条目），输出 "
-                + outputPath.getFileName() + " (" + Files.size(outputPath) / 1024 + " KB)");
+        logCallback.accept("[本地补丁] 应用补丁完成，共 " + manifest.total() + " 个条目，输出 "
+                + outputPath.getFileName() + "，" + Files.size(outputPath) / 1024 + " KB");
         return manifest.total();
     }
 
@@ -305,8 +326,8 @@ public class StagingPackageBuilder {
         // （此处的 class 是 jar 内字节码条目，跟用户勾选的源文件无关）
         Path patchedJar = outputDir.resolve("patched-" + existingJar.getFileName());
         PatchManifest manifest = patchJar(existingJar, patchedJar, classEntries);
-        logCallback.accept("[补丁] 已应用（" + manifest.total() + " 个条目"
-                + (deleteEntries.isEmpty() ? "" : "，含 " + deleteEntries.size() + " 个删除") + "）");
+        logCallback.accept("[补丁] 已应用，共 " + manifest.total() + " 个条目"
+                + (deleteEntries.isEmpty() ? "" : "，含 " + deleteEntries.size() + " 个删除"));
 
         return new PatchOutcome(patchedJar, manifest);
     }
@@ -346,6 +367,13 @@ public class StagingPackageBuilder {
             if (sourceFile.length() > 2 && sourceFile.charAt(1) == ' ') {
                 status = String.valueOf(sourceFile.charAt(0));
                 sourceFile = sourceFile.substring(sourceFile.indexOf(' ')).trim();
+            }
+
+            // src/test/** 是测试代码 / 资源，Maven 打包不收进 jar / war —— 整体不属于部署包内容，
+            // 无论新增 / 修改 / 删除一律明确跳过，而非落到下游"无法确定包内路径"的误导性警告。
+            if (sourceFile.contains("src/test/")) {
+                logCallback.accept("[暂存包] 跳过测试目录文件（不进部署包）: " + sourceFile);
+                continue;
             }
 
             // 删除的文件：计算包内路径，标记为待删除
@@ -522,7 +550,7 @@ public class StagingPackageBuilder {
             // 主 class + 内部类用通配符标记（patchJar 里按前缀匹配）
             deleteEntries.add(prefix + classBase + ".class");
             deleteEntries.add(prefix + classBase + "$"); // 内部类前缀
-            logCallback.accept("  [删除] " + prefix + classBase + ".class (+ 内部类)");
+            logCallback.accept("[暂存包] 删除 " + prefix + classBase + ".class 及其内部类");
             return;
         }
 
@@ -531,7 +559,7 @@ public class StagingPackageBuilder {
         if (webappIdx >= 0) {
             String entry = pathStr.substring(webappIdx + "src/main/webapp/".length());
             deleteEntries.add(entry);
-            logCallback.accept("  [删除] " + entry);
+            logCallback.accept("[暂存包] 删除 " + entry);
             return;
         }
 
@@ -541,7 +569,7 @@ public class StagingPackageBuilder {
             String rel = pathStr.substring(resIdx + "src/main/resources/".length());
             String entry = isWar ? "WEB-INF/classes/" + rel : rel;
             deleteEntries.add(entry);
-            logCallback.accept("  [删除] " + entry);
+            logCallback.accept("[暂存包] 删除 " + entry);
             return;
         }
 
@@ -551,11 +579,11 @@ public class StagingPackageBuilder {
             String rel = pathStr.substring(javaIdx + "src/main/java/".length());
             String entry = isWar ? "WEB-INF/classes/" + rel : rel;
             deleteEntries.add(entry);
-            logCallback.accept("  [删除] " + entry);
+            logCallback.accept("[暂存包] 删除 " + entry);
             return;
         }
 
-        logCallback.accept("[警告] 无法确定删除文件的包内路径: " + sourceFile);
+        logCallback.accept("[警告] 无法确定删除文件的包内路径：" + sourceFile);
     }
 
     /**
@@ -642,12 +670,12 @@ public class StagingPackageBuilder {
         Path alignedWar = targetDir.resolve("__aligned_" + localWar.getFileName());
 
         // 1. 下载远程 war
-        logCallback.accept("[lib对齐] 下载远程 WAR: " + remotePath);
+        logCallback.accept("[lib对齐] 下载远程 WAR：" + remotePath);
         try (FtpSession session = new FtpSession(ftpHost, ftpPort)) {
             session.connect(ftpUsername, ftpPassword);
             new FtpOperations(session).download(remotePath, remoteWar);
         }
-        logCallback.accept("[lib对齐] 下载完成 (" + Files.size(remoteWar) / 1024 / 1024 + " MB)");
+        logCallback.accept("[lib对齐] 下载完成，" + Files.size(remoteWar) / 1024 / 1024 + " MB");
 
         // 2. 收集远程 war 的 WEB-INF/lib/ 文件名集合
         Set<String> remoteLibNames = new HashSet<>();
@@ -764,16 +792,21 @@ public class StagingPackageBuilder {
 
                 // 检查是否需要删除此条目
                 if (shouldDelete(entryName)) {
-                    logCallback.accept("    删除 " + entryName);
                     deleted.add(entryName);
                     continue; // 跳过，不写入输出包
                 }
 
                 if (classEntries.containsKey(entryName)) {
-                    // 替换为新 class
+                    // 替换条目：CSV 优先尝试行级增量合并，不可行（或非 CSV）时整份覆盖
+                    byte[] csvMerged = tryCsvIncrementalMerge(jar, entry, entryName,
+                            classEntries.get(entryName));
                     JarEntry newEntry = new JarEntry(entryName);
                     jos.putNextEntry(newEntry);
-                    Files.copy(classEntries.get(entryName), jos);
+                    if (csvMerged != null) {
+                        jos.write(csvMerged);
+                    } else {
+                        Files.copy(classEntries.get(entryName), jos);
+                    }
                     jos.closeEntry();
                     processedEntries.add(entryName);
                     replaced.add(entryName);
@@ -797,11 +830,58 @@ public class StagingPackageBuilder {
                     Files.copy(e.getValue(), jos);
                     jos.closeEntry();
                     added.add(e.getKey());
-                    logCallback.accept("    新增 " + e.getKey());
                 }
             }
         }
 
         return new PatchManifest(replaced, added, deleted);
+    }
+
+    /**
+     * 尝试对 .csv 条目做行级增量合并
+     *
+     * <p>返回 null 表示"走原有整份覆盖"，出现该结果的场景：未注入合并计划、
+     * 非 CSV 条目、该文件无 git 未提交变更基线、增量合并不可行（表头不一致 /
+     * 主键未识别等，引擎给出兜底原因）、以及任何意外异常。
+     * 无论哪种情形都不中断打包流程，最坏结果 = 原有整份覆盖行为。</p>
+     *
+     * @param jar        原始包
+     * @param entry      原始包中的 CSV 条目
+     * @param entryName  条目路径
+     * @param sourceFile 本地源文件（用户的 CSV）
+     * @return 合并后的字节；无法/无需合并时返回 null（调用方整份覆盖）
+     * @author xumanyi
+     * @date 2026-07-10
+     */
+    private byte[] tryCsvIncrementalMerge(JarFile jar, JarEntry entry, String entryName,
+                                          Path sourceFile) {
+        if (csvMergePlan == null || !entryName.toLowerCase().endsWith(".csv")) {
+            return null;
+        }
+        String fileName = sourceFile.getFileName().toString();
+        try {
+            String baseContent = csvMergePlan.findBaseContent(sourceFile);
+            if (baseContent == null) {
+                logCallback.accept("[CSV增量] " + fileName
+                        + " 无改动前基线（git 未跟踪到未提交变更），按整份覆盖处理");
+                return null;
+            }
+            byte[] targetBytes;
+            try (InputStream is = jar.getInputStream(entry)) {
+                targetBytes = is.readAllBytes();
+            }
+            byte[] mineBytes = Files.readAllBytes(sourceFile);
+            com.flux.deploy.csv.CsvMergeOutcome outcome = com.flux.deploy.csv.CsvMergeEngine.merge(
+                    targetBytes, mineBytes, baseContent, fileName, csvMergePlan.getRegistry());
+            for (String line : outcome.allLogLines(fileName)) {
+                logCallback.accept(line);
+            }
+            return outcome.isMerged() ? outcome.getMergedBytes() : null;
+        } catch (Exception e) {
+            // 防御性兜底：合并环节任何异常都退回整份覆盖，绝不让部署因此中断
+            logCallback.accept("[CSV增量][警告] " + fileName + " 增量合并异常，已整份覆盖: "
+                    + e.getMessage());
+            return null;
+        }
     }
 }

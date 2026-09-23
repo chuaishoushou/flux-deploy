@@ -39,90 +39,52 @@ class EmailTemplateStoreTest {
     }
 
     @Test
-    void ensureInitialized_autoUpgradesLegacyDefaultTemplate(@TempDir Path tmp) throws IOException {
+    void ensureInitialized_doesNotTouchExistingDefault(@TempDir Path tmp) throws IOException {
+        // 新定位：default 是用户可编辑的普通模板，已存在就原样保留，插件绝不自动升级 / 覆盖。
+        // （含 v1 老占位符也照样保留——不再有 legacy 自动升级。）
         Path root = tmp.resolve("templates");
         Files.createDirectories(root);
-        // 模拟用户机器上残留的 v1 老模板（含 ${收件人} ${项目名} 等 14 个占位符）
-        String legacy = "${收件人}：<br>"
+        String userEdited = "${收件人}：<br>"
                 + "&nbsp;&nbsp;你好！<br>"
-                + "&nbsp;&nbsp;【${项目名}】${标题}<br>"
-                + "&nbsp;&nbsp;更新内容: ${标题}<br>"
-                + "&nbsp;&nbsp;客服编号：${客服编号}<br>"
-                + "&nbsp;&nbsp;任务编号：${任务号}<br>"
-                + "&nbsp;&nbsp;资源来源：${资源来源}<br>"
-                + "&nbsp;&nbsp;FTP版本来源：${FTP版本来源}<br>"
-                + "&nbsp;&nbsp;备份包：${备份包}<br>"
-                + "&nbsp;&nbsp;更新方式：${更新方式}<br>"
-                + "&nbsp;&nbsp;是否重启：${是否重启}<br>"
-                + "&nbsp;&nbsp;浏览器缓存刷新：${浏览器缓存刷新}<br>"
-                + "&nbsp;&nbsp;影响范围：${影响范围}<br>"
-                + "&nbsp;&nbsp;SQL: ${SQL}<br>"
-                + "&nbsp;&nbsp;更新包: ${更新包}<br>";
-        Files.writeString(root.resolve("default.html"), legacy);
-
-        EmailTemplateStore store = new EmailTemplateStore(root);
-        store.ensureInitialized();
-        // 应该升级为新内置模板
-        assertThat(Files.readString(root.resolve("default.html")))
-                .isEqualTo(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
-    }
-
-    @Test
-    void ensureInitialized_fuzzyMatchUpgradesPartialLegacy(@TempDir Path tmp) throws IOException {
-        // 不完整的老模板（含部分老占位符 + 用户改过的部分），fuzzy match 仍判定升级
-        Path root = tmp.resolve("templates");
-        Files.createDirectories(root);
-        String partialLegacy = "帝迈顾问：<br>"
-                + "&nbsp;&nbsp;你好！<br>"
-                + "&nbsp;&nbsp;【${项目名}】${标题}<br>"
-                + "&nbsp;&nbsp;客服编号：${客服编号}<br>"
-                + "&nbsp;&nbsp;任务编号：${任务号}<br>"
-                + "&nbsp;&nbsp;资源来源：${资源来源}<br>"
-                + "&nbsp;&nbsp;更新包: ${更新包}<br>";
-        Files.writeString(root.resolve("default.html"), partialLegacy);
-
-        EmailTemplateStore store = new EmailTemplateStore(root);
-        store.ensureInitialized();
-
-        // default.html 升级
-        assertThat(Files.readString(root.resolve("default.html")))
-                .isEqualTo(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
-        // 备份保留。注意 ensureInitialized 先跑 migrateRenamedPlaceholders（${客服编号}→${客服}、
-        // ${任务号}→${任务}）再做 legacy 升级备份，所以备份的是占位符迁移后的内容。
-        String expectedBak = partialLegacy
-                .replace("${客服编号}", "${客服}")
-                .replace("${任务号}", "${任务}");
-        assertThat(Files.readString(root.resolve("default.legacy.bak")))
-                .isEqualTo(expectedBak);
-    }
-
-    @Test
-    void containsAnyLegacyPlaceholder_detectsKnownTokens() {
-        assertThat(EmailTemplateStore.containsAnyLegacyPlaceholder("包含 ${项目名} 的内容"))
-                .isTrue();
-        assertThat(EmailTemplateStore.containsAnyLegacyPlaceholder("含 ${资源来源} 的"))
-                .isTrue();
-        assertThat(EmailTemplateStore.containsAnyLegacyPlaceholder("无老占位符 ${任务号} ${客服编号}"))
-                .isFalse();
-        assertThat(EmailTemplateStore.containsAnyLegacyPlaceholder(null)).isFalse();
-        assertThat(EmailTemplateStore.containsAnyLegacyPlaceholder("")).isFalse();
-    }
-
-    @Test
-    void ensureInitialized_doesNotUpgradeUserModifiedTemplate(@TempDir Path tmp) throws IOException {
-        Path root = tmp.resolve("templates");
-        Files.createDirectories(root);
-        // 用户改过的内容（不含 v1 老占位符 ${项目名} 等，不触发整模板升级覆盖）
-        String userEdited = "亲爱的：<br>"
-                + "&nbsp;&nbsp;你好，更新到了<br>"
-                + "&nbsp;&nbsp;任务: ${任务号}<br>";
+                + "&nbsp;&nbsp;【${项目名}】${标题}<br>";
         Files.writeString(root.resolve("default.html"), userEdited);
 
         new EmailTemplateStore(root).ensureInitialized();
-        // 不会被升级覆盖成 BUILTIN；但 ${任务号}→${任务} 这类重命名占位符会被
-        // migrateRenamedPlaceholders 无损迁移，属预期行为。
-        String expectedAfterMigration = userEdited.replace("${任务号}", "${任务}");
-        assertThat(Files.readString(root.resolve("default.html"))).isEqualTo(expectedAfterMigration);
+        // 内容原样保留，不被升级成 BUILTIN。仅 ${任务号}/${客服编号} 这类已重命名占位符会被
+        // migrateRenamedPlaceholders 无损迁移（此例无这两个占位符，故完全不变）。
+        assertThat(Files.readString(root.resolve("default.html"))).isEqualTo(userEdited);
+        // 不再产生 legacy 备份文件
+        assertThat(Files.exists(root.resolve("default.legacy.bak"))).isFalse();
+    }
+
+    @Test
+    void migrateRenamedPlaceholders_stillRunsOnExistingTemplates(@TempDir Path tmp) throws IOException {
+        Path root = tmp.resolve("templates");
+        Files.createDirectories(root);
+        // 含已重命名占位符的用户模板：ensureInitialized 会无损迁移 ${任务号}→${任务}、${客服编号}→${客服}
+        String userEdited = "亲爱的：<br>"
+                + "&nbsp;&nbsp;任务: ${任务号}<br>"
+                + "&nbsp;&nbsp;客服: ${客服编号}<br>";
+        Files.writeString(root.resolve("default.html"), userEdited);
+
+        new EmailTemplateStore(root).ensureInitialized();
+        String expected = userEdited.replace("${任务号}", "${任务}").replace("${客服编号}", "${客服}");
+        assertThat(Files.readString(root.resolve("default.html"))).isEqualTo(expected);
+    }
+
+    @Test
+    void restoreToBuiltinDefault_resetsAnyTemplateToBuiltin(@TempDir Path tmp) throws IOException {
+        // 新定位：default 与非 default 一视同仁，恢复默认统一重置为插件内置内容。
+        EmailTemplateStore store = new EmailTemplateStore(tmp.resolve("templates"));
+        store.createNew("custom", "用户随便写的内容");
+        // 把 default 也改成别的内容，验证恢复后同样回到 BUILTIN
+        store.save("default", "被改过的默认内容");
+
+        store.restoreToBuiltinDefault("custom");
+        store.restoreToBuiltinDefault("default");
+
+        assertThat(store.loadOrDefault("custom")).isEqualTo(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
+        assertThat(store.loadOrDefault("default")).isEqualTo(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
     }
 
     @Test

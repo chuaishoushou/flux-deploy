@@ -111,14 +111,19 @@ public class BackupGate implements Gate {
         } else {
             tempBackup = Files.createTempFile("backup-", "-" + target.getPackageName());
             try {
-                downloadedSize = ops.download(target.getRemotePath(), tempBackup);
+                downloadedSize = ops.download(target.getRemotePath(), tempBackup,
+                        "[备份] 下载 " + target.getPackageName(),
+                        msg -> System.out.println("  " + msg));
             } catch (IOException | RuntimeException e) {
                 Files.deleteIfExists(tempBackup);
                 throw e;
             }
         }
         try {
-            ops.upload(tempBackup, backupFilePath);
+            // 原子发布：半截上传不会变成一个"看着像备份"的文件（备份写坏了就没有第二份）
+            ops.uploadAtomic(tempBackup, backupFilePath,
+                    "[备份] 上传 " + target.getPackageName(),
+                    msg -> System.out.println("  " + msg));
 
             // 5. 验证备份大小
             long backupSize = ops.getFileSize(backupFilePath);

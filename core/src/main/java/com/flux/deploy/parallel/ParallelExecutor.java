@@ -206,7 +206,7 @@ public final class ParallelExecutor {
         }
 
         log.append("[并行] ").append(workerName)
-                .append(" 开始: ").append(formatHms(startMs)).append('\n');
+                .append(" 开始 ").append(formatHms(startMs)).append('\n');
 
         TargetOutcome out;
         try {
@@ -220,8 +220,8 @@ public final class ParallelExecutor {
         // 追加完成耗时诊断行（不依赖 EDT 时间戳，便于用户判断真实并发）
         long elapsedMs = System.currentTimeMillis() - startMs;
         String diagLine = "[并行] " + workerName
-                + " 完成: " + formatHms(System.currentTimeMillis())
-                + " (耗时 " + String.format(java.util.Locale.ROOT, "%.1f", elapsedMs / 1000.0) + "s)\n";
+                + " 完成 " + formatHms(System.currentTimeMillis())
+                + "，耗时 " + String.format(java.util.Locale.ROOT, "%.1f", elapsedMs / 1000.0) + "s\n";
         out = augmentLogSegment(out, diagLine);
 
         // 处理失败传播：根据 strategy + errorKind 决定是否触发 token cancel

@@ -2,7 +2,7 @@
    邮件模板编辑器 SPA · 现代版
    - 通过 JBCefJSQuery 桥与插件 Java 端通信（list / load / save /
      delete / restore / runtime-data / copyToClipboard）
-   - Quill 2 富文本 + FluxField embed 变量 chip
+   - Quill 2 富文本 + 变量为 fluxvar 高亮文本（可编辑，复制时填值）
    - 自绘模板 popover、toast 栈、状态指示器
    ============================================================ */
 (function () {
@@ -17,16 +17,20 @@
     currentName: '',
     runtimeValues: {},
     lastSavedAt: 0,
+    previewing: false,        // 是否处于"导入后填值预览"态（编辑器显示值而非 ${变量}）
+    templateSnapshot: '',     // 进入预览前的 ${变量} 模板态 HTML，预览态保存时用它（避免把值存成模板）
   };
 
   const DEFAULT_DISPLAY_LABEL = '默认模板';
   const RAW_HTML_KEYS = {
     '更新包': true,
-    '更新包路径': true,
+    '更新jar包': true,
+    '更新war包': true,
+    '更新包地址': true,
     '备份包': true,
-    '备份包路径': true,
+    '备份包地址': true,
   };
-  const VAR_NAMES = ['项目', '任务', '客服', '更新模式', '更新包', '更新包路径', '备份包', '备份包路径'];
+  const VAR_NAMES = ['项目', '任务', '客服', '更新模式', 'FTP版本来源', '更新包', '更新jar包', '更新war包', '更新包地址', '备份包', '备份包地址'];
 
   // ──────────────────────────────────────────────────────────
   //   工具
@@ -93,6 +97,7 @@
         return { op: 'restore', name: rn };
       }
       const name = decodeURIComponent(rest);
+      if (method === 'POST') return { op: 'new', name: name };
       if (method === 'PUT') {
         let content = '';
         try { content = body ? (JSON.parse(body).content || '') : ''; } catch (e) { content = ''; }
@@ -129,6 +134,77 @@
       node.classList.add('leaving');
       setTimeout(() => node.remove(), 250);
     }
+  }
+
+  // ──────────────────────────────────────────────────────────
+  //   页内自定义弹窗（替代 JCEF 原生 confirm / prompt 的丑壳：
+  //   原生框标题会暴露 file:///jbcefbrowser/… 且按钮是英文 Cancel/OK）
+  // ──────────────────────────────────────────────────────────
+  function showModal(opts) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      const card = document.createElement('div');
+      card.className = 'modal-card';
+      card.setAttribute('role', 'dialog');
+      card.setAttribute('aria-modal', 'true');
+
+      const msg = document.createElement('div');
+      msg.className = 'modal-message';
+      msg.textContent = opts.message || '';
+      card.appendChild(msg);
+
+      let input = null;
+      if (opts.input) {
+        input = document.createElement('input');
+        input.className = 'modal-input';
+        input.type = 'text';
+        if (opts.placeholder) input.placeholder = opts.placeholder;
+        card.appendChild(input);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'modal-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'modal-btn modal-cancel';
+      cancelBtn.textContent = opts.cancelText || '取消';
+      const okBtn = document.createElement('button');
+      okBtn.className = 'modal-btn modal-ok' + (opts.danger ? ' danger' : '');
+      okBtn.textContent = opts.okText || '确定';
+      actions.appendChild(cancelBtn);
+      actions.appendChild(okBtn);
+      card.appendChild(actions);
+
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+
+      if (input) { input.focus(); input.select(); } else { okBtn.focus(); }
+
+      function finish(ok) {
+        document.removeEventListener('keydown', onKey, true);
+        overlay.remove();
+        resolve({ ok: ok, value: input ? input.value.trim() : '' });
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+        else if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      }
+      document.addEventListener('keydown', onKey, true);
+      cancelBtn.addEventListener('click', () => finish(false));
+      okBtn.addEventListener('click', () => finish(true));
+      overlay.addEventListener('mousedown', e => { if (e.target === overlay) finish(false); });
+    });
+  }
+
+  /** 自定义确认框，返回 Promise<boolean>；danger=true 时确定按钮为红色（删除等危险操作）。 */
+  function showConfirm(message, danger) {
+    return showModal({ message: message, danger: !!danger }).then(r => r.ok);
+  }
+
+  /** 自定义输入框，返回 Promise<string|null>（取消或空输入返回 null）。 */
+  function showPrompt(message, placeholder) {
+    return showModal({ message: message, input: true, placeholder: placeholder })
+      .then(r => (r.ok && r.value) ? r.value : null);
   }
 
   function flashBtn(btn, doneText) {
@@ -180,36 +256,33 @@
   });
   Quill.register(LineHeight, true);
 
-  const Embed = Quill.import('blots/embed');
-  class FluxField extends Embed {
+  /* 变量高亮：带 data-key 的 inline format（非 atomic embed），让变量是真实可编辑文本——
+     可拖选跨越、可手动增删改；橙色仅作编辑器内视觉区分，复制/保存时脱掉。
+     data-key 记住"这是哪个变量"：导入时 span 内文本换成值后，保存仍能凭它还原回 ${key}。
+     必须仿 Quill 内置 link blot 补齐 create/formats/format 三件套——否则 clipboard.convert
+     不认 class="fluxvar"，高亮会整体丢失（变成黑色普通文本）。 */
+  const Inline = Quill.import('blots/inline');
+  class FluxVar extends Inline {
     static create(value) {
       const node = super.create(value);
-      const key = (value && value.key) || '';
-      const empty = !!(value && value.empty);
-      const content = (value && value.value != null) ? value.value : '';
-      node.setAttribute('data-key', key);
-      node.setAttribute('contenteditable', 'false');
-      if (empty) {
-        node.classList.add('ph-empty');
-        node.innerHTML = '${' + key + '}';
-      } else {
-        node.innerHTML = String(content);
-      }
+      node.setAttribute('data-key', value == null ? '' : String(value));
       return node;
     }
-    static value(node) {
-      return {
-        key: node.getAttribute('data-key') || '',
-        empty: node.classList.contains('ph-empty'),
-        value: node.innerHTML,
-        raw: true,
-      };
+    static formats(node) {
+      return node.getAttribute('data-key') || '';
+    }
+    format(name, value) {
+      if (name === this.statics.blotName && value) {
+        this.domNode.setAttribute('data-key', String(value));
+      } else {
+        super.format(name, value);
+      }
     }
   }
-  FluxField.blotName = 'flux-field';
-  FluxField.tagName = 'SPAN';
-  FluxField.className = 'ph';
-  Quill.register(FluxField);
+  FluxVar.blotName = 'fluxvar';
+  FluxVar.tagName = 'SPAN';
+  FluxVar.className = 'fluxvar';
+  Quill.register(FluxVar);
 
   const quill = new Quill('#editor', {
     theme: 'snow',
@@ -234,13 +307,15 @@
             if (!key) return;
             const range = quill.getSelection(true);
             if (!range) return;
-            /* 手动插入：永远是空 chip 占位（${变量名} 灰色斜体）
-               值的注入只通过「导入数据」按钮触发，不在这里偷偷读 state.runtimeValues。
-               这样用户对模板里有哪些变量、什么时候被填，有明确的"事件分离"。 */
-            quill.insertEmbed(range.index, 'flux-field', {
-              key: key, empty: true, value: '', raw: true
-            }, Quill.sources.USER);
-            quill.setSelection(range.index + 1, Quill.sources.SILENT);
+            /* 变量以"高亮可编辑文本"插入：光标可自由进出、可拖选跨越、可手动改写。
+               fluxvar 的值＝变量名（落到 data-key），「导入数据」会把 span 内文本换成实际值，
+               凭 data-key 仍能在保存时还原回 ${key}。user source 入 history，可撤销。 */
+            const token = '${' + key + '}';
+            if (range.length) quill.deleteText(range.index, range.length, Quill.sources.USER);
+            quill.insertText(range.index, token, { fluxvar: key }, Quill.sources.USER);
+            quill.setSelection(range.index + token.length, Quill.sources.SILENT);
+            // 清除"待输入格式"里的 fluxvar，避免变量后继续打字也被染成橙色
+            quill.format('fluxvar', false, Quill.sources.SILENT);
             setTimeout(() => {
               const label = document.querySelector('.ql-flux-var .ql-picker-label');
               if (label) {
@@ -253,18 +328,48 @@
           },
         },
       },
+      history: {
+        delay: 800,
+        maxStack: 200,
+        userOnly: true,
+      },
     },
   });
 
   const Delta = Quill.import('delta');
-  quill.clipboard.addMatcher('span.ph', function (node) {
-    return new Delta().insert({
-      'flux-field': {
-        key: node.getAttribute('data-key') || '',
-        empty: node.classList.contains('ph-empty'),
-        value: node.innerHTML,
-        raw: true,
+  /* 加载/粘贴时把带 .fluxvar 的 span 标成 fluxvar inline format（值＝data-key，橙色高亮）。
+     变量本体是 span 内的真实文本（${xxx} 或导入后的值），不是 atomic embed。 */
+  quill.clipboard.addMatcher('span.fluxvar', function (node, delta) {
+    const key = node.getAttribute('data-key') || '';
+    return delta.compose(new Delta().retain(delta.length(), { fluxvar: key || true }));
+  });
+
+  /* 新输入的文字自动套默认 字体/字号，避免"无样式裸文本"导致复制到企微样式丢失。
+     行距是 block 级，已由编辑器 CSS 默认 + 复制时 computed 内联覆盖，无需在此补。
+     formatText 用 silent，不进 history 栈——撤销只回退文字本身；silent 触发的
+     text-change 被下面的 source 守卫挡掉，不会递归。 */
+  const DEFAULT_FONT = 'PingFang SC';
+  const DEFAULT_SIZE = '10.5pt';
+  quill.on('text-change', function (delta, oldDelta, source) {
+    if (source !== 'user') return;
+    const inserts = [];
+    let index = 0;
+    (delta.ops || []).forEach(function (op) {
+      if (op.retain != null) {
+        index += (typeof op.retain === 'number' ? op.retain : 1);
+      } else if (typeof op.insert === 'string') {
+        if (op.insert.length) inserts.push([index, op.insert.length]);
+        index += op.insert.length;
+      } else if (op.insert != null) {
+        index += 1;
       }
+    });
+    if (!inserts.length) return;
+    inserts.forEach(function (pair) {
+      const idx = pair[0], len = pair[1];
+      const fmt = quill.getFormat(idx, len);
+      if (!fmt.font) quill.formatText(idx, len, 'font', DEFAULT_FONT, 'silent');
+      if (!fmt.size) quill.formatText(idx, len, 'size', DEFAULT_SIZE, 'silent');
     });
   });
 
@@ -359,11 +464,10 @@
     if (lh) attachBlockFormat(delta, { lineheight: lh });
     return delta;
   });
-  // SPAN：模糊匹配 font-size / font-family。注意 span.ph（变量 chip）已经被前面的
-  // 专用 matcher 截走（返回的是 flux-field embed，insert 是对象而非字符串），
-  // 这里的 string-only 过滤天然跳过 chip，不冲突。
+  // SPAN：模糊匹配 font-size / font-family。变量高亮 span.fluxvar 已被前面的专用 matcher
+  // 标成 fluxvar inline format，这里跳过它的 font 推断（变量文本的字体继承外层）。
   quill.clipboard.addMatcher('SPAN', function (node, delta) {
-    if (node.classList && node.classList.contains('ph')) return delta;
+    if (node.classList && node.classList.contains('fluxvar')) return delta;
     const fmt = {};
     const size = nearestSize(node.style && node.style.fontSize);
     if (size) fmt.size = size;
@@ -376,54 +480,66 @@
   // ──────────────────────────────────────────────────────────
   //   模板序列化 / 反序列化
   // ──────────────────────────────────────────────────────────
-  /* 模板加载：永远渲染为空 chip 占位（${字段名} 灰色斜体）。
-     值的注入只通过「导入数据」按钮的 updateChipValue 路径走。
-     这样行为可预测：只要重新加载 / 切换 / 恢复默认 模板，chip 就回到占位态；
-     之前导入的快照值也作废（state.runtimeValues 清空）。 */
-  function loadTemplate(templateHtml) {
+  /* 模板渲染：每个 ${key} 按"是否有值 + 编辑态 / 导入预览态"分形态——
+       · 已填充（导入到值）→ 直接渲染值本身，不套 fluxvar 高亮，显示为普通正文色；
+       · 未填充 + 编辑态（没点过导入，valuesMap 空）→ <span class="fluxvar">${key}</span> 橙色占位，供查看 / 编辑；
+       · 未填充 + 预览态（已点导入，valuesMap 非空）→ 渲染为空、不显示 ${key} 占位符，
+         避免没值的变量把 "${xxx}" 字面带进最终邮件。
+     橙色专门表示"此变量还没值"。预览态保存用的是导入前快照（见 saveBtn）、复制时本就脱掉 span，
+     故已填值 / 预览态空值都无需带 data-key 回写，不影响保存。valuesMap 同时存入 state 判定 previewing。 */
+  function loadTemplate(templateHtml, valuesMap) {
+    valuesMap = valuesMap || {};
+    const previewing = Object.keys(valuesMap).length > 0;
     const rendered = (templateHtml || '').replace(
       /\$\{([^}\s]+)\}/g,
       function (_, key) {
         const safeKey = escapeHtml(key);
-        return '<span class="ph ph-empty" data-key="' + safeKey
-          + '" contenteditable="false">${' + safeKey + '}</span>';
+        const v = valuesMap[key];
+        if (v !== undefined && v !== null && v !== '') {
+          let inner = RAW_HTML_KEYS[key] ? String(v) : escapeHtml(v);
+          if (MULTILINE_INDENT_KEYS[key]) {
+            inner = inner.replace(/<br\s*\/?>/gi, '<br>' + INDENT_FULLWIDTH_SPACES);
+          }
+          return inner;
+        }
+        // 未填充：预览态不显示占位符（渲染空）；编辑态保留 ${key} 橙色占位供查看 / 编辑
+        if (previewing) return '';
+        return '<span class="fluxvar" data-key="' + safeKey + '">${' + safeKey + '}</span>';
       }
     );
     const delta = quill.clipboard.convert({ html: rendered });
     quill.setContents(delta, 'silent');
-    state.runtimeValues = {};
+    state.runtimeValues = valuesMap;
+    state.previewing = previewing;
   }
 
   function serializeTemplate() {
     const clone = quill.root.cloneNode(true);
-    clone.querySelectorAll('.ph').forEach(chip => {
-      const key = chip.getAttribute('data-key') || '';
-      chip.parentNode.replaceChild(document.createTextNode('${' + key + '}'), chip);
-    });
+    // 保存写出的永远是 ${key} 模板：把 fluxvar span（无论显示 ${key} 还是导入的值）
+    // 凭 data-key 还原成 ${key} 纯文本，存储格式与后端 / 默认模板一致。
+    restoreFluxVarsToTokens(clone);
     return clone.innerHTML;
   }
 
   /* 多行路径变量：续行需要注入"等宽缩进"才能在 WeCom 里保持对齐。
-     编辑器里之所以续行能对齐，是因为 chip 的 display:inline-block 让 <br> 续行靠在
-     chip 左边（= 标签右侧）；脱壳之后这层包裹没了，续行就回到左边沿。
-     方案：脱壳前把内部 <br> 换成 <br> + 跟标签等宽的全角空格。
-     标签 "更新包路径：" / "备份包路径：" 都是 6 个全角字 + 1 全角冒号 = 7 个全角字符宽。 */
-  const MULTILINE_INDENT_KEYS = { '更新包路径': true, '备份包路径': true };
+     方案：导入填值时把多行值内部的 <br> 换成 <br> + 跟标签等宽的全角空格。
+     全角空格数需与模板里该变量左侧标签的宽度匹配（默认模板调整后再按标签宽度校准）。 */
+  const MULTILINE_INDENT_KEYS = { '更新包地址': true, '备份包地址': true };
   const INDENT_FULLWIDTH_SPACES = '　　　　　　　'; // 7 个全角空格
 
-  /* chip 脱壳：把 .ph 元素替换成内部文本（多行路径 chip 还要给续行加全角空格缩进） */
-  function unwrapChips(rootEl) {
-    rootEl.querySelectorAll('.ph').forEach(chip => {
-      if (chip.classList.contains('ph-empty')) {
-        chip.outerHTML = '';
-        return;
-      }
-      let inner = chip.innerHTML;
-      const key = chip.getAttribute('data-key') || '';
-      if (MULTILINE_INDENT_KEYS[key]) {
-        inner = inner.replace(/<br\s*\/?>/gi, '<br>' + INDENT_FULLWIDTH_SPACES);
-      }
-      chip.outerHTML = inner;
+  /* 保存用：fluxvar span → ${data-key} 纯文本（还原成模板占位符，丢弃当前展示的值）。 */
+  function restoreFluxVarsToTokens(rootEl) {
+    rootEl.querySelectorAll('span.fluxvar').forEach(span => {
+      const key = span.getAttribute('data-key') || '';
+      span.replaceWith(document.createTextNode('${' + key + '}'));
+    });
+  }
+
+  /* 复制用：脱掉 fluxvar span 外壳、保留内部 HTML（导入后是值、未导入是 ${key}）。
+     用 outerHTML=innerHTML 保留值里的 <br> 等；去掉 class 后橙色不会被内联进最终邮件。 */
+  function unwrapFluxVars(rootEl) {
+    rootEl.querySelectorAll('span.fluxvar').forEach(span => {
+      span.outerHTML = span.innerHTML;
     });
   }
 
@@ -466,32 +582,79 @@
     return walker.nextNode();
   }
 
-  /* 复制 / 导出统一走这条管线：clone DOM → 脱壳 chip → 段首缩进转 text-indent */
+  /* 出站样式内联（选择性 computed-style 内联）：
+     编辑器靠外部 CSS（.ql-editor / .ql-editor p {...}）渲染默认样式，复制出去的 HTML 片段
+     丢了这套外部 CSS → 企微 / Outlook 改用自己的默认值 → 段距撑大、行高撑高、颜色变样。
+     这里把视觉关键属性从 computed style 取真实值、一次性内联到每个元素，做到所见即所得，
+     替代过去逐项补 margin/line-height 的打地鼠。
+     - font-size / font-family 不走 computed：保留 Quill 写的 pt / 字体（对齐企微中文字号制），
+       computed 会把它们变 px / 长字体栈反而失真；bold / italic 走 <strong>/<em> 标签无需内联。
+     - getComputedStyle 必须在 DOM 上取值，复制片段不在 DOM，故把内容克隆进一个继承了编辑器
+       CSS 的隐藏 .ql-editor 容器取值，再把计算值映射回 rootEl 对应元素（rootEl 本体不动，
+       内联失败也不会破坏复制内容）。 */
+  const COMPUTED_PROPS = [
+    'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+    'line-height', 'text-align',
+    'color', 'background-color', 'font-weight', 'font-style'
+  ];
+  function inlineComputedStyles(rootEl) {
+    let host = null;
+    try {
+      host = document.createElement('div');
+      host.className = 'ql-container ql-snow';
+      host.setAttribute('aria-hidden', 'true');
+      host.style.cssText = 'position:absolute;left:-99999px;top:0;visibility:hidden;width:'
+        + (quill.root.clientWidth || 800) + 'px;';
+      const editor = document.createElement('div');
+      editor.className = 'ql-editor';
+      editor.innerHTML = rootEl.innerHTML;   // 克隆内容到隐藏容器；rootEl 本体不动
+      host.appendChild(editor);
+      document.body.appendChild(host);
+
+      const srcEls = editor.querySelectorAll('*');
+      const dstEls = rootEl.querySelectorAll('*');   // 同一份 HTML，结构与顺序一一对应
+      const n = Math.min(srcEls.length, dstEls.length);
+      for (let i = 0; i < n; i++) {
+        const cs = getComputedStyle(srcEls[i]);
+        for (const prop of COMPUTED_PROPS) {
+          const v = cs.getPropertyValue(prop);
+          if (v && v !== 'normal' && v !== 'none' && v !== 'auto' && v !== 'rgba(0, 0, 0, 0)') {
+            dstEls[i].style.setProperty(prop, v);
+          }
+        }
+      }
+    } catch (e) {
+      /* 内联失败不阻断复制：rootEl 内容完好，降级为“未内联”（顶多段距回到旧问题，绝不丢内容） */
+    } finally {
+      if (host && host.parentNode) {
+        host.parentNode.removeChild(host);
+      }
+    }
+  }
+
+  /* 复制 / 导出统一走这条管线：脱掉变量高亮外壳（保留当前展示内容）→ 段首缩进 → computed 内联。
+     导入预览态下已填变量是普通正文（值）、未填变量已渲染为空（不带 ${key} 占位）；故复制即得
+     "已填项是值、未填项留空"的邮件，不会把 ${xxx} 字面带出去。模板态（未导入）下全是 ${key} 橙色
+     占位 span，unwrapFluxVars 脱壳后复制即得带占位符的模板（与旧版"未导入复制出占位"一致）。 */
   function processForClipboard(rootEl) {
-    unwrapChips(rootEl);
+    unwrapFluxVars(rootEl);
     applyParagraphIndent(rootEl);
+    inlineComputedStyles(rootEl);
+  }
+
+  /* 渲染最终邮件 HTML：DOM 处理（脱高亮外壳 + 缩进 + 内联）后取 innerHTML。 */
+  function renderFinalHtml(rootEl) {
+    processForClipboard(rootEl);
+    return rootEl.innerHTML;
   }
 
   function serializeRendered() {
     const clone = quill.root.cloneNode(true);
-    processForClipboard(clone);
-    return clone.innerHTML;
+    return renderFinalHtml(clone);
   }
 
-  function updateChipValue(key, value) {
-    const chips = quill.root.querySelectorAll(
-      '.ph[data-key="' + cssEscape(key) + '"]');
-    chips.forEach(chip => {
-      const empty = (value === undefined || value === null || value === '');
-      if (empty) {
-        chip.classList.add('ph-empty');
-        chip.innerHTML = '${' + escapeHtml(key) + '}';
-      } else {
-        chip.classList.remove('ph-empty');
-        chip.innerHTML = RAW_HTML_KEYS[key] ? String(value) : escapeHtml(value);
-      }
-    });
-  }
+  // updateChipValue 已移除：变量不再是 chip；导入时由 loadTemplate 把已填充变量就地渲染成普通正文，
+  // 仅未填充的保留 fluxvar 橙色占位符。
 
   function stripHtml(html) {
     const div = document.createElement('div');
@@ -506,6 +669,9 @@
   const apiLoadTemplate   = name       => api('/api/templates/' + encodeURIComponent(name));
   const apiSaveTemplate   = (name, c)  => api('/api/templates/' + encodeURIComponent(name),
                                           { method: 'PUT', body: JSON.stringify({ content: c }) });
+  /* 新建：初始内容由 Java 端取插件内置默认填充（POST 不带 /restore 后缀 → op:new）。 */
+  const apiNewTemplate    = name       => api('/api/templates/' + encodeURIComponent(name),
+                                          { method: 'POST' });
   const apiDeleteTemplate = name       => api('/api/templates/' + encodeURIComponent(name),
                                           { method: 'DELETE' });
   const apiRestoreTemplate= name       => api('/api/templates/' + encodeURIComponent(name)
@@ -622,7 +788,7 @@
   // ──────────────────────────────────────────────────────────
   $('#newTplBtn').addEventListener('click', async () => {
     closePopover();
-    const name = prompt('新模板名称（中英文 / 数字 / 下划线 / 横线）：');
+    const name = await showPrompt('新模板名称（中英文 / 数字 / 下划线 / 横线）：');
     if (!name) return;
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -631,8 +797,8 @@
       return;
     }
     try {
-      const current = serializeTemplate();
-      await apiSaveTemplate(trimmed, current);
+      // 新建模板的初始内容统一取插件内置默认（由 Java 端填充），不再复制当前编辑器内容。
+      await apiNewTemplate(trimmed);
       await refreshTemplateList(trimmed);
       await reloadEditorWithCurrent();
       toast('已新建并切换到「' + trimmed + '」', 'success');
@@ -645,12 +811,9 @@
     closePopover();
     const name = state.currentName;
     if (!name) return;
-    const isDefault = name === state.defaultName;
-    const msg = isDefault
-      ? '确认把「默认模板」恢复为插件出厂内置内容？\n当前内容会被覆盖，无法撤销。'
-      : '确认把模板「' + displayLabelOf(name)
-        + '」恢复为<当前默认模板>的内容？\n当前内容会被覆盖。';
-    if (!confirm(msg)) return;
+    const msg = '确认把模板「' + displayLabelOf(name)
+      + '」恢复为插件出厂默认内容？\n当前内容会被覆盖，无法撤销。';
+    if (!(await showConfirm(msg))) return;
     try {
       const data = await apiRestoreTemplate(name);
       loadTemplate(data.content);
@@ -668,7 +831,7 @@
       toast('默认模板不可删除（可点"恢复默认"重置内容）', 'warn', 4000);
       return;
     }
-    if (!confirm('确认删除模板「' + displayLabelOf(name) + '」？无法恢复。')) return;
+    if (!(await showConfirm('确认删除模板「' + displayLabelOf(name) + '」？无法恢复。', true))) return;
     try {
       await apiDeleteTemplate(name);
       await refreshTemplateList(state.defaultName);
@@ -682,7 +845,8 @@
   $('#saveBtn').addEventListener('click', async () => {
     if (!state.currentName) return;
     try {
-      const html = serializeTemplate();
+      // 预览态下编辑器显示的是值，保存要用进入预览前的 ${变量} 模板快照，避免把值存成模板。
+      const html = state.previewing ? state.templateSnapshot : serializeTemplate();
       await apiSaveTemplate(state.currentName, html);
       state.lastSavedAt = Date.now();
       flashBtn($('#saveBtn'), '✓ 已保存');
@@ -698,8 +862,11 @@
         toast('暂无可导入内容：请先在插件主面板填任务 / 客服，或先部署一次', 'warn', 5000);
         return;
       }
-      state.runtimeValues = Object.assign({}, state.runtimeValues, values);
-      Object.keys(values).forEach(k => updateChipValue(k, values[k]));
+      // 导入＝把编辑器里的 ${变量} 就地填成实际值（可见预览）。先取回当前 ${变量} 模板态
+      // （含用户刚才的编辑）存为快照，再带值重渲染——保存时用快照，保证存的仍是模板。
+      const merged = Object.assign({}, state.runtimeValues, values);
+      state.templateSnapshot = state.previewing ? state.templateSnapshot : serializeTemplate();
+      loadTemplate(state.templateSnapshot, merged);
       flashBtn($('#importBtn'), '✓ 已导入');
       toast('已导入 ' + Object.keys(values).length + ' 个变量', 'success');
     } catch (e) {
@@ -721,6 +888,11 @@
     }
   });
 
+  // 关闭：经桥回调 Java 端关闭对话框（窗口标题栏的系统关闭按钮也仍可用）
+  $('#closeBtn').addEventListener('click', () => {
+    bridgeCall({ op: 'close' }).catch(() => { /* 关闭动作失败无需提示用户 */ });
+  });
+
   // ──────────────────────────────────────────────────────────
   //   复制事件拦截（Ctrl+A / Cmd+A 复制时让 chip 输出真实文本）
   // ──────────────────────────────────────────────────────────
@@ -733,12 +905,13 @@
       const frag = range.cloneContents();
       const container = document.createElement('div');
       container.appendChild(frag);
-      /* 跟 serializeRendered 走同一条处理管线：chip 脱壳 + 段首缩进转 text-indent。
-         避免 Ctrl+C 复制时缩进丢失（之前直接 setData(container.innerHTML)，
-         WeCom 把前导 nbsp 规范化掉 → 视觉缩进消失） */
-      processForClipboard(container);
-      ev.clipboardData.setData('text/plain', container.textContent || '');
-      ev.clipboardData.setData('text/html', container.innerHTML);
+      /* 跟 serializeRendered 走同一条管线：脱变量高亮外壳（保留当前展示内容）+ 段首缩进 + 内联。
+         预览态选区里是值、模板态是 ${变量}，Ctrl+C 都能带出且缩进不丢。 */
+      const html = renderFinalHtml(container);
+      const plain = document.createElement('div');
+      plain.innerHTML = html;
+      ev.clipboardData.setData('text/plain', plain.textContent || '');
+      ev.clipboardData.setData('text/html', html);
       ev.preventDefault();
     } catch (e) { /* fall back */ }
   }
@@ -748,12 +921,28 @@
   // ──────────────────────────────────────────────────────────
   //   键盘快捷键：Cmd/Ctrl+S 保存
   // ──────────────────────────────────────────────────────────
+  /* 键盘快捷键（capture 阶段处理，并对 z/y 做 stopPropagation 阻止 Quill 自带绑定重复触发）：
+     - Cmd/Ctrl+S 保存
+     - Cmd/Ctrl+Z 撤销 / Cmd/Ctrl+Shift+Z 或 Ctrl+Y 重做
+     JCEF/CEF 里 Quill 自带的 undo 绑定有时收不到事件，这里显式驱动 history 模块兜底。 */
   document.addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    const k = e.key.toLowerCase();
+    const history = quill.getModule('history');
+    if (k === 's') {
       e.preventDefault();
       $('#saveBtn').click();
+    } else if (k === 'z') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (history) { e.shiftKey ? history.redo() : history.undo(); }
+    } else if (k === 'y') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (history) history.redo();
     }
-  });
+  }, true);
 
   // ──────────────────────────────────────────────────────────
   //   引导

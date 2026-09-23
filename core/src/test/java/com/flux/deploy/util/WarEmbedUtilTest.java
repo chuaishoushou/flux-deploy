@@ -85,6 +85,37 @@ class WarEmbedUtilTest {
         assertThat(new String(mainAfter)).isEqualTo("patched-content");
     }
 
+    @Test
+    void embedJar_preservesTimestampsOfUntouchedEntries(@TempDir Path tmp) throws IOException {
+        // 未改动条目（sibling jar、web.xml）的时间戳必须原样保留：
+        // 旧"解压到磁盘再重打"实现会把所有条目刷成打包时刻，这里锁死"只有目标 jar 时间变"。
+        Path war = tmp.resolve("src.war");
+        long historicMillis = 1_577_836_800_000L; // 2020-01-01 00:00:00 UTC，DOS 时间可表示
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(war))) {
+            writeTimedEntry(zos, "WEB-INF/web.xml", "<web-app/>", historicMillis);
+            writeTimedEntry(zos, "WEB-INF/lib/main-1.0.jar", "MAIN-original", historicMillis);
+            writeTimedEntry(zos, "WEB-INF/lib/sibling-1.0.jar", "SIBLING-original", historicMillis);
+        }
+        // expected 取 war 内实际存储值（已过 DOS 时间 round-trip），排除时区/2 秒精度干扰
+        long expectedSibling = entryTime(war, "WEB-INF/lib/sibling-1.0.jar");
+        long expectedWebXml = entryTime(war, "WEB-INF/web.xml");
+
+        Path patch = writeBytes(tmp.resolve("patch.jar"), "MAIN-patched");
+        Path out = tmp.resolve("out.war");
+
+        WarEmbedUtil.embedJar(war, patch, "main-1.0.jar", out);
+
+        assertThat(entryTime(out, "WEB-INF/lib/sibling-1.0.jar"))
+                .as("未改动的 sibling jar 时间戳应原样保留")
+                .isEqualTo(expectedSibling);
+        assertThat(entryTime(out, "WEB-INF/web.xml"))
+                .as("war 内其他未改动条目时间戳应原样保留")
+                .isEqualTo(expectedWebXml);
+        // 回归保护：保时间戳不能把"替换目标 jar"也一并跳过
+        assertThat(new String(readEntry(out, "WEB-INF/lib/main-1.0.jar")))
+                .isEqualTo("MAIN-patched");
+    }
+
     // ===== helpers =====
 
     private static Path newWarWithLib(Path warPath, String[] libNames, String[] libBytes) throws IOException {
@@ -114,6 +145,23 @@ class WarEmbedUtilTest {
             java.util.jar.JarEntry e = jar.getJarEntry(entryName);
             assertThat(e).as("entry %s in %s", entryName, war).isNotNull();
             return jar.getInputStream(e).readAllBytes();
+        }
+    }
+
+    private static void writeTimedEntry(ZipOutputStream zos, String name, String content,
+                                        long timeMillis) throws IOException {
+        ZipEntry e = new ZipEntry(name);
+        e.setTime(timeMillis);
+        zos.putNextEntry(e);
+        zos.write(content.getBytes());
+        zos.closeEntry();
+    }
+
+    private static long entryTime(Path war, String entryName) throws IOException {
+        try (java.util.jar.JarFile jar = new java.util.jar.JarFile(war.toFile())) {
+            java.util.jar.JarEntry e = jar.getJarEntry(entryName);
+            assertThat(e).as("entry %s in %s", entryName, war).isNotNull();
+            return e.getTime();
         }
     }
 }

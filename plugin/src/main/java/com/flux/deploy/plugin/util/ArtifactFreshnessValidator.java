@@ -2,15 +2,14 @@ package com.flux.deploy.plugin.util;
 
 import com.flux.deploy.plugin.model.DeployMode;
 
-import javax.swing.JOptionPane;
 import java.awt.Component;
 import java.util.List;
 
 /**
- * 编译产物新鲜度 UI 校验：在 {@link ArtifactPresenceValidator} 通过后调用，
+ * 编译产物时间 UI 校验：在 {@link ArtifactPresenceValidator} 通过后调用，
  * 把 {@link ArtifactFreshnessChecker} 的结果转成"取消 / 继续"二选一弹窗。
  *
- * <p>触发条件：检测到任一 .java 源比对应编译产物（.class 或 jar）新。弹窗默认按钮为"取消"，
+ * <p>触发条件：检测到任一 .java 源不早于对应编译产物（.class 或 jar）。弹窗默认按钮为"取消"，
  * 防止用户回车直接放行旧产物。</p>
  *
  * @author xumanyi
@@ -52,7 +51,7 @@ public final class ArtifactFreshnessValidator {
     }
 
     /**
-     * 执行新鲜度校验，stale 时弹"取消 / 继续部署"二选一对话框。
+     * 执行编译时间校验，stale 时弹"取消 / 继续部署"二选一对话框。
      *
      * @param parent           对话框父组件（一般传 {@code DeployToolWindowPanel.this}）
      * @param mode             部署模式
@@ -74,18 +73,13 @@ public final class ArtifactFreshnessValidator {
             return new Outcome(Decision.FRESH, List.of());
         }
 
-        Object[] options = {"取消", "继续"};
-        int choice = JOptionPane.showOptionDialog(
-                parent,
-                "检测到编译文件时间早于更新文件，请确认是否已执行 maven 编译？",
-                "请确认编译状态",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.QUESTION_MESSAGE,
-                null,
-                options,
-                options[0]);
+        // 产物可能过期属于风险确认：confirmDanger 默认聚焦「取消」，避免误回车带旧产物更新
+        boolean proceed = FluxDialogs.confirmDanger(parent,
+                "编译产物检查",
+                "检测到编译产物时间不晚于源文件，请确认是否已执行 maven 编译？",
+                "继续更新");
 
-        Decision d = (choice == 1) ? Decision.USER_CONFIRMED_STALE : Decision.CANCELED;
+        Decision d = proceed ? Decision.USER_CONFIRMED_STALE : Decision.CANCELED;
         return new Outcome(d, r.staleSources);
     }
 }

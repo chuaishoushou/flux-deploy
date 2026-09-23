@@ -39,6 +39,14 @@ public class DeployConfig {
     /** 目标包在远程目录中的相对路径（如 tmssrv-1/tm01srv.war） */
     private List<String> targetRelativePaths;
 
+    /**
+     * 各目标是否为「新建目标」（与 targetNames 一一对应；null 表示全部为覆盖已有包）。
+     *
+     * <p>Vue 前端首次向某目录投放模块 zip 时远端尚无同名文件：预检不再要求远端存在、
+     * 备份/加锁自然缺位，回滚语义变为删除已上传的新文件。仅对显式目标生效。</p>
+     */
+    private List<Boolean> createNewFlags;
+
     /** 任务号 */
     private String taskId;
 
@@ -92,6 +100,15 @@ public class DeployConfig {
 
     /** 重试预算耗尽时的用户提示器；CLI / 测试默认 abortAll，IDE 注入弹窗实现 */
     private com.flux.deploy.ftp.RetryUserPrompter retryPrompter = com.flux.deploy.ftp.RetryUserPrompter.abortAll();
+
+    /**
+     * CSV 增量合并计划（可为 null）
+     *
+     * <p>由插件层在部署启动时收集注入（git 基线内容 + 业务主键字典）。
+     * 非空时增量部署对 .csv 条目做行级合并，防止整份覆盖删除目标包中
+     * 其他同事尚未提交 git 的行；为空时保持原有整份覆盖行为。</p>
+     */
+    private com.flux.deploy.csv.CsvMergePlan csvMergePlan;
 
     /**
      * Stage 0 残留锁处理策略
@@ -157,6 +174,9 @@ public class DeployConfig {
     public List<String> getTargetRelativePaths() { return targetRelativePaths; }
     public void setTargetRelativePaths(List<String> targetRelativePaths) { this.targetRelativePaths = targetRelativePaths; }
 
+    public List<Boolean> getCreateNewFlags() { return createNewFlags; }
+    public void setCreateNewFlags(List<Boolean> createNewFlags) { this.createNewFlags = createNewFlags; }
+
     public String getTaskId() { return taskId; }
     public void setTaskId(String taskId) { this.taskId = taskId; }
 
@@ -214,4 +234,7 @@ public class DeployConfig {
     public void setRetryPrompter(com.flux.deploy.ftp.RetryUserPrompter v) {
         this.retryPrompter = v != null ? v : com.flux.deploy.ftp.RetryUserPrompter.abortAll();
     }
+
+    public com.flux.deploy.csv.CsvMergePlan getCsvMergePlan() { return csvMergePlan; }
+    public void setCsvMergePlan(com.flux.deploy.csv.CsvMergePlan csvMergePlan) { this.csvMergePlan = csvMergePlan; }
 }

@@ -1,6 +1,7 @@
 package com.flux.deploy.plugin.email;
 
 import com.flux.deploy.email.EmailTemplateStore;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
@@ -16,7 +17,10 @@ import org.jetbrains.annotations.Nullable;
 
 import javax.swing.Action;
 import javax.swing.JComponent;
+import javax.swing.border.Border;
 import java.awt.Dimension;
+import java.awt.GraphicsEnvironment;
+import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.io.IOException;
 import java.io.InputStream;
@@ -42,8 +46,8 @@ import java.util.function.Supplier;
  * 页面 {@code onLoadEnd} 时本类先注入 {@code window.fluxBridge}，紧接着调用
  * {@code __fluxBootstrap()}，保证 bootstrap 拉数据时桥已就绪。</p>
  *
- * <p>JCEF 可用性由调用方（{@code DeployToolWindowPanel.openEmailDialog()}）用
- * {@code JBCefApp.isSupported()} 守卫，本类构造前提是 JCEF 可用。</p>
+ * <p>JCEF 可用性由调用方（{@code DeployToolWindowPanel.openEmailDialog()}）经
+ * {@code JcefSupport.isAvailable()} 安全探测后守卫，本类构造前提是 JCEF 可用。</p>
  *
  * @author xumanyi
  * @date 2026-05-29
@@ -54,6 +58,19 @@ public final class EmailJcefDialog extends DialogWrapper {
 
     /** SPA 资源根（classpath） */
     private static final String RESOURCE_ROOT = "/email-web-editor";
+
+    /** 默认窗口宽度占主屏可用宽度的比例（按比例而非写死像素，适配不同分辨率）。 */
+    private static final double DEFAULT_WIDTH_RATIO = 0.66;
+    /** 默认窗口高度占主屏可用高度的比例。 */
+    private static final double DEFAULT_HEIGHT_RATIO = 0.76;
+    /** 默认宽度下限（逻辑像素）：保证顶部工具栏不换行、编辑器卡片排得下。 */
+    private static final int MIN_WIDTH = 960;
+    /** 默认宽度上限（逻辑像素）：避免超宽屏上铺得过大。 */
+    private static final int MAX_WIDTH = 1600;
+    /** 默认高度下限（逻辑像素）。 */
+    private static final int MIN_HEIGHT = 640;
+    /** 默认高度上限（逻辑像素）。 */
+    private static final int MAX_HEIGHT = 1040;
 
     private final EmailTemplateStore store;
     private final Supplier<Map<String, String>> runtimeDataSupplier;
@@ -126,16 +143,69 @@ public final class EmailJcefDialog extends DialogWrapper {
     @Override
     protected JComponent createCenterPanel() {
         JComponent comp = browser.getComponent();
-        comp.setPreferredSize(new Dimension(980, 720));
+        // 默认窗口尺寸按主屏可用区域的百分比计算（见 computeDefaultSize），而非写死像素，
+        // 以适配不同分辨率 / HiDPI 显示器。
+        // 注意：getDimensionServiceKey() 会持久化用户拖动后的尺寸，本默认仅在该 key
+        // 尚无记录时生效；已手动调整过窗口的环境会沿用 IDE 记住的尺寸。
+        // 重装插件会清空 DimensionService 记录，此时回落到本默认值——所以默认取屏幕的
+        // 较大比例，保证重装后首次打开仍是舒适宽度，无需再手动拖大。
+        comp.setPreferredSize(computeDefaultSize());
         return comp;
+    }
+
+    /**
+     * 计算弹窗默认尺寸：取主屏「可用区域」（已扣除任务栏 / Dock / 菜单栏）的固定百分比，
+     * 再用上下限收敛。按比例而非写死像素，避免在小屏超出可视范围、在超宽屏上显得过小。
+     *
+     * <p>返回值为逻辑像素（Swing 用户空间坐标），HiDPI 物理缩放由系统处理，无需在此换算。</p>
+     *
+     * @return 收敛到 [{@link #MIN_WIDTH}, {@link #MAX_WIDTH}] × [{@link #MIN_HEIGHT}, {@link #MAX_HEIGHT}] 的默认尺寸
+     * @author xumanyi
+     * @date 2026-06-03
+     */
+    private static Dimension computeDefaultSize() {
+        // getMaximumWindowBounds：主屏去掉任务栏 / Dock / 菜单栏后的可用区域（逻辑像素）
+        Rectangle avail = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        int width = clamp((int) Math.round(avail.width * DEFAULT_WIDTH_RATIO), MIN_WIDTH, MAX_WIDTH);
+        int height = clamp((int) Math.round(avail.height * DEFAULT_HEIGHT_RATIO), MIN_HEIGHT, MAX_HEIGHT);
+        return new Dimension(width, height);
+    }
+
+    /**
+     * 把数值收敛到 [min, max] 闭区间。
+     *
+     * @param value 原始值
+     * @param min   下限
+     * @param max   上限
+     * @return 收敛后的值
+     * @author xumanyi
+     * @date 2026-06-03
+     */
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    @Override
+    protected @Nullable Border createContentPaneBorder() {
+        // 去掉 DialogWrapper 默认的内容区 insets：让 JCEF 浏览器铺满整个对话框。
+        // 否则四周会露出对话框背景色——暗色主题下就是一圈黑边（web 页面本身是亮色铺满的）。
+        return null;
+    }
+
+    @Override
+    protected @Nullable JComponent createSouthPanel() {
+        // 即使 createActions 为空，DialogWrapper 仍会放一条 south panel 占据底部高度，
+        // 在暗色主题下露出一条背景色——就是用户看到的底部那条黑边。返回 null 彻底去掉。
+        // 关闭入口已在 web 顶部 X + 窗口标题栏系统关闭，底部按钮区无需保留。
+        return null;
     }
 
     @Override
     protected Action[] createActions() {
-        // SPA 自带全部操作（新建 / 保存 / 复制 / 导入 / 删除 / 恢复），底部只留一个「关闭」。
-        Action close = getCancelAction();
-        close.putValue(Action.NAME, "关闭");
-        return new Action[]{ close };
+        // 关闭按钮已移到 web 顶部工具栏（点击经 op=close 桥回调本类关闭）；
+        // 底部不再保留按钮区，避免对话框底部那条 panel 在暗色主题露出黑边。
+        // 窗口标题栏的系统关闭按钮（mac 左上 / win 右上）不受影响，仍可用。
+        return new Action[0];
     }
 
     @Override
@@ -171,6 +241,8 @@ public final class EmailJcefDialog extends DialogWrapper {
                     return new JBCefJSQuery.Response(
                             handleSave(extractJsonField(payload, "name"),
                                     extractJsonField(payload, "content")));
+                case "new":
+                    return new JBCefJSQuery.Response(handleNew(extractJsonField(payload, "name")));
                 case "delete":
                     return new JBCefJSQuery.Response(handleDelete(extractJsonField(payload, "name")));
                 case "restore":
@@ -181,6 +253,8 @@ public final class EmailJcefDialog extends DialogWrapper {
                     return new JBCefJSQuery.Response(
                             handleCopy(extractJsonField(payload, "html"),
                                     extractJsonField(payload, "plain")));
+                case "close":
+                    return new JBCefJSQuery.Response(handleClose());
                 default:
                     return new JBCefJSQuery.Response(errorJson("未知 op: " + op));
             }
@@ -246,6 +320,23 @@ public final class EmailJcefDialog extends DialogWrapper {
     }
 
     /**
+     * {@code op=new}：新建模板，初始内容取插件内置默认（{@link EmailTemplateStore#BUILTIN_DEFAULT_TEMPLATE}），
+     * 返回新模板名与内容。重名由 store 拦截（抛 {@link IllegalStateException}）。
+     *
+     * @param name 新模板名
+     * @return {@code {"name":...,"content":...}}
+     * @throws IOException 写文件失败
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private String handleNew(@Nullable String name) throws IOException {
+        store.ensureInitialized();
+        store.createNew(name, EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE);
+        return "{\"name\":" + jsonString(name)
+                + ",\"content\":" + jsonString(EmailTemplateStore.BUILTIN_DEFAULT_TEMPLATE) + "}";
+    }
+
+    /**
      * {@code op=delete}：删除模板（default 不可删，由 store 拦截）。
      *
      * @param name 模板名
@@ -261,7 +352,8 @@ public final class EmailJcefDialog extends DialogWrapper {
     }
 
     /**
-     * {@code op=restore}：恢复默认（default→内置出厂，其他→当前 default 内容），返回恢复后的内容。
+     * {@code op=restore}：把指定模板内容重置为插件内置默认（含 default 在内，统一恢复出厂内容），
+     * 返回恢复后的内容。
      *
      * @param name 模板名
      * @return {@code {"name":...,"content":...}}
@@ -314,6 +406,18 @@ public final class EmailJcefDialog extends DialogWrapper {
                 new HtmlClipboardTransferable(html == null ? "" : html,
                         plain == null ? "" : plain);
         Toolkit.getDefaultToolkit().getSystemClipboard().setContents(transferable, null);
+        return "{\"ok\":true}";
+    }
+
+    /**
+     * {@code op=close}：关闭对话框。web 顶部关闭按钮触发，切到 EDT 执行 close。
+     *
+     * @return {@code {"ok":true}}
+     * @author xumanyi
+     * @date 2026-05-29
+     */
+    private String handleClose() {
+        ApplicationManager.getApplication().invokeLater(() -> close(CANCEL_EXIT_CODE));
         return "{\"ok\":true}";
     }
 

@@ -190,6 +190,41 @@ public final class ArtifactPresenceValidator {
     }
 
     /**
+     * Vue 工程：校验选中模块的构建产物是否就绪。
+     *
+     * <p>每个模块要求 {@code dist/umd/{模块号}/manifest.json} 存在——它是模块入口清单，
+     * 主壳按它加载 js/css，缺失即产物未构建（或被清理）。与后端一致：插件不触发任何构建，
+     * 缺产物弹窗中止，让用户先在前端工程里把模块构建出来。</p>
+     *
+     * @param modulePath 工程根绝对路径；为 {@code null} 时直接返回 OK
+     * @param moduleIds  选中的模块号列表
+     * @return 校验结果（missing 内容为 {@code dist/umd/{模块号}/manifest.json} 相对路径）
+     * @author xumanyi
+     * @date 2026-08-13
+     */
+    public static Result validateVueModules(String modulePath, List<String> moduleIds) {
+        if (modulePath == null) {
+            return new Result(List.of(), null);
+        }
+        if (moduleIds == null || moduleIds.isEmpty()) {
+            return new Result(List.of(), modulePath);
+        }
+        Path projectRoot = Path.of(modulePath);
+        List<String> missing = new ArrayList<>();
+        for (String id : moduleIds) {
+            Path manifest = projectRoot
+                    .resolve(com.flux.deploy.plugin.service.VueProjectResolver.DIST_UMD_DIR)
+                    .resolve(id).resolve("manifest.json");
+            if (!Files.isRegularFile(manifest)) {
+                missing.add(com.flux.deploy.plugin.service.VueProjectResolver.DIST_UMD_DIR
+                        + "/" + id + "/manifest.json");
+            }
+        }
+        missing.sort(String::compareTo);
+        return new Result(missing, modulePath);
+    }
+
+    /**
      * 把 git status 输出的"X path"前缀剥掉，与 SourceSectionPanel.stripStatusPrefix 口径一致。
      *
      * @param raw 原始勾选项

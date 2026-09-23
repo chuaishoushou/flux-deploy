@@ -3,6 +3,7 @@ package com.flux.deploy.plugin.toolwindow;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.util.ui.JBFont;
 
 import javax.swing.*;
 import javax.swing.text.AttributeSet;
@@ -54,6 +55,10 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
     private static final Pattern LEVEL_LINE = Pattern.compile(
             "^(INFO|WARN|ERROR)\\s+(\\[[^\\]]+\\])\\s*(.*)$");
 
+    /** 形如 {@code [stage] message} 的无级别前缀行解析：让逐包/明细日志与带级别行的标签列对齐。 */
+    private static final Pattern STAGE_LINE = Pattern.compile(
+            "^(\\[[^\\]]+\\])\\s*(.*)$");
+
     private final JTextPane logArea;
     private final StyledDocument doc;
     private final JProgressBar progressBar;
@@ -77,7 +82,9 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
 
         this.logArea = new JTextPane();
         logArea.setEditable(false);
-        logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        // 等宽字号相对 IDE Label 字号推导（默认 13 → 11）而非写死：
+        // 用户在 IDE 外观设置里调整全局字号时（低分辨率屏幕常用手段），日志跟随缩放
+        logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBFont.label().lessOn(2f).getSize()));
         this.doc = logArea.getStyledDocument();
 
         this.styleInfo = buildStyle(null, false);
@@ -91,7 +98,11 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
         // 整段 leftIndent = N 像素、firstLineIndent = -N 像素。视觉效果：
         //   首行：时间戳从最左对齐 (-N + N = 0)
         //   续行：内容从 N 像素列起，不会再压回时间戳列
-        int indentPx = logArea.getFontMetrics(logArea.getFont()).charWidth('0') * 10;
+        int charW = logArea.getFontMetrics(logArea.getFont()).charWidth('0');
+        if (charW <= 0) {
+            charW = 7; // 构造期组件尚未显示，charWidth 可能返回 0；按默认字号等宽字约 7px 兜底，避免缩进塌为 0 致 RAW 行顶格
+        }
+        int indentPx = charW * 10;
         this.paragraphHanging = buildParagraph(indentPx, -indentPx);
         this.paragraphRaw = buildParagraph(indentPx, 0);
 
@@ -167,13 +178,62 @@ public class LogSectionPanel extends JBPanel<LogSectionPanel> {
             String level = m.group(1);
             String stage = m.group(2);
             String msg = m.group(3);
-            append(timestamp + "  " + stage + " ", styleInfo, paragraphHanging);
+            append(timestamp + "  " + padStage(stage) + " ", styleInfo, paragraphHanging);
             append(msg + "\n", pickLevelStyle(level), paragraphHanging);
             return;
         }
-        // 无级别前缀的行：按 INFO 默认色渲染
+        // 无级别前缀但以 [stage] 开头的行：同样按 padStage 对齐，避免与带级别前缀的同标签行错位
+        Matcher sm = STAGE_LINE.matcher(line);
+        if (sm.matches()) {
+            append(timestamp + "  " + padStage(sm.group(1)) + " ", styleInfo, paragraphHanging);
+            append(sm.group(2) + "\n", styleInfo, paragraphHanging);
+            return;
+        }
+        // 其余无级别前缀的行：按 INFO 默认色渲染
         append(timestamp + "  " + line + "\n", styleInfo, paragraphHanging);
     }
+
+    /**
+     * 标签视觉宽度对齐。
+     *
+     * <p>等宽字体下 CJK 字符宽度 = 2 倍西文字符。{@code [校验]}=6、{@code [残留锁]}=8，
+     * 直接 append 会导致后续正文起始列不齐。把所有标签按视觉宽度 pad 到 {@link #STAGE_VISUAL_WIDTH}，
+     * 使时间戳后的正文列对齐。</p>
+     *
+     * @param stage 形如 {@code [校验]} 的整段（含方括号）
+     * @return 末尾按需补西文空格后的标签字符串
+     * @author xumanyi
+     * @date 2026-06-02
+     */
+    private static String padStage(String stage) {
+        int visual = 0;
+        for (int i = 0; i < stage.length(); i++) {
+            visual += isWide(stage.charAt(i)) ? 2 : 1;
+        }
+        if (visual >= STAGE_VISUAL_WIDTH) return stage;
+        StringBuilder sb = new StringBuilder(stage);
+        for (int i = visual; i < STAGE_VISUAL_WIDTH; i++) sb.append(' ');
+        return sb.toString();
+    }
+
+    /** CJK 区段粗略判定：覆盖常见汉字 / 全角标点 / 全角片假名等等宽字体下占 2 倍宽度的字符。 */
+    private static boolean isWide(char c) {
+        return c >= 0x1100 && (
+                c <= 0x115F                       // Hangul Jamo
+                || (c >= 0x2E80 && c <= 0x303E)   // CJK Radicals / 标点
+                || (c >= 0x3041 && c <= 0x33FF)   // 日韩文字 / 注音 / 兼容
+                || (c >= 0x3400 && c <= 0x4DBF)   // CJK 扩展 A
+                || (c >= 0x4E00 && c <= 0x9FFF)   // CJK 基本
+                || (c >= 0xA000 && c <= 0xA4CF)   // 彝文
+                || (c >= 0xAC00 && c <= 0xD7A3)   // Hangul 音节
+                || (c >= 0xF900 && c <= 0xFAFF)   // CJK 兼容汉字
+                || (c >= 0xFE30 && c <= 0xFE4F)   // CJK 兼容形式
+                || (c >= 0xFF00 && c <= 0xFF60)   // 全角 ASCII
+                || (c >= 0xFFE0 && c <= 0xFFE6)); // 全角符号
+    }
+
+    /** 标签对齐目标宽度（西文等宽单位）：{@code [残留锁]} / {@code [暂存包]} 这类 3 字标签的宽度。 */
+    private static final int STAGE_VISUAL_WIDTH = 8;
 
     /**
      * 根据框体内文字判定收尾色：成功绿 / 失败红 / 中止橙
